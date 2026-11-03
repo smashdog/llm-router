@@ -1,0 +1,34 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KVMem · 历史导出</title>
+<style>body{margin:8vh auto;padding:24px;max-width:700px;background:#101716;color:#d9e5df;font:15px/1.7 system-ui}button{background:#9ddd9b;border:0;border-radius:9px;padding:12px 20px;cursor:pointer}code{color:#9ddd9b}pre{white-space:pre-wrap}small{color:#a8b6ad}</style>
+<h1>导出旧聊天历史 / Export old chats</h1><p>此页面只读取当前地址的浏览器记录，下载 JSON 备份。原记录不会更改或删除。<br>This page reads browser records at this address and downloads a JSON backup. Original records remain unchanged.</p><p id="origin"></p><button id="export">读取并下载 / Read & download</button><pre id="status" role="status"></pre><small>在统一控制台的“聊天 → 导入与备份”导入下载的文件。旧地址中的工具和附件原始数据也会包含在备份里。<br>Import the file in the unified console under Chat → Import & backup.</small>
+<script>
+document.querySelector('#origin').textContent=location.origin;
+const status=document.querySelector('#status');
+const result=req=>new Promise((ok,no)=>{req.onsuccess=()=>ok(req.result);req.onerror=()=>no(req.error)});
+document.querySelector('#export').onclick=async()=>{
+ const button=document.querySelector('#export');button.disabled=true;status.textContent='读取中 / Reading…';
+ try{
+  if(!indexedDB.databases)throw Error('当前浏览器无法列出历史数据库，请使用 Edge / Chrome。Use Edge or Chrome.');
+  const dbs=await indexedDB.databases(),conversations=[],legacy=[];
+  for(const {name} of dbs){
+   if(!['kvmem-chat','LlamaUi','LlamacppWebui'].includes(name))continue;
+   const request=indexedDB.open(name);request.onupgradeneeded=()=>request.transaction.abort();
+   const db=await result(request);
+   try{
+    if(!db.objectStoreNames.contains('conversations')||!db.objectStoreNames.contains('messages')){legacy.push({database:name,unsupportedStores:Array.from(db.objectStoreNames)});continue;}
+    const tx=db.transaction(['conversations','messages'],'readonly');
+    const [cs,ms]=await Promise.all([result(tx.objectStore('conversations').getAll()),result(tx.objectStore('messages').getAll())]);
+    for(const conv of cs){conversations.push({source:location.origin+':'+name,conv,messages:ms.filter(m=>m.convId===conv.id)});}
+   }finally{db.close();}
+  }
+  const raw=localStorage.getItem('strata.chat');
+  if(raw){const ms=JSON.parse(raw);if(!Array.isArray(ms))throw Error('Invalid strata.chat');
+   conversations.push({source:location.origin+':strata.chat',conv:{id:'strata-current',name:'PolyStrata',lastModified:Date.now()},messages:ms.map((m,i)=>({...m,id:String(i),convId:'strata-current',parent:i?String(i-1):null,children:i+1<ms.length?[String(i+1)]:[],content:m.text||'',reasoningContent:m.reasoning||'',timestamp:m.time||i,extra:(m.images||[]).filter(x=>x.url).map(x=>({type:'image',name:x.name,base64Url:x.url})),uiStatus:m.error?'error':m.stopped?'interrupted':'complete',legacySource:m}))});}
+  const old=localStorage.getItem('LlamaCppWebui');if(old)legacy.push({localStorage:'LlamaCppWebui',raw:JSON.parse(old)});
+  if(!conversations.length&&!legacy.length){status.textContent='当前地址未找到历史。请在原来的主机名和端口打开导出页。\nNo history at this origin. Use the original hostname and port.';return;}
+  const data={schema_version:1,source:location.origin,conversations,legacy},url=URL.createObjectURL(new Blob([JSON.stringify(data)],{type:'application/json'}));
+  const a=document.createElement('a');a.href=url;a.download='kvmem-history-'+location.port+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  status.textContent=conversations.length+' 对话 / chats · '+conversations.reduce((n,c)=>n+c.messages.length,0)+' 消息 / messages\n'+(legacy.length?'包含旧版原始备份，部分旧格式需保留备份另行转换。\nIncludes legacy raw backups that may need conversion.':'')+'已下载，原数据未更改。 / Downloaded; originals unchanged.';
+ }catch(e){status.textContent='导出失败 / Export failed: '+e;}finally{button.disabled=false;}
+};
+</script></html>

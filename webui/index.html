@@ -1,0 +1,1318 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LLM Router 控制台</title>
+<link rel="icon" href="/ui/favicon.svg" type="image/svg+xml" />
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0a0d12;
+    --panel: #11161f;
+    --panel-2: #151c27;
+    --line: #232d3d;
+    --line-soft: #1a2331;
+    --text: #e8edf5;
+    --muted: #8b98ab;
+    --faint: #5f6b7c;
+    --accent: #5eead4;
+    --accent-dim: #1f4d49;
+    --blue: #7dd3fc;
+    --amber: #fbbf24;
+    --red: #fb7185;
+    --green: #4ade80;
+    --radius: 16px;
+    --shadow: 0 20px 50px rgba(0, 0, 0, .35);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background:
+      radial-gradient(900px 500px at 15% -10%, rgba(94, 234, 212, .10), transparent 60%),
+      radial-gradient(700px 400px at 100% 0%, rgba(125, 211, 252, .07), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  button { font: inherit; }
+  code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+  .shell { width: min(1280px, calc(100% - 40px)); margin: 0 auto; padding: 28px 0 56px; }
+
+  header.top {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding-bottom: 22px;
+  }
+  .brand { display: flex; align-items: center; gap: 13px; min-width: 260px; }
+  .mark {
+    width: 42px; height: 42px; border-radius: 13px;
+    display: grid; place-items: center;
+    background: linear-gradient(145deg, rgba(94,234,212,.22), rgba(125,211,252,.08));
+    border: 1px solid rgba(94,234,212,.35);
+    color: var(--accent); font-weight: 800; letter-spacing: -.04em;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
+  }
+  .brand h1 { margin: 0; font-size: 18px; letter-spacing: -.01em; }
+  .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+  .top-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .live {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 11px; border-radius: 999px;
+    border: 1px solid var(--line); background: rgba(17,22,31,.8);
+    color: var(--muted); font-size: 12px; white-space: nowrap;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 0 4px rgba(74,222,128,.10); }
+  .dot.warn { background: var(--amber); box-shadow: 0 0 0 4px rgba(251,191,36,.10); }
+  .dot.bad { background: var(--red); box-shadow: 0 0 0 4px rgba(251,113,133,.10); }
+  .dot.live { background: var(--accent); box-shadow: 0 0 0 4px rgba(94,234,212,.12); animation: pulse 1.8s infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    min-height: 34px; padding: 7px 13px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    cursor: pointer; font-size: 13px; transition: border-color .15s, background .15s, transform .05s;
+    white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) { border-color: #37465d; background: #1a2331; }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: rgba(94,234,212,.12); border-color: rgba(94,234,212,.38); color: #b7fff3; }
+  .btn.primary:hover:not(:disabled) { background: rgba(94,234,212,.18); }
+  .btn.danger { color: #ffd1d9; border-color: rgba(251,113,133,.30); background: rgba(251,113,133,.08); }
+  .btn.danger:hover:not(:disabled) { background: rgba(251,113,133,.14); }
+  .btn.ghost { background: transparent; }
+  .btn.sm { min-height: 30px; padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+
+  .hero {
+    position: relative; overflow: hidden;
+    display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr);
+    gap: 26px; padding: 26px;
+    background: linear-gradient(160deg, rgba(21,28,39,.96), rgba(13,18,26,.92));
+    border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+  }
+  .hero::after {
+    content: ""; position: absolute; inset: -1px; pointer-events: none;
+    background: radial-gradient(500px 200px at 5% 0%, rgba(94,234,212,.10), transparent 70%);
+  }
+  .hero > * { position: relative; z-index: 1; }
+  .eyebrow { color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+  .hero h2 { margin: 8px 0 4px; font-size: clamp(26px, 3.6vw, 40px); letter-spacing: -.035em; line-height: 1.1; overflow-wrap: anywhere; }
+  .hero .sub { color: var(--muted); margin: 0; min-height: 24px; }
+  .hero .sub strong { color: var(--text); font-weight: 600; }
+  .hero-actions { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 20px; }
+  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-content: center; }
+  .metric {
+    padding: 13px 14px; border-radius: 12px; background: rgba(255,255,255,.025);
+    border: 1px solid var(--line-soft);
+  }
+  .metric .k { color: var(--faint); font-size: 11px; letter-spacing: .04em; }
+  .metric .v { margin-top: 4px; font-size: 20px; font-weight: 650; letter-spacing: -.02em; }
+  .metric .v small { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+
+  .alert {
+    display: none; margin-top: 16px; padding: 13px 15px; border-radius: 12px;
+    border: 1px solid rgba(251,113,133,.28); background: rgba(251,113,133,.08);
+    color: #ffd8df; font-size: 13px; overflow-wrap: anywhere;
+  }
+  .alert.show { display: block; }
+  .alert .label { font-weight: 650; margin-right: 8px; }
+  .alert.offline { border-color: rgba(251,191,36,.28); background: rgba(251,191,36,.07); color: #ffe9b8; }
+
+  [hidden] { display: none !important; }
+  .auth-panel {
+    padding: 16px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line);
+  }
+  .auth-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+  .auth-form {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 12px; align-items: end; margin-top: 14px;
+  }
+  .auth-field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+  .auth-field .name { color: var(--faint); font-size: 10.5px; }
+  .auth-field input {
+    width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line);
+    background: #0c121a; color: var(--text); font: inherit; font-size: 12.5px; outline: none;
+  }
+  .auth-field input:focus { border-color: rgba(94,234,212,.45); }
+  .auth-actions { display: flex; gap: 8px; flex-wrap: wrap; padding-bottom: 1px; }
+  .auth-note { margin: 12px 0 0; color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
+  .auth-error { margin: 10px 0 0; color: #ffc1ca; font-size: 12.5px; overflow-wrap: anywhere; }
+
+  section.block { margin-top: 26px; }
+  .section-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .section-head h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+  .section-head .hint { color: var(--muted); font-size: 12px; }
+  .section-head .spacer { margin-left: auto; }
+
+  .engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .engine {
+    padding: 16px; border-radius: 14px; background: var(--panel);
+    border: 1px solid var(--line); position: relative;
+  }
+  .engine.active { border-color: rgba(94,234,212,.34); background: linear-gradient(160deg, rgba(94,234,212,.07), var(--panel) 60%); }
+  .engine-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+  .engine-head h3 { margin: 0; font-size: 15px; text-transform: none; }
+  .engine-head .tag { margin-left: auto; }
+  .tag {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px;
+    border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+    font-size: 11px; line-height: 1.5; white-space: nowrap;
+  }
+  .tag.green { color: #b9f6cb; border-color: rgba(74,222,128,.28); background: rgba(74,222,128,.07); }
+  .tag.amber { color: #ffe5a3; border-color: rgba(251,191,36,.28); background: rgba(251,191,36,.07); }
+  .tag.red { color: #ffd0d9; border-color: rgba(251,113,133,.28); background: rgba(251,113,133,.07); }
+  .tag.blue { color: #c7efff; border-color: rgba(125,211,252,.26); background: rgba(125,211,252,.07); }
+  .kv { display: grid; grid-template-columns: 88px 1fr; gap: 5px 10px; font-size: 12.5px; }
+  .kv .k { color: var(--faint); }
+  .kv .v { color: var(--muted); overflow-wrap: anywhere; }
+  .kv .v.code { font-family: ui-monospace, Menlo, Consolas, monospace; color: #cfd8e5; }
+
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 13px; }
+  .search {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+    min-width: 260px; flex: 1; max-width: 380px;
+  }
+  .search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; }
+  .search input::placeholder { color: var(--faint); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    padding: 6px 11px; border-radius: 999px; border: 1px solid var(--line);
+    background: transparent; color: var(--muted); font-size: 12px; cursor: pointer;
+  }
+  .chip.on { color: #b7fff3; border-color: rgba(94,234,212,.38); background: rgba(94,234,212,.10); }
+  .count { color: var(--faint); font-size: 12px; margin-left: auto; }
+
+  .models { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+  .model {
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 15px; border-radius: 14px; background: var(--panel);
+    border: 1px solid var(--line); min-height: 190px;
+    transition: border-color .15s, transform .15s;
+  }
+  .model:hover { border-color: #2d3b50; }
+  .model.loaded { border-color: rgba(94,234,212,.34); background: linear-gradient(165deg, rgba(94,234,212,.06), var(--panel) 55%); }
+  .model.failed { border-color: rgba(251,113,133,.32); }
+  .model-head { display: flex; align-items: flex-start; gap: 8px; }
+  .model-title { min-width: 0; flex: 1; }
+  .model-title h3 { margin: 0; font-size: 14.5px; line-height: 1.35; overflow-wrap: anywhere; }
+  .model-title .id { display: block; margin-top: 3px; color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+  .status-pill { flex: 0 0 auto; }
+  .model .facts { display: flex; flex-wrap: wrap; gap: 5px 8px; color: var(--faint); font-size: 11.5px; }
+  .model .facts span { white-space: nowrap; }
+  .model .problem { margin: 0; color: #ffc1ca; font-size: 12px; }
+  .model .notes { margin: 0; color: var(--muted); font-size: 12px; }
+  .model .sampling { margin: 0; color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
+  .model .actions { display: flex; gap: 8px; margin-top: auto; padding-top: 4px; flex-wrap: wrap; }
+  .empty { padding: 32px; text-align: center; color: var(--faint); border: 1px dashed var(--line); border-radius: 14px; }
+
+  .switch-note { margin-top: 10px; color: var(--faint); font-size: 12px; }
+  .footer { margin-top: 34px; padding-top: 16px; border-top: 1px solid var(--line-soft); color: var(--faint); font-size: 11.5px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: space-between; }
+
+  .toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: min(380px, calc(100vw - 36px)); }
+  .toast {
+    padding: 11px 14px; border-radius: 11px; font-size: 13px;
+    background: #17202c; border: 1px solid #2c3a4e; color: var(--text);
+    box-shadow: 0 14px 34px rgba(0,0,0,.38); animation: in .18s ease-out;
+    overflow-wrap: anywhere;
+  }
+  .toast.ok { border-color: rgba(74,222,128,.32); }
+  .toast.bad { border-color: rgba(251,113,133,.36); }
+  @keyframes in { from { opacity: 0; transform: translateY(6px); } }
+
+  dialog {
+    width: min(460px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line);
+    border-radius: 15px; background: #101720; color: var(--text); box-shadow: var(--shadow);
+  }
+  dialog::backdrop { background: rgba(3,6,10,.66); backdrop-filter: blur(3px); }
+  .dialog-body { padding: 20px; }
+  .dialog-body h3 { margin: 0 0 6px; font-size: 16px; }
+  .dialog-body p { margin: 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 20px; border-top: 1px solid var(--line-soft); background: rgba(255,255,255,.015); }
+
+  dialog.wide { width: min(560px, calc(100vw - 32px)); }
+  .params-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-top: 14px; }
+  .params-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+  .params-grid label .name { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--faint); font-size: 10.5px; }
+  .params-grid input {
+    width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 8px;
+    border: 1px solid var(--line); background: #0c121a; color: var(--text);
+    font: inherit; font-size: 12.5px; outline: none;
+  }
+  .params-grid input:focus { border-color: rgba(94,234,212,.45); }
+  .params-hint { margin-top: 12px !important; color: var(--faint) !important; font-size: 12px !important; }
+  .params-error { margin-top: 10px !important; color: #ffc1ca !important; font-size: 12.5px !important; }
+  @media (max-width: 520px) { .params-grid { grid-template-columns: 1fr; } }
+
+  dialog.add-wide { width: min(680px, calc(100vw - 32px)); }
+  .radio-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  .radio-card {
+    flex: 1; min-width: 190px; display: flex; gap: 9px; align-items: flex-start;
+    padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel); cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .radio-card.on { border-color: rgba(94,234,212,.4); background: rgba(94,234,212,.07); }
+  .radio-card input { margin: 3px 0 0; accent-color: var(--accent); }
+  .radio-card .title { display: block; font-size: 13px; }
+  .radio-card .desc { display: block; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
+  .add-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-top: 14px; }
+  .add-fields label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+  .add-fields input {
+    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0c121a; color: var(--text); font: inherit; font-size: 12.5px; outline: none;
+  }
+  .add-fields input:focus { border-color: rgba(94,234,212,.45); }
+  .check { display: flex; gap: 8px; align-items: center; margin-top: 13px; color: var(--muted); font-size: 12.5px; }
+  .check input { accent-color: var(--accent); }
+  .progress {
+    display: flex; flex-direction: column; gap: 7px; margin-top: 14px; padding: 12px;
+    border: 1px solid var(--line-soft); border-radius: 10px; background: #0c121a;
+  }
+  .progress-step { display: flex; gap: 9px; align-items: flex-start; font-size: 12.5px; color: var(--muted); }
+  .progress-step .sdot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); margin-top: 5px; flex: 0 0 auto; }
+  .progress-step.running .sdot { background: var(--accent); animation: pulse 1.2s infinite; }
+  .progress-step.ok .sdot { background: var(--green); }
+  .progress-step.warn .sdot { background: var(--amber); }
+  .progress-step.fail .sdot { background: var(--red); }
+  .progress-step .detail { display: block; color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
+  @media (max-width: 520px) { .add-fields { grid-template-columns: 1fr; } }
+
+  @media (max-width: 820px) {
+    .shell { width: calc(100% - 24px); padding-top: 18px; }
+    .hero { grid-template-columns: 1fr; padding: 20px; }
+    .metrics { grid-template-columns: 1fr 1fr; }
+    .top-right { width: 100%; }
+    .search { max-width: none; }
+    .auth-form { grid-template-columns: 1fr; }
+    .auth-actions { padding-bottom: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <div class="brand">
+      <div class="mark" aria-hidden="true">LR</div>
+      <div>
+        <h1>LLM Router</h1>
+        <p>llama.cpp 与 KVMem 的统一网关</p>
+      </div>
+    </div>
+    <div class="top-right">
+      <span class="live" id="connection"><span class="dot" id="connection-dot"></span><span id="connection-text">正在连接</span></span>
+      <a class="btn ghost" href="/ui/" target="_blank" rel="noopener">打开聊天 UI</a>
+    </div>
+  </header>
+
+  <section class="hero" aria-labelledby="hero-title">
+    <div>
+      <div class="eyebrow">当前活动模型</div>
+      <h2 id="hero-title">空闲</h2>
+      <p class="sub" id="hero-sub">网关已启动，尚未加载模型。发起请求或从下方选择模型。</p>
+      <div class="hero-actions">
+        <button class="btn" id="btn-refresh">刷新</button>
+        <button class="btn" id="btn-reload">重新扫描模型</button>
+        <button class="btn danger" id="btn-stop">停止引擎</button>
+        <button class="btn ghost" id="btn-copy">复制 API 地址</button>
+      </div>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="k">服务阶段</div><div class="v" id="m-phase">—</div></div>
+      <div class="metric"><div class="k">运行中请求 / 队列</div><div class="v" id="m-traffic">0 <small>/ 0</small></div></div>
+      <div class="metric"><div class="k">模型总数</div><div class="v" id="m-models">—</div></div>
+      <div class="metric"><div class="k">运行时长</div><div class="v" id="m-uptime">—</div></div>
+    </div>
+  </section>
+
+  <div class="alert" id="alert" role="alert"></div>
+  <div class="alert offline" id="offline" role="status"></div>
+
+  <section class="block" aria-labelledby="auth-title">
+    <div class="section-head">
+      <h2 id="auth-title">服务端 API 密钥</h2>
+      <span class="hint">保护 /v1 推理接口和聊天 UI 的 /props 探测；聊天设置里填写的密钥只保存在浏览器，不会修改这里。</span>
+    </div>
+    <div class="auth-panel">
+      <div class="auth-summary">
+        <span class="tag" id="auth-state">读取中</span>
+        <span id="auth-detail">正在读取服务端密钥状态…</span>
+      </div>
+      <form id="auth-form" class="auth-form">
+        <label class="auth-field" id="auth-current-field" hidden>当前密钥 <span class="name">修改或清除时需要</span>
+          <input id="auth-current" type="password" autocomplete="current-password" placeholder="输入当前已启用的密钥" />
+        </label>
+        <label class="auth-field">新密钥 <span class="name">单行，最多 512 字符</span>
+          <input id="auth-new" type="password" autocomplete="new-password" placeholder="输入要启用的服务端密钥" />
+        </label>
+        <div class="auth-actions">
+          <button class="btn primary" type="submit" id="auth-save">保存密钥</button>
+          <button class="btn danger" type="button" id="auth-clear">清除密钥</button>
+        </div>
+      </form>
+      <p class="auth-error" id="auth-error" hidden></p>
+      <p class="auth-note">密钥保存在服务端 api-key 文件中，保存后立即生效。聊天 UI 的 API Key 只作为客户端 Authorization 请求头发送，不会写入服务端。</p>
+    </div>
+  </section>
+
+  <section class="block" aria-labelledby="engines-title">
+    <div class="section-head">
+      <h2 id="engines-title">引擎</h2>
+      <span class="hint">同一时间只运行一个引擎；切换模型时由网关自动停启。</span>
+    </div>
+    <div class="engines" id="engines"></div>
+  </section>
+
+  <section class="block" aria-labelledby="models-title">
+    <div class="section-head">
+      <h2 id="models-title">模型</h2>
+      <span class="hint">加载会按需启动对应引擎，首次加载可能需要几十秒。</span>
+      <button class="btn primary" id="btn-add-model" type="button" style="margin-left:auto">新增模型</button>
+    </div>
+    <div class="toolbar">
+      <div class="search">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+        <input id="search" type="search" placeholder="搜索模型、ID、别名…" autocomplete="off" />
+      </div>
+      <div class="chips" id="engine-filter" role="group" aria-label="按引擎筛选">
+        <button class="chip on" data-engine="all" type="button">全部</button>
+        <button class="chip" data-engine="llama" type="button">llama.cpp</button>
+        <button class="chip" data-engine="kvmem" type="button">KVMem</button>
+      </div>
+      <span class="count" id="model-count"></span>
+    </div>
+    <div class="models" id="models"></div>
+  </section>
+
+  <footer class="footer">
+    <span id="foot-version">llm-router</span>
+    <span>推理接口 /v1 与聊天 UI 的 /props 需要服务端 API Key（可在上方配置）；控制台与 /models 无鉴权，仅限可信内网使用，请勿直接暴露到公网。</span>
+  </footer>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<dialog id="confirm-dialog">
+  <form method="dialog">
+    <div class="dialog-body">
+      <h3 id="confirm-title">确认操作</h3>
+      <p id="confirm-message"></p>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" type="submit">取消</button>
+      <button class="btn danger" value="ok" id="confirm-ok" type="submit">确认</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="params-dialog" class="wide">
+  <form id="params-form">
+    <div class="dialog-body">
+      <h3 id="params-title">采样参数</h3>
+      <p id="params-sub">为此模型设置默认采样参数。</p>
+      <div class="params-grid">
+        <label>温度 <span class="name">temperature</span>
+          <input name="temperature" type="number" step="0.01" min="0" max="2" placeholder="留空不注入" /></label>
+        <label>top_p <span class="name">top_p</span>
+          <input name="top_p" type="number" step="0.01" min="0.01" max="1" placeholder="留空不注入" /></label>
+        <label>top_k <span class="name">top_k</span>
+          <input name="top_k" type="number" step="1" min="0" max="1000" placeholder="留空不注入" /></label>
+        <label>min_p <span class="name">min_p</span>
+          <input name="min_p" type="number" step="0.01" min="0" max="1" placeholder="留空不注入" /></label>
+        <label>重复惩罚 <span class="name">repetition_penalty</span>
+          <input name="repetition_penalty" type="number" step="0.01" min="0.5" max="2" placeholder="留空不注入" /></label>
+        <label>重复窗口 <span class="name">repeat_last_n</span>
+          <input name="repeat_last_n" type="number" step="1" min="-1" max="131072" placeholder="留空不注入" /></label>
+        <label>存在惩罚 <span class="name">presence_penalty</span>
+          <input name="presence_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
+        <label>频率惩罚 <span class="name">frequency_penalty</span>
+          <input name="frequency_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
+      </div>
+      <p class="params-hint" id="params-hint"></p>
+      <p class="params-error" id="params-error" hidden></p>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn" type="button" id="params-cancel">取消</button>
+      <button class="btn primary" type="submit" id="params-save">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="add-dialog" class="wide add-wide">
+  <form id="add-form">
+    <div class="dialog-body">
+      <h3>新增模型</h3>
+      <p>选择引擎并填写 GGUF 路径。网关会写入配置、启动引擎并做一次冒烟测试；不会复制或修改模型文件。</p>
+      <div class="radio-row" id="add-engines" role="radiogroup" aria-label="模型类型"></div>
+      <div class="add-fields">
+        <label>模型路径 <span class="name">.gguf 文件，必填</span>
+          <input id="add-model" type="text" spellcheck="false" placeholder="/path/to/model.gguf" /></label>
+        <label>视觉路径 <span class="name">mmproj .gguf，选填</span>
+          <input id="add-vision" type="text" spellcheck="false" placeholder="/path/to/mmproj.gguf（留空表示无视觉）" /></label>
+      </div>
+      <p class="params-hint" id="add-defaults"></p>
+      <div class="params-grid" id="add-params">
+        <label>温度 <span class="name">temperature</span>
+          <input name="temperature" type="number" step="0.01" min="0" max="2" placeholder="留空不注入" /></label>
+        <label>top_p <span class="name">top_p</span>
+          <input name="top_p" type="number" step="0.01" min="0.01" max="1" placeholder="留空不注入" /></label>
+        <label>top_k <span class="name">top_k</span>
+          <input name="top_k" type="number" step="1" min="0" max="1000" placeholder="留空不注入" /></label>
+        <label>min_p <span class="name">min_p</span>
+          <input name="min_p" type="number" step="0.01" min="0" max="1" placeholder="留空不注入" /></label>
+        <label>重复惩罚 <span class="name">repetition_penalty</span>
+          <input name="repetition_penalty" type="number" step="0.01" min="0.5" max="2" placeholder="留空不注入" /></label>
+        <label>重复窗口 <span class="name">repeat_last_n</span>
+          <input name="repeat_last_n" type="number" step="1" min="-1" max="131072" placeholder="留空不注入" /></label>
+        <label>存在惩罚 <span class="name">presence_penalty</span>
+          <input name="presence_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
+        <label>频率惩罚 <span class="name">frequency_penalty</span>
+          <input name="frequency_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
+      </div>
+      <label class="check"><input id="add-smoke" type="checkbox" checked /> 添加后运行冒烟测试（文本必测，有视觉时加测图片）</label>
+      <p class="params-error" id="add-error" hidden></p>
+      <div class="progress" id="add-progress" hidden></div>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn" type="button" id="add-cancel">关闭</button>
+      <button class="btn primary" type="submit" id="add-submit">添加并验证</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    status: null,
+    models: [],
+    auth: null,
+    authBusy: false,
+    filter: "all",
+    query: "",
+    busy: false,
+    offline: false,
+    sig: "",
+    timer: null,
+    lastUpdate: 0,
+    manage: null,
+    addJob: null,
+    addTimer: null,
+  };
+
+  const PHASES = {
+    idle: "空闲", queued: "排队", starting: "启动引擎", loading: "加载模型",
+    ready: "就绪", stopping: "停止引擎", unloading: "卸载模型", error: "错误",
+  };
+  const MODEL_STATES = {
+    loaded: { label: "已加载", cls: "green" },
+    loading: { label: "加载中", cls: "amber" },
+    failed: { label: "失败", cls: "red" },
+    unloaded: { label: "未加载", cls: "" },
+  };
+  const PARAM_FIELDS = [
+    "temperature", "top_p", "top_k", "min_p",
+    "repetition_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty",
+  ];
+  const PARAM_SUMMARY = [
+    ["temperature", "温度"], ["top_p", "top_p"], ["top_k", "top_k"], ["repetition_penalty", "重复"],
+  ];
+  let paramsModel = null;
+
+  function samplingSummary(params) {
+    if (!params || !Object.keys(params).length) return "采样参数：引擎默认";
+    const parts = PARAM_SUMMARY
+      .filter(([key]) => params[key] != null)
+      .map(([key, label]) => `${label} ${params[key]}`);
+    const count = Object.keys(params).length;
+    if (!parts.length) return `采样参数：已设置 ${count} 项`;
+    return "采样：" + parts.join(" · ") + (count > parts.length ? ` · 另 ${count - parts.length} 项` : "");
+  }
+
+  function esc(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function modelState(model) {
+    return (model.status && model.status.value) || model.state || "unloaded";
+  }
+
+  function fmtDuration(seconds) {
+    const s = Math.max(0, Math.floor(Number(seconds) || 0));
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (d) return `${d}天 ${h}时`;
+    if (h) return `${h}时 ${m}分`;
+    if (m) return `${m}分 ${s % 60}秒`;
+    return `${s}秒`;
+  }
+
+  function fmtTime(value) {
+    if (!value) return "—";
+    const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  function toast(message, kind = "") {
+    const node = document.createElement("div");
+    node.className = "toast " + kind;
+    node.textContent = message;
+    $("toasts").appendChild(node);
+    setTimeout(() => {
+      node.style.opacity = "0";
+      node.style.transform = "translateY(4px)";
+      setTimeout(() => node.remove(), 180);
+    }, 4200);
+  }
+
+  function askConfirm(title, message, okLabel = "确认", danger = true) {
+    return new Promise((resolve) => {
+      const dialog = $("confirm-dialog");
+      $("confirm-title").textContent = title;
+      $("confirm-message").textContent = message;
+      const ok = $("confirm-ok");
+      ok.textContent = okLabel;
+      ok.className = "btn " + (danger ? "danger" : "primary");
+      const done = (value) => {
+        dialog.removeEventListener("close", onClose);
+        resolve(value);
+      };
+      const onClose = () => done(dialog.returnValue === "ok");
+      dialog.addEventListener("close", onClose);
+      if (typeof dialog.showModal === "function") {
+        dialog.returnValue = "";
+        dialog.showModal();
+      } else {
+        dialog.removeEventListener("close", onClose);
+        resolve(window.confirm(`${title}\n\n${message}`));
+      }
+    });
+  }
+
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      cache: "no-store",
+      ...options,
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    });
+    let payload = null;
+    try { payload = await response.json(); } catch (_) { /* empty */ }
+    if (!response.ok) {
+      const message = payload && payload.error && payload.error.message
+        ? payload.error.message
+        : `HTTP ${response.status} ${response.statusText}`;
+      throw new Error(message);
+    }
+    return payload;
+  }
+
+  function setOffline(error) {
+    state.offline = true;
+    const box = $("offline");
+    box.textContent = "无法连接网关：" + error.message + "（将自动重试）";
+    box.classList.add("show");
+    const c = $("connection");
+    $("connection-dot").className = "dot bad";
+    $("connection-text").textContent = "离线";
+    c.title = error.message;
+  }
+
+  function setOnline() {
+    state.offline = false;
+    $("offline").classList.remove("show");
+  }
+
+  function setAuthError(message) {
+    const box = $("auth-error");
+    box.textContent = message || "";
+    box.hidden = !message;
+  }
+
+  function renderAuth() {
+    const auth = state.auth;
+    const tag = $("auth-state");
+    const detail = $("auth-detail");
+    if (!auth) {
+      tag.textContent = "读取中";
+      tag.className = "tag";
+      detail.textContent = "正在读取服务端密钥状态…";
+      return;
+    }
+    tag.textContent = auth.configured ? "已启用" : "未启用";
+    tag.className = "tag " + (auth.configured ? "green" : "");
+    const where = auth.source === "config" ? "配置文件" : (auth.key_file || "api-key 文件");
+    detail.textContent = auth.configured
+      ? `密钥 ${auth.hint || "****"} · 存储于 ${where} · 聊天 UI 需要填写同一密钥`
+      : "推理接口当前无需鉴权；设置后 /v1 与 /props 会要求 Bearer 密钥。";
+    $("auth-current-field").hidden = !auth.configured;
+    $("auth-current").required = !!auth.configured;
+    $("auth-current").disabled = state.authBusy;
+    $("auth-new").disabled = state.authBusy;
+    $("auth-save").disabled = state.authBusy;
+    $("auth-clear").disabled = state.authBusy || !auth.configured;
+  }
+
+  async function saveAuth(event) {
+    event.preventDefault();
+    if (state.authBusy) return;
+    const current = $("auth-current").value.trim();
+    const key = $("auth-new").value.trim();
+    if (!key) {
+      setAuthError("请输入新的服务端密钥。");
+      $("auth-new").focus();
+      return;
+    }
+    if (state.auth && state.auth.configured && !current) {
+      setAuthError("请输入当前密钥以确认修改。");
+      $("auth-current").focus();
+      return;
+    }
+    setAuthError("");
+    state.authBusy = true;
+    renderAuth();
+    try {
+      const payload = await api("/router/auth", {
+        method: "POST",
+        body: JSON.stringify({ api_key: key, current_api_key: current }),
+      });
+      state.auth = payload;
+      $("auth-new").value = "";
+      $("auth-current").value = "";
+      toast("服务端 API 密钥已保存并立即生效", "ok");
+    } catch (error) {
+      setAuthError(error.message);
+    } finally {
+      state.authBusy = false;
+      renderAuth();
+    }
+  }
+
+  async function clearAuth() {
+    if (state.authBusy || !state.auth || !state.auth.configured) return;
+    const current = $("auth-current").value.trim();
+    if (!current) {
+      setAuthError("请输入当前密钥以确认清除。");
+      $("auth-current").focus();
+      return;
+    }
+    const ok = await askConfirm(
+      "清除服务端 API 密钥",
+      "清除后 /v1 推理接口和 /props 将不再要求 API Key，聊天 UI 中已保存的密钥会被服务端忽略。",
+      "清除",
+      true,
+    );
+    if (!ok) return;
+    setAuthError("");
+    state.authBusy = true;
+    renderAuth();
+    try {
+      const payload = await api("/router/auth", {
+        method: "POST",
+        body: JSON.stringify({ clear: true, current_api_key: current }),
+      });
+      state.auth = payload;
+      $("auth-current").value = "";
+      $("auth-new").value = "";
+      toast("服务端 API 密钥已清除，鉴权已关闭", "ok");
+    } catch (error) {
+      setAuthError(error.message);
+    } finally {
+      state.authBusy = false;
+      renderAuth();
+    }
+  }
+
+  function renderStatus() {
+    const status = state.status;
+    if (!status) return;
+    const active = status.active_model;
+    $("hero-title").textContent = active || "空闲";
+    const phase = PHASES[status.phase] || status.phase || "未知";
+    const engineName = status.active_engine || "—";
+    let sub;
+    if (active) {
+      sub = `引擎 <strong>${esc(engineName)}</strong> · 阶段 <strong>${esc(phase)}</strong>`;
+      if (status.target_model && status.target_model !== active) {
+        sub += ` · 目标 <strong>${esc(status.target_model)}</strong>`;
+      }
+    } else if (status.async_operation && status.async_operation.kind === "load") {
+      sub = `正在加载 <strong>${esc(status.async_operation.model)}</strong>…`;
+    } else {
+      sub = "网关已启动，尚未加载模型。发起请求或从下方选择模型。";
+    }
+    $("hero-sub").innerHTML = sub;
+    $("m-phase").textContent = phase;
+    $("m-traffic").innerHTML = `${Number(status.in_flight) || 0} <small>/ ${Number(status.queue) || 0}</small>`;
+    $("m-models").textContent = status.models != null ? status.models : "—";
+    $("m-uptime").textContent = fmtDuration(status.uptime_s);
+
+    const parts = [];
+    $("connection-dot").className = "dot " + (status.phase === "error" ? "bad" : "ok");
+    $("connection-text").textContent = `在线 · v${status.version || "?"}`;
+    $("foot-version").textContent = `llm-router ${status.version || ""} · 更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+    if (status.last_switch) {
+      const sw = status.last_switch;
+      parts.push(`<span class="label">上一次切换</span>${esc(sw.from || "空闲")} → ${esc(sw.to)}，耗时 ${esc(sw.seconds)} 秒（${esc(sw.at)}）`);
+    }
+    const alert = $("alert");
+    if (status.last_error) {
+      parts.unshift(`<span class="label">最近错误</span>${esc(status.last_error)}`);
+    }
+    if (parts.length) {
+      alert.innerHTML = parts.join("<br>");
+      alert.classList.add("show");
+    } else {
+      alert.classList.remove("show");
+      alert.innerHTML = "";
+    }
+    $("btn-stop").disabled = state.busy || (!status.active_model && !(status.engine && status.engine.alive));
+    $("btn-reload").disabled = state.busy;
+  }
+
+  function renderEngines() {
+    const status = state.status;
+    const host = $("engines");
+    if (!status) { host.innerHTML = '<div class="empty">等待网关状态…</div>'; return; }
+    const engines = status.engines || {};
+    const ids = Object.keys(engines);
+    if (!ids.length) { host.innerHTML = '<div class="empty">未配置引擎</div>'; return; }
+    host.innerHTML = ids.map((id) => {
+      const e = engines[id] || {};
+      const active = status.active_engine === id;
+      const dotClass = e.alive ? "ok" : "bad";
+      return `
+        <article class="engine ${active ? "active" : ""}">
+          <div class="engine-head">
+            <span class="dot ${dotClass}"></span>
+            <h3>${esc(id)}</h3>
+            ${active ? '<span class="tag blue">活动引擎</span>' : ""}
+            <span class="tag ${e.alive ? "green" : "red"}">${e.alive ? "运行中" : "已停止"}</span>
+          </div>
+          <div class="kv">
+            <span class="k">类型</span><span class="v">${esc(e.kind || "—")}</span>
+            <span class="k">内部地址</span><span class="v code">${esc(e.host || "—")}:${esc(e.port || "—")}</span>
+            <span class="k">PID</span><span class="v code">${esc(e.pid || "—")}</span>
+            <span class="k">已加载模型</span><span class="v code">${esc(e.model || "—")}</span>
+            <span class="k">启动时间</span><span class="v">${esc(fmtTime(e.started_at))}</span>
+          </div>
+        </article>`;
+    }).join("");
+  }
+
+  function renderModels() {
+    const host = $("models");
+    const query = state.query.trim().toLowerCase();
+    const models = state.models.filter((m) => {
+      if (state.filter !== "all" && m.engine !== state.filter) return false;
+      if (!query) return true;
+      const hay = [m.id, m.model, m.name, m.display_name, m.engine, m.notes, m.quantization,
+        ...(Array.isArray(m.aliases) ? m.aliases : [])].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(query);
+    });
+    $("model-count").textContent = `${models.length} / ${state.models.length} 个模型`;
+    if (!models.length) {
+      host.innerHTML = '<div class="empty">没有匹配的模型</div>';
+      return;
+    }
+    const status = state.status || {};
+    const active = status.active_model;
+    const busy = state.busy || status.async_operation != null || status.switching;
+    host.innerHTML = models.map((m) => {
+      const value = modelState(m);
+      const meta = MODEL_STATES[value] || MODEL_STATES.unloaded;
+      const facts = [];
+      if (m.context_length) facts.push(`上下文 ${Number(m.context_length).toLocaleString()}`);
+      if (m.quantization) facts.push(m.quantization);
+      if (m.multimodal) facts.push("视觉");
+      if (m.reasoning) facts.push("思考");
+      if (m.source) facts.push(m.source);
+      if (Array.isArray(m.aliases) && m.aliases.length) facts.push("别名 " + m.aliases.join(", "));
+      const unavailable = m.available === false;
+      const loading = value === "loading";
+      const loaded = value === "loaded";
+      const showError = m.problem || (value === "failed" && m.error);
+      return `
+        <article class="model ${loaded ? "loaded" : ""} ${value === "failed" ? "failed" : ""}">
+          <div class="model-head">
+            <div class="model-title">
+              <h3>${esc(m.name || m.display_name || m.id)}</h3>
+              <code class="id">${esc(m.id)}</code>
+            </div>
+            <span class="tag ${meta.cls} status-pill">${esc(meta.label)}</span>
+          </div>
+          <div class="facts">
+            <span class="tag">${esc(m.engine)}</span>
+            ${facts.map((f) => `<span>${esc(f)}</span>`).join("")}
+          </div>
+          <p class="sampling">${esc(samplingSummary(m.params))}</p>
+          ${m.notes ? `<p class="notes">${esc(m.notes)}</p>` : ""}
+          ${showError ? `<p class="problem">${esc(showError)}</p>` : ""}
+          <div class="actions">
+            <button class="btn sm ${loaded ? "" : "primary"}" data-action="load" data-id="${esc(m.id)}"
+              ${loaded || loading || unavailable || busy ? "disabled" : ""}>${loaded ? "已加载" : loading ? "加载中…" : "加载"}</button>
+            <button class="btn sm" data-action="unload" data-id="${esc(m.id)}"
+              ${!loaded || busy ? "disabled" : ""}>卸载</button>
+            <button class="btn sm" data-action="params" data-id="${esc(m.id)}">参数</button>
+            ${m.deletable ? `<button class="btn sm danger" data-action="delete" data-id="${esc(m.id)}"
+              ${busy ? "disabled" : ""}>删除配置</button>` : ""}
+            ${active === m.id ? '<span class="tag blue" style="margin-left:auto;align-self:center">活动模型</span>' : ""}
+          </div>
+        </article>`;
+    }).join("");
+  }
+
+  function render() {
+    renderStatus();
+    renderEngines();
+    renderModels();
+    renderAuth();
+    const status = state.status || {};
+    $("btn-refresh").disabled = false;
+  }
+
+  async function refresh() {
+    if (state.loading) return;
+    state.loading = true;
+    try {
+      const [status, models, auth] = await Promise.all([
+        api("/router/status"),
+        api("/models"),
+        state.authBusy ? Promise.resolve(state.auth) : api("/router/auth"),
+      ]);
+      state.status = status;
+      state.models = Array.isArray(models.data) ? models.data : [];
+      state.auth = auth;
+      state.lastUpdate = Date.now();
+      setOnline();
+      render();
+    } catch (error) {
+      setOffline(error);
+    } finally {
+      state.loading = false;
+    }
+  }
+
+  async function mutate(path, body, successMessage) {
+    if (state.busy) return;
+    state.busy = true;
+    render();
+    try {
+      const payload = await api(path, { method: "POST", body: JSON.stringify(body || {}) });
+      toast(successMessage || "操作已提交", "ok");
+      if (payload && payload.status) toast(`状态：${payload.status}`, "ok");
+      await refresh();
+      setTimeout(refresh, 700);
+      setTimeout(refresh, 1800);
+      setTimeout(refresh, 3500);
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      state.busy = false;
+      render();
+    }
+  }
+
+  async function loadModel(id) {
+    const status = state.status || {};
+    if (status.active_model && status.active_model !== id) {
+      const cross = status.active_engine !== (state.models.find((m) => m.id === id) || {}).engine;
+      const ok = await askConfirm(
+        cross ? "切换引擎并加载模型" : "切换模型",
+        `当前加载：${status.active_model}。加载 ${id} 前会等待进行中的生成结束，` +
+          (cross ? "然后停止当前引擎并启动另一个引擎。" : "然后在同一引擎内切换模型。"),
+        "加载",
+        false,
+      );
+      if (!ok) return;
+    }
+    await mutate("/models/load", { model: id }, `已请求加载 ${id}`);
+  }
+
+  async function unloadModel(id) {
+    const ok = await askConfirm(
+      "卸载模型",
+      `将卸载 ${id}。引擎进程保持运行，空闲时不再占用模型内存。`,
+      "卸载",
+      true,
+    );
+    if (ok) await mutate("/models/unload", { model: id }, `已请求卸载 ${id}`);
+  }
+
+  function openParams(id) {
+    const model = state.models.find((m) => m.id === id);
+    if (!model) return;
+    paramsModel = model.id;
+    const dialog = $("params-dialog");
+    const form = $("params-form");
+    form.reset();
+    const params = model.params || {};
+    for (const key of PARAM_FIELDS) {
+      const input = form.elements[key];
+      if (input && params[key] != null) input.value = params[key];
+    }
+    const kv = model.engine === "kvmem";
+    form.elements.top_k.min = kv ? 1 : 0;
+    form.elements.top_k.max = kv ? 64 : 1000;
+    form.elements.repeat_last_n.min = kv ? 1 : -1;
+    $("params-title").textContent = `采样参数 · ${model.name || model.display_name || model.id}`;
+    $("params-sub").textContent =
+      `模型 ${model.id}（${model.engine}）。留空的字段不注入，使用引擎默认值；请求中显式给出的参数优先。`;
+    $("params-hint").textContent = kv
+      ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1。"
+      : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。";
+    $("params-error").textContent = "";
+    $("params-error").hidden = true;
+    $("params-save").disabled = false;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+  }
+
+  async function saveParams(event) {
+    event.preventDefault();
+    if (!paramsModel) return;
+    const form = $("params-form");
+    const values = {};
+    for (const key of PARAM_FIELDS) {
+      const raw = form.elements[key].value.trim();
+      values[key] = raw === "" ? null : Number(raw);
+      if (values[key] !== null && !Number.isFinite(values[key])) {
+        $("params-error").textContent = `${key} 不是有效数字`;
+        $("params-error").hidden = false;
+        return;
+      }
+    }
+    const button = $("params-save");
+    button.disabled = true;
+    try {
+      const payload = await api("/router/params", {
+        method: "POST",
+        body: JSON.stringify({ model: paramsModel, params: values }),
+      });
+      const model = state.models.find((m) => m.id === paramsModel);
+      if (model) model.params = payload.params || {};
+      $("params-dialog").close();
+      toast(`已保存 ${paramsModel} 的采样参数`, "ok");
+      await refresh();
+    } catch (error) {
+      $("params-error").textContent = error.message;
+      $("params-error").hidden = false;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function stopEngine() {
+    const ok = await askConfirm(
+      "停止引擎",
+      "将先等待进行中的生成结束，然后停止当前引擎并释放显存。之后加载任意模型会自动重启对应引擎。",
+      "停止引擎",
+      true,
+    );
+    if (ok) await mutate("/router/stop", {}, "引擎已停止");
+  }
+
+  function showAddError(message) {
+    const box = $("add-error");
+    box.textContent = message || "";
+    box.hidden = !message;
+  }
+
+  function selectedAddEngine() {
+    const input = $("add-form").querySelector('input[name="add-engine"]:checked');
+    return input ? input.value : "";
+  }
+
+  function fillAddParams(engineId) {
+    const engines = (state.manage && state.manage.engines) || {};
+    const engine = engines[engineId];
+    const form = $("add-form");
+    for (const key of PARAM_FIELDS) {
+      const input = form.elements[key];
+      if (!input) continue;
+      const value = engine && engine.default_params ? engine.default_params[key] : null;
+      input.value = value == null ? "" : value;
+    }
+    const kv = engine && engine.kind === "kvmem";
+    form.elements.top_k.min = kv ? 1 : 0;
+    form.elements.top_k.max = kv ? 64 : 1000;
+    form.elements.repeat_last_n.min = kv ? 1 : -1;
+    $("add-defaults").textContent = !engine ? "" : engine.kind === "kvmem"
+      ? "KV 精度 k8v8（--kv q8_0；引擎不支持时省略，使用默认）；上下文取 GGUF 上限；视觉默认 CPU；其余引擎参数复制 ornith 模板，采样默认来自 ornith。"
+      : "KV 精度 k8v8（cache-type-k/v = q8_0；引擎不支持时省略）；上下文取 GGUF 上限；有视觉时 mmproj 默认 CPU；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
+  }
+
+  function renderAddEngines() {
+    const engines = Object.values((state.manage && state.manage.engines) || {});
+    const host = $("add-engines");
+    const submit = $("add-submit");
+    if (!engines.length) {
+      host.innerHTML = '<div class="empty">没有支持新增模型的引擎</div>';
+      submit.disabled = true;
+      return;
+    }
+    submit.disabled = false;
+    host.innerHTML = engines.map((engine, index) => `
+      <label class="radio-card ${index === 0 ? "on" : ""}">
+        <input type="radio" name="add-engine" value="${esc(engine.engine)}" ${index === 0 ? "checked" : ""} />
+        <span>
+          <span class="title">${esc(engine.label || engine.engine)}</span>
+          <span class="desc">${esc(engine.kind)} · ${esc(engine.preset || engine.template || engine.models_dir || "—")}</span>
+        </span>
+      </label>`).join("");
+    fillAddParams(engines[0].engine);
+  }
+
+  async function openAddDialog() {
+    const dialog = $("add-dialog");
+    const form = $("add-form");
+    form.reset();
+    showAddError("");
+    $("add-progress").hidden = true;
+    $("add-progress").innerHTML = "";
+    const submit = $("add-submit");
+    submit.disabled = false;
+    submit.textContent = "添加并验证";
+    delete submit.dataset.done;
+    state.addJob = null;
+    clearTimeout(state.addTimer);
+    try {
+      state.manage = await api("/router/models/manage");
+    } catch (error) {
+      showAddError(error.message);
+    }
+    renderAddEngines();
+    if (typeof dialog.showModal === "function") dialog.showModal();
+  }
+
+  function renderAddJob(job) {
+    const box = $("add-progress");
+    box.hidden = false;
+    box.innerHTML = (job.steps || []).map((step) => `
+      <div class="progress-step ${esc(step.status)}">
+        <span class="sdot"></span>
+        <span>${esc(step.label)}${step.detail ? `<span class="detail">${esc(step.detail)}</span>` : ""}</span>
+      </div>`).join("");
+    if (job.error) showAddError(job.error);
+    else if (job.status === "ok") showAddError("");
+    if (job.rollback) {
+      box.insertAdjacentHTML("beforeend",
+        `<div class="progress-step fail"><span class="sdot"></span><span>配置已回滚<span class="detail">${esc((job.removed || []).join("，") || "新增配置已删除")}</span></span></div>`);
+    }
+  }
+
+  function pollAddJob(id) {
+    clearTimeout(state.addTimer);
+    state.addTimer = setTimeout(async () => {
+      const submit = $("add-submit");
+      try {
+        const job = await api("/router/models/job?id=" + encodeURIComponent(id));
+        state.addJob = job;
+        renderAddJob(job);
+        if (job.status === "running") {
+          pollAddJob(id);
+          return;
+        }
+        submit.disabled = false;
+        submit.textContent = job.status === "ok" ? "完成" : "重试";
+        if (job.status === "ok") submit.dataset.done = "1";
+        else delete submit.dataset.done;
+        await refresh();
+        toast(
+          job.status === "ok"
+            ? `模型 ${job.name || ""} 已添加并通过验证`
+            : `添加失败：${job.error || "未知错误"}`,
+          job.status === "ok" ? "ok" : "bad",
+        );
+      } catch (error) {
+        submit.disabled = false;
+        submit.textContent = "重试";
+        showAddError(error.message);
+      }
+    }, 1200);
+  }
+
+  async function submitAdd(event) {
+    event.preventDefault();
+    const submit = $("add-submit");
+    if (submit.dataset.done === "1") {
+      $("add-dialog").close();
+      return;
+    }
+    const form = $("add-form");
+    const engine = selectedAddEngine();
+    if (!engine) { showAddError("请选择模型类型。"); return; }
+    const model = $("add-model").value.trim();
+    if (!model) { showAddError("请填写模型路径。"); $("add-model").focus(); return; }
+    const params = {};
+    for (const key of PARAM_FIELDS) {
+      const raw = form.elements[key].value.trim();
+      if (raw === "") continue;
+      const value = Number(raw);
+      if (!Number.isFinite(value)) { showAddError(`${key} 不是有效数字。`); return; }
+      params[key] = value;
+    }
+    const body = {
+      engine,
+      model,
+      vision: $("add-vision").value.trim() || null,
+      smoke: $("add-smoke").checked,
+    };
+    if (Object.keys(params).length) body.params = params;
+    submit.disabled = true;
+    submit.textContent = "正在验证…";
+    showAddError("");
+    try {
+      const job = await api("/router/models/add", { method: "POST", body: JSON.stringify(body) });
+      state.addJob = job;
+      renderAddJob(job);
+      pollAddJob(job.id);
+    } catch (error) {
+      submit.disabled = false;
+      submit.textContent = "添加并验证";
+      showAddError(error.message);
+    }
+  }
+
+  async function deleteModel(id) {
+    if (state.busy) return;
+    const ok = await askConfirm(
+      "删除模型配置",
+      `将删除 ${id} 的引擎配置，不会删除模型文件。若该模型正在运行，会先停止引擎。`,
+      "删除配置",
+      true,
+    );
+    if (!ok) return;
+    state.busy = true;
+    render();
+    try {
+      const payload = await api("/router/models/delete", {
+        method: "POST",
+        body: JSON.stringify({ model: id }),
+      });
+      toast(payload.note || `已删除 ${id} 的配置`, "ok");
+      await refresh();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      state.busy = false;
+      render();
+    }
+  }
+
+  async function reloadRegistry() {
+    if (state.busy) return;
+    try {
+      state.busy = true;
+      render();
+      const payload = await api("/router/reload", { method: "POST", body: "{}" });
+      toast(`已重新扫描 ${payload.models} 个模型`, "ok");
+      await refresh();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      state.busy = false;
+      render();
+    }
+  }
+
+  async function copyApi() {
+    const url = location.origin + "/v1";
+    let copied = false;
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(url);
+        copied = true;
+      } catch (_) {}
+    }
+    if (!copied) {
+      try {
+        const area = document.createElement("textarea");
+        area.value = url;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.top = "-1000px";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        try {
+          area.focus();
+          area.select();
+          area.setSelectionRange(0, url.length);
+          copied = document.execCommand("copy");
+        } finally {
+          area.remove();
+        }
+      } catch (_) {
+        copied = false;
+      }
+    }
+    if (copied) toast("已复制：" + url, "ok");
+    else toast("复制失败，请手动复制：" + url, "bad");
+  }
+
+  $("btn-refresh").addEventListener("click", refresh);
+  $("btn-reload").addEventListener("click", reloadRegistry);
+  $("btn-stop").addEventListener("click", stopEngine);
+  $("btn-copy").addEventListener("click", copyApi);
+  $("btn-add-model").addEventListener("click", () => openAddDialog().catch((e) => toast(e.message, "bad")));
+  $("add-form").addEventListener("submit", submitAdd);
+  $("add-cancel").addEventListener("click", () => $("add-dialog").close());
+  $("add-engines").addEventListener("change", (event) => {
+    const input = event.target.closest('input[name="add-engine"]');
+    if (!input) return;
+    document.querySelectorAll("#add-engines .radio-card").forEach((card) => {
+      card.classList.toggle("on", card.contains(input));
+    });
+    fillAddParams(input.value);
+  });
+  $("params-form").addEventListener("submit", saveParams);
+  $("params-cancel").addEventListener("click", () => $("params-dialog").close());
+  $("auth-form").addEventListener("submit", saveAuth);
+  $("auth-clear").addEventListener("click", clearAuth);
+
+  $("search").addEventListener("input", (event) => {
+    state.query = event.target.value;
+    renderModels();
+  });
+
+  $("engine-filter").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-engine]");
+    if (!button) return;
+    state.filter = button.dataset.engine;
+    document.querySelectorAll("#engine-filter .chip").forEach((chip) => {
+      chip.classList.toggle("on", chip === button);
+    });
+    renderModels();
+  });
+
+  $("models").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-action]");
+    if (!button || button.disabled) return;
+    const id = button.dataset.id;
+    if (button.dataset.action === "load") loadModel(id).catch((e) => toast(e.message, "bad"));
+    if (button.dataset.action === "unload") unloadModel(id).catch((e) => toast(e.message, "bad"));
+    if (button.dataset.action === "params") openParams(id);
+    if (button.dataset.action === "delete") deleteModel(id).catch((e) => toast(e.message, "bad"));
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh();
+  });
+
+  refresh();
+  state.timer = setInterval(refresh, 1800);
+})();
+</script>
+</body>
+</html>

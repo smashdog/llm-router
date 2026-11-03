@@ -1,0 +1,18 @@
+# runtime state and secrets
+api-key
+state.json
+router.pid
+logs/
+backups/
+tmp/
+
+# host-specific configuration
+config.json
+config.json.bak*
+model-params.json
+models.ini
+models/
+
+# python
+__pycache__/
+*.pyc

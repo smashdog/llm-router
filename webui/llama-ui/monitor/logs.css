@@ -1,0 +1,69 @@
+/* Runtime console: reuse the monitor palette, theme and density. */
+#app .s-log-page { max-width:1440px; margin:auto; padding:24px; }
+#app .s-log-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px; margin-bottom:18px; }
+#app .s-log-heading h1 { font-size:24px; margin:0; font-weight:600; }
+#app .s-log-heading p { margin:4px 0 0; color:var(--s-muted); font-size:13px; }
+#app .s-log-actions { display:flex; gap:8px; }
+#app .s-log-actions [aria-pressed="true"] { color:var(--s-green-text); background:var(--s-green-tint); }
+#app .s-log-engine { display:flex; flex-wrap:wrap; align-items:center; gap:14px; border:1px solid var(--s-line); background:var(--s-surface); border-radius:12px; padding:14px 16px; margin-bottom:16px; }
+#app .s-log-monogram { display:grid; place-items:center; width:36px; height:36px; border-radius:9px; color:var(--s-green-text); background:var(--s-green-tint); font-weight:600; flex:none; }
+#app .s-log-identity { display:flex; flex:1 1 180px; min-width:0; flex-direction:column; }
+#app .s-log-identity strong { font-weight:600; }
+#app [data-log-model] { color:var(--s-muted); font-size:12px; overflow-wrap:anywhere; }
+#app .s-log-session { display:flex; flex-direction:column; border-left:1px solid var(--s-line); padding-left:18px; gap:3px; font-size:12px; font-variant-numeric:tabular-nums; }
+#app .s-log-session > :first-child { color:var(--s-muted); }
+#app .s-log-state { display:flex; align-items:center; gap:7px; margin-left:auto; color:var(--s-muted); font-size:12px; }
+#app .s-log-state::before { content:""; height:6px; width:6px; border-radius:50%; background:currentColor; flex:none; }
+#app .s-log-state[data-state="live"] { color:var(--s-green-text); }
+#app .s-log-state[data-state="paused"] { color:var(--s-warn-text); }
+#app .s-log-state[data-state="error"] { color:var(--s-error-text); }
+#app .s-log-notice { border-radius:8px; background:var(--s-warn-tint); color:var(--s-warn-text); margin-bottom:12px; padding:10px 14px; font-size:13px; }
+#app .s-log-console { overflow:hidden; border:1px solid var(--s-line); border-radius:12px; background:var(--s-surface); }
+#app .s-log-tools { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; padding:12px 16px; border-bottom:1px solid var(--s-line); }
+#app .s-log-search { flex:1 1 220px; min-width:0; max-width:360px; background:var(--s-bg); border:1px solid var(--s-line); color:var(--s-ink); padding:9px 12px; border-radius:8px; font:inherit; font-size:13px; }
+#app .s-log-search::placeholder { color:var(--s-muted); }
+#app .s-log-wrap { display:flex; align-items:center; gap:6px; color:var(--s-muted); font-size:12px; white-space:nowrap; }
+#app .s-log-wrap input { margin:0; accent-color:var(--s-accent); }
+#app .s-log-output-head { padding:9px 16px; display:flex; flex-wrap:wrap; justify-content:space-between; gap:10px; background:var(--s-soft); font-size:12px; color:var(--s-muted); }
+#app .s-log-output-head button { border:0; background:transparent; color:var(--s-muted); padding:0; margin-left:14px; font-size:12px; }
+#app .s-log-output-head button[aria-pressed="true"] { color:var(--s-ink); text-decoration:underline; text-underline-offset:4px; }
+#app .s-log-scroll { height:clamp(320px,55vh,720px); overflow:auto; scrollbar-color:var(--s-line) transparent; scrollbar-width:thin; overscroll-behavior:contain; overflow-anchor:none; }
+#app [data-log-rows] { padding:16px 0; }
+#app .s-log-row { min-height:1.85em; padding:0 20px; color:var(--s-ink); font:12px/1.85 "Cascadia Code","SFMono-Regular",Consolas,"Microsoft YaHei",monospace; border-left:2px solid transparent; tab-size:4; }
+#app .s-log-row:hover { background:var(--s-soft); }
+#app .s-log-message { white-space:pre-wrap; overflow-wrap:anywhere; }
+#app .s-log-nowrap [data-log-rows] { width:max-content; min-width:100%; }
+#app .s-log-nowrap .s-log-message { white-space:pre; overflow-wrap:normal; }
+#app .s-log-token-time { color:var(--s-muted); }
+#app .s-log-token-tag,#app .s-log-token-info { color:var(--s-info); }
+#app .s-log-token-debug { color:var(--s-muted); }
+#app .s-log-token-metric { color:var(--s-green-text); }
+#app .s-log-token-warn { color:var(--s-warn-text); font-weight:600; }
+#app .s-log-token-error { color:var(--s-error-text); font-weight:600; }
+#app .s-log-page:not(.s-log-plain) .s-log-row[data-level="warn"] { background:var(--s-warn-tint); border-left-color:var(--s-warn-text); }
+#app .s-log-page:not(.s-log-plain) .s-log-row[data-level="error"] { background:var(--s-error-tint); border-left-color:var(--s-error-text); }
+#app .s-log-message mark { color:var(--s-ink); background:var(--s-warn-tint); box-shadow:inset 0 -1px var(--s-warn-text); border-radius:2px; }
+#app .s-log-empty { padding:85px 24px; text-align:center; color:var(--s-muted); }
+#app .s-log-footer,#app .s-log-footnote { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; color:var(--s-muted); font-size:12px; }
+#app .s-log-footer { border-top:1px solid var(--s-line); padding:12px 16px; }
+#app .s-log-footer > div,#app .s-log-footer label { display:flex; align-items:center; gap:10px; }
+#app .s-log-footer label { color:var(--s-green-text); gap:6px; }
+#app .s-log-footer input { margin:0; accent-color:var(--s-accent); }
+#app .s-log-footnote { margin-top:12px; font-size:11px; }
+#app[data-density="compact"] .s-log-page { padding:16px; }
+#app[data-density="compact"] .s-log-row { line-height:1.6; min-height:1.6em; }
+#app[data-density="compact"] .s-log-engine { padding:9px 13px; }
+@media(max-width:520px) {
+  #app .s-log-page { padding:16px 12px; }
+  #app .s-log-heading h1 { font-size:21px; }
+  #app .s-log-actions { width:100%; }
+  #app .s-log-engine { padding:12px; gap:9px; }
+  #app .s-log-session { display:none; }
+  #app .s-log-identity { flex-basis:120px; }
+  #app .s-log-row { padding:0 12px; font-size:11px; }
+  #app .s-log-tools { padding:10px; }
+  #app .s-log-search { flex-basis:100%; font-size:16px; }
+  #app .s-log-footer { padding:10px; }
+  #app .s-nav { margin-left:0; max-width:100%; flex-wrap:wrap; }
+  #app .s-nav button { padding:0 9px; font-size:12px; }
+}
