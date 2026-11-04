@@ -14,5 +14,6 @@ models.ini
 models/
 
 # python
+.venv/
 __pycache__/
 *.pyc

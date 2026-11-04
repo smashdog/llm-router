@@ -38,12 +38,15 @@
 
 ## 安装与运行
 
-要求 Python 3.10+，唯一第三方依赖是 `requests`：
+要求 Python 3.10+，唯一第三方依赖是 `requests`。Debian/Ubuntu 的系统 Python 受 PEP 668 保护，推荐用项目内虚拟环境（`START-router.sh` 会自动优先使用 `.venv`）：
 
 ```bash
-python3 -m pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ./START-router.sh
 ```
+
+若系统已经能 `import requests`，也可以直接运行 `./START-router.sh`。需要指定其它解释器时设置 `ROUTER_PYTHON`。
 
 首次启动会在当前目录自动生成最小 `config.json`（不含引擎），控制台显示“未配置引擎”引导，进入管理页填写引擎路径即可，无需重启网关。默认监听 `0.0.0.0:8080`，控制台为 `/`，聊天 UI 为 `/ui`；临时换端口可用 `./START-router.sh --host 127.0.0.1 --port 8081`（不写入配置文件）。`./START-router.sh --check` 只扫描并打印模型列表后退出。
 

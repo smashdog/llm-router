@@ -2465,14 +2465,14 @@ class EngineManager:
         pgid = self.pgid or pid
         self.log.info("stopping engine %s (pid=%s, pgid=%s)", self.engine_id, pid, pgid)
         if proc.poll() is None:
-            kill_group(pgid, signal.SIGINT)
-            try:
-                proc.wait(timeout=float(self.timeouts.get("stop_timeout_s") or 90))
-            except subprocess.TimeoutExpired:
-                self.log.warning("engine %s did not stop after SIGINT; sending SIGTERM", self.engine_id)
+            if self.kind == "ninfer":
+                # The first SIGINT only asks NInfer to confirm ("press Ctrl+C
+                # again"), so a plain SIGINT would burn the full stop timeout.
+                # SIGTERM is its immediate graceful shutdown path.
                 kill_group(pgid, signal.SIGTERM)
+                timeout = min(float(self.timeouts.get("stop_timeout_s") or 90), 15.0)
                 try:
-                    proc.wait(timeout=15)
+                    proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     self.log.warning("engine %s did not stop after SIGTERM; sending SIGKILL", self.engine_id)
                     kill_group(pgid, signal.SIGKILL)
@@ -2480,6 +2480,22 @@ class EngineManager:
                         proc.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         pass
+            else:
+                kill_group(pgid, signal.SIGINT)
+                try:
+                    proc.wait(timeout=float(self.timeouts.get("stop_timeout_s") or 90))
+                except subprocess.TimeoutExpired:
+                    self.log.warning("engine %s did not stop after SIGINT; sending SIGTERM", self.engine_id)
+                    kill_group(pgid, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        self.log.warning("engine %s did not stop after SIGTERM; sending SIGKILL", self.engine_id)
+                        kill_group(pgid, signal.SIGKILL)
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            pass
         # The parent may be gone while a child still holds the port/GPU.
         if group_alive(pgid):
             kill_group(pgid, signal.SIGKILL)

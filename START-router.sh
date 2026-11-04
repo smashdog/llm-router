@@ -8,6 +8,9 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root"
 
 PY="${ROUTER_PYTHON:-python3}"
+if [[ -z "${ROUTER_PYTHON:-}" && -x "$root/.venv/bin/python" ]]; then
+    PY="$root/.venv/bin/python"
+fi
 if ! command -v "$PY" >/dev/null 2>&1; then
     echo "llm-router: python3 not found; install Python 3.10+ or set ROUTER_PYTHON" >&2
     exit 1
@@ -18,7 +21,9 @@ if ! "$PY" -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"; t
 fi
 if ! "$PY" -c "import requests" >/dev/null 2>&1; then
     echo "llm-router: missing dependency 'requests'" >&2
-    echo "  install it with: $PY -m pip install -r '$root/requirements.txt'" >&2
+    echo "  Debian/Ubuntu (PEP 668) recommended:" >&2
+    echo "    python3 -m venv '$root/.venv' && '$root/.venv/bin/pip' install -r '$root/requirements.txt'" >&2
+    echo "  other environments: $PY -m pip install -r '$root/requirements.txt'" >&2
     exit 1
 fi
 
