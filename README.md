@@ -16,8 +16,8 @@
 - **新增模型**：在控制台填写模型类型（llama.cpp / KVMem / NInfer）、模型路径、可选的视觉 mmproj 路径、视觉运行位置（CPU / GPU）和采样参数；llama.cpp 还可设置上下文长度与 K/V 量化精度。提交后自动完成：路径校验、GGUF 头解析（架构、上下文上限、视觉编码器）或 `.ninfer` 检查、KV 精度选择、写入引擎配置、启动引擎、文本与图片冒烟测试；任一步失败会回滚已写入的配置。NInfer 采用单模型模式：每新增一个模型就复制模板生成一份 `ninfer-<name>.json`，切换 NInfer 模型时网关会重启该引擎。
 - **删除模型**：只删除引擎配置，不移动或删除模型文件；如果删除的是当前活动模型，会先停止引擎。
 - **默认策略**：上下文默认取 GGUF 中的上限（可改小，不能超过上限）；llama.cpp 的 K/V 量化默认均为 `q8_0`（k8v8），可分别选择 `f16`、`bf16`、`q4_0`、`q4_1`、`q5_0`、`q5_1`、`iq4_nl`、`f32` 等引擎支持的类型；KVMem 固定 `--kv q8_0`；NInfer 的上下文、KVMem 参数和 KV 量化全部继承模板。视觉 mmproj 默认走 CPU，可切换 GPU（NInfer 暂不支持视觉）；其余采样参数以引擎参考模型（llama.cpp 为 LFM3-Omni-2B，KVMem 为 Ornith，NInfer 为模板）为默认。
-- **代理**：管理页“代理”支持 HTTP 与 SOCKS5，填写类型、主机、端口和可选的用户名/密码；点“测试连接”会先做 TCP 探测，再经代理并行访问 `hf-mirror.com` 与 `modelscope.cn` 验证连通。面板下方直接列出 Hugging Face、HF-Mirror、ModelScope 三个下载源，勾选表示该来源的搜索与下载走代理，未勾选则直连，与下载页的来源开关保持一致；代理未启用时不可勾选。密码只写入 `config.json`（设置密码后文件权限收紧为 600），读取接口从不回传密码；禁用代理会同时关闭所有下载源的单源代理开关。HTTP 代理使用 `http://`，SOCKS5 使用 `socks5h://`（域名在代理解析）。
-- **模型下载**：管理页“模型下载”顶部设置下载目录，保存进 `config.json`，下次打开自动带出。搜索时并行调用三个源：Hugging Face（`hf` 直连）、HF-Mirror（`HF_ENDPOINT=https://hf-mirror.com` 的 `hf`）与 ModelScope（`modelscope`），聚合为类似 Hugging Face 的卡片，展示仓库、pipeline、库、参数量、更新时间、下载量、点赞、标签等命令行可获得的字段；单个源失败不影响其它源。每个源可单独启用代理，代理未配置时开关不可勾选。点“选择文件”查看仓库文件列表并勾选，下载保存为 `<下载目录>/<仓库ID>/<文件>`；计划阶段标出本地已存在的文件，勾选已存在文件会拒绝开始；同一时间只运行一个下载任务，页面显示状态与脱敏日志尾部，可取消（终止整个进程组）。Hugging Face 直连源会清除进程继承的代理变量，避免误走系统代理。
+- **代理**：管理页“代理”支持 HTTP 与 SOCKS5，填写类型、主机、端口和可选的用户名/密码；点“测试连接”会先做 TCP 探测，再经代理并行访问 `hf-mirror.com` 与 `modelscope.cn` 验证连通。面板下方直接列出 Hugging Face、HF-Mirror、ModelScope 三个下载源，勾选表示该来源的搜索与下载走代理，未勾选则直连；代理未启用时不可勾选。密码只写入 `config.json`（设置密码后文件权限收紧为 600），读取接口从不回传密码；禁用代理会同时关闭所有下载源的单源代理开关。HTTP 代理使用 `http://`，SOCKS5 使用 `socks5h://`（域名在代理解析）。
+- **模型下载**：管理页“模型下载”顶部设置下载目录，保存进 `config.json`，下次打开自动带出。搜索框下方勾选要查询的来源（默认三个全选），只并行调用勾选来源对应的命令行：Hugging Face（`hf` 直连）、HF-Mirror（`HF_ENDPOINT=https://hf-mirror.com` 的 `hf`）与 ModelScope（`modelscope`），聚合为类似 Hugging Face 的卡片，展示仓库、pipeline、库、参数量、更新时间、下载量、点赞、标签等命令行可获得的字段；单个源失败不影响其它源。来源是否走代理在“代理”页统一设置。点“选择文件”查看仓库文件列表并勾选，下载保存为 `<下载目录>/<仓库ID>/<文件>`；计划阶段标出本地已存在的文件，勾选已存在文件会拒绝开始；同一时间只运行一个下载任务，页面显示状态与脱敏日志尾部，可取消（终止整个进程组）。Hugging Face 直连源会清除进程继承的代理变量，避免误走系统代理。
 - **聊天 UI**（`/ui`）：内置多模型聊天界面，支持文本、图片、音频和视频输入，API Key 仅保存在浏览器本地。
 - **鉴权**：可选服务端 API Key，保护 `/v1` 与聊天 UI 的 `/props`；控制台与 `/models` 不鉴权，适合可信内网使用。
 
@@ -42,7 +42,7 @@
 | POST | `/router/proxy/test` | 验证代理连通性 |
 | GET | `/router/downloads` | 下载目录、各源、CLI 工具与任务状态 |
 | POST | `/router/downloads/settings` | 保存下载目录与各源代理开关 |
-| GET | `/router/downloads/search?q=&limit=` | 三源并行搜索并聚合结果 |
+| GET | `/router/downloads/search?q=&limit=&sources=` | 按指定来源并行搜索并聚合结果（省略 sources 表示全部） |
 | POST | `/router/downloads/plan` | 列出仓库文件与本地已存在情况 |
 | POST | `/router/downloads/start` | 启动下载任务，返回任务 ID |
 | GET | `/router/downloads/job?id=` | 查询下载进度与脱敏日志尾部 |

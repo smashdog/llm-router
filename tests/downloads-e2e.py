@@ -413,6 +413,26 @@ def main() -> int:
                    ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")), ms_searches
         checks += 1
 
+        before = len(fake_log())
+        search = request(
+            "GET",
+            "/router/downloads/search?q=qwen&sources=huggingface,modelscope",
+        )
+        assert [item["id"] for item in search["sources"]] == [
+            "huggingface", "modelscope",
+        ], search
+        assert {item["source"] for item in search["items"]} == {
+            "huggingface", "modelscope",
+        }, search
+        invoked = {entry.get("tool") for entry in fake_log()[before:]}
+        assert invoked == {"hf", "modelscope"}, invoked
+        checks += 1
+        error = request(
+            "GET", "/router/downloads/search?q=qwen&sources=unknown", expect=400
+        )
+        assert "下载源" in error["error"]["message"], error
+        checks += 1
+
         search = request("GET", "/router/downloads/search?q=boom")
         assert all(not item["ok"] for item in search["sources"]), search
         for item in search["sources"]:

@@ -165,9 +165,10 @@ try:
     shot("proxy-tested-desktop.png")
 
     click('.manage-menu .menu-item[data-panel="downloads"]')
-    wait("return document.querySelectorAll('#download-sources .source-proxy').length === 3",
+    wait("return document.querySelectorAll('#download-sources .source-filter').length === 3",
          message="download sources")
-    assert js("return [...document.querySelectorAll('#download-sources input')].every(i => !i.disabled)")
+    assert js("""return [...document.querySelectorAll('#download-sources input')]
+      .every(i => i.checked && !i.disabled)""")
     set_value("download-dir", "/srv/models")
     wait("return document.getElementById('download-dir-state').textContent === '已就绪'",
          message="download dir saved")
@@ -176,6 +177,9 @@ try:
     click("#download-search")
     wait("return document.querySelectorAll('.download-card').length === 6",
          message="search results")
+    assert mock_state()["search_sources"] == [
+        "huggingface", "hf-mirror", "modelscope",
+    ]
     stats = js("""
       const cards = [...document.querySelectorAll('.download-card')];
       return {
@@ -199,14 +203,20 @@ try:
     click('#download-summary button[data-download-filter="all"]')
     wait("return document.querySelectorAll('.download-card').length === 6")
 
-    click('#download-sources input[data-download-source="hf-mirror"]')
-    for _ in range(60):
-        if mock_state()["sources"]["hf-mirror"]:
-            break
-        time.sleep(0.1)
-    else:
-        raise AssertionError("source proxy toggle was not saved")
-    wait("return document.querySelector('#download-sources input[data-download-source=\"hf-mirror\"]').checked")
+    click('#download-sources input[data-download-source="modelscope"]')
+    assert js("""return !document.querySelector(
+      '#download-sources input[data-download-source="modelscope"]').checked""")
+    click("#download-search")
+    wait("return document.querySelectorAll('.download-card').length === 4",
+         message="filtered source search")
+    assert mock_state()["search_sources"] == ["huggingface", "hf-mirror"]
+    labels = js("""return [...document.querySelectorAll('.download-card .actions .hint')]
+      .map(el => el.textContent.trim())""")
+    assert set(labels) == {"Hugging Face", "HF-Mirror"}, labels
+    click('#download-sources input[data-download-source="modelscope"]')
+    click("#download-search")
+    wait("return document.querySelectorAll('.download-card').length === 6",
+         message="restored source search")
 
     rect(420, 1000)
     time.sleep(0.3)
@@ -273,7 +283,7 @@ try:
     assert state["test_calls"][0]["port"] == "10809", state["test_calls"]
     assert state["dir"] == "/srv/models", state
     assert state["search_q"] == "qwen3 gguf", state
-    assert state["sources"]["hf-mirror"] is True, state
+    assert state["sources"]["hf-mirror"] is False, state
     assert state["sources"]["huggingface"] is True, state
     assert state["sources"]["modelscope"] is False, state
     assert state["start"]["files"] == ["config.json", "sub/tokenizer.json"], state["start"]

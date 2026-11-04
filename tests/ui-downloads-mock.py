@@ -25,6 +25,7 @@ STATE = {
     "test_calls": [],
     "settings_posts": [],
     "search_q": None,
+    "search_sources": None,
     "start": None,
     "cancel": False,
 }
@@ -221,11 +222,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/router/downloads":
             return self.send_json(downloads_view())
         if path == "/router/downloads/search":
-            query = (parse_qs(parsed.query).get("q") or [""])[0]
+            params = parse_qs(parsed.query)
+            query = (params.get("q") or [""])[0]
+            raw_sources = (params.get("sources") or [None])[0]
+            selected = (
+                [part for part in raw_sources.split(",") if part]
+                if raw_sources
+                else [source_id for source_id, _label, _tool in SOURCES]
+            )
             STATE["search_q"] = query
-            items = ITEMS if query != "boom" else []
+            STATE["search_sources"] = selected
+            items = [item for item in ITEMS if item["source"] in selected]
+            if query == "boom":
+                items = []
             sources = []
             for source_id, label, _tool in SOURCES:
+                if source_id not in selected:
+                    continue
                 count = sum(1 for item in items if item["source"] == source_id)
                 sources.append({
                     "id": source_id, "label": label, "ok": query != "boom",

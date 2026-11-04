@@ -4260,7 +4260,9 @@ class Gateway:
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
 
-    def search_downloads(self, query: Any, limit: Any = None) -> dict[str, Any]:
+    def search_downloads(
+        self, query: Any, limit: Any = None, sources: Any = None
+    ) -> dict[str, Any]:
         text = str(query or "").strip()
         if not text:
             raise BadRequest("请输入搜索关键词")
@@ -4268,13 +4270,31 @@ class Gateway:
             raise BadRequest("搜索关键词过长")
         parsed_limit = parse_int(limit)
         limit_value = max(1, min(parsed_limit or 30, DOWNLOAD_LIMIT_MAX))
+        if sources is None:
+            selected = list(DOWNLOAD_SOURCE_ORDER)
+        else:
+            raw_sources = str(sources).strip()
+            if not raw_sources:
+                raise BadRequest("请至少选择一个搜索来源")
+            selected = []
+            for part in raw_sources.split(","):
+                source_id = part.strip()
+                if not source_id:
+                    continue
+                if source_id not in DOWNLOAD_SOURCES:
+                    raise BadRequest(f"未知下载源：{source_id}")
+                if source_id not in selected:
+                    selected.append(source_id)
+            if not selected:
+                raise BadRequest("请至少选择一个搜索来源")
+        selected_set = set(selected)
         results: dict[str, dict[str, Any]] = {}
         with ThreadPoolExecutor(
-            max_workers=len(DOWNLOAD_SOURCE_ORDER), thread_name_prefix="download-search"
+            max_workers=len(selected), thread_name_prefix="download-search"
         ) as pool:
             futures = {
                 pool.submit(self._search_source, source_id, text, limit_value): source_id
-                for source_id in DOWNLOAD_SOURCE_ORDER
+                for source_id in selected
             }
             for future in as_completed(futures):
                 source_id = futures[future]
@@ -4292,7 +4312,11 @@ class Gateway:
                         "error": message,
                         "elapsed_ms": 0,
                     }
-        ordered = [results[source_id] for source_id in DOWNLOAD_SOURCE_ORDER]
+        ordered = [
+            results[source_id]
+            for source_id in DOWNLOAD_SOURCE_ORDER
+            if source_id in selected_set
+        ]
         items: list[dict[str, Any]] = []
         for result in ordered:
             items.extend(result.get("items") or [])
@@ -6587,7 +6611,11 @@ class Handler(BaseHTTPRequestHandler):
             values = parse_qs(query)
             query_text = (values.get("q") or [""])[0]
             limit_text = (values.get("limit") or [None])[0]
-            self._json(200, self.gateway.search_downloads(query_text, limit_text))
+            source_text = (values.get("sources") or [None])[0]
+            self._json(
+                200,
+                self.gateway.search_downloads(query_text, limit_text, source_text),
+            )
             return
         if normalized == "/router/downloads/plan":
             if method != "POST":

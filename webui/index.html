@@ -209,13 +209,15 @@
   .download-search-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .download-search-row input { flex: 1 1 220px; min-width: 160px; }
   .download-source-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .source-proxy {
+  .download-source-label { color: var(--faint); font-size: 11.5px; }
+  .source-options { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .source-proxy, .source-filter {
     display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px;
     border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
     font-size: 11.5px; line-height: 1.4;
   }
-  .source-proxy input { accent-color: var(--accent); }
-  .source-proxy.disabled { opacity: .45; }
+  .source-proxy input, .source-filter input { accent-color: var(--accent); }
+  .source-proxy.disabled, .source-filter.disabled { opacity: .45; }
   .source-proxy .dot { width: 6px; height: 6px; }
   .download-note { color: var(--faint); font-size: 11.5px; margin: 0; }
   .download-note.bad { color: #ffc1ca; }
@@ -642,7 +644,7 @@
         </section>
         <section class="manage-panel" data-panel="downloads" aria-labelledby="downloads-title" hidden>
           <h2 id="downloads-title">模型下载</h2>
-          <p class="panel-hint">同时用 hf 与 modelscope 命令行搜索 Hugging Face、HF-Mirror、ModelScope，聚合展示结果；下载保存为「仓库/文件名」目录结构，已有文件会提示并跳过开始下载。</p>
+          <p class="panel-hint">同时用 hf 与 modelscope 命令行搜索勾选的来源（Hugging Face、HF-Mirror、ModelScope），聚合展示结果；下载保存为「仓库/文件名」目录结构，已有文件会提示并跳过开始下载。</p>
           <div class="downloads-panel">
             <div class="download-dir-row">
               <span class="label">下载目录</span>
@@ -651,16 +653,19 @@
             </div>
             <div class="download-search-row">
               <input id="download-query" type="search" placeholder="搜索模型，例如 qwen3 gguf" autocomplete="off" />
-              <button class="btn primary" type="button" id="download-search">搜索三个来源</button>
+              <button class="btn primary" type="button" id="download-search">搜索</button>
             </div>
-            <div class="download-source-row" id="download-sources"></div>
+            <div class="download-source-row">
+              <span class="download-source-label">搜索来源</span>
+              <div class="source-options" id="download-sources"></div>
+            </div>
             <p class="download-note" id="download-tools"></p>
             <div class="download-note" id="download-status"></div>
             <div class="download-errors" id="download-errors"></div>
             <div id="download-job"></div>
             <div class="download-summary" id="download-summary"></div>
             <div class="download-results" id="download-results">
-              <div class="download-empty">填写下载目录并搜索模型；三个来源会并发查询。</div>
+              <div class="download-empty">填写下载目录并搜索模型；勾选的来源会并发查询。</div>
             </div>
           </div>
         </section>
@@ -853,6 +858,7 @@
     downloadDirBusy: false,
     downloadSearch: null,
     downloadSearchBusy: false,
+    downloadSelection: null,
     downloadFilter: "all",
     downloadJob: null,
     downloadJobBusy: false,
@@ -1541,6 +1547,15 @@
     host.title = names.map((name) => tools[name]?.path).filter(Boolean).join("\n");
   }
 
+  function ensureDownloadSelection(view) {
+    if (!state.downloadSelection) state.downloadSelection = {};
+    (view.sources || []).forEach((source) => {
+      if (!(source.id in state.downloadSelection)) {
+        state.downloadSelection[source.id] = Boolean(view.tools?.[source.tool]?.available);
+      }
+    });
+  }
+
   function renderDownloadSources() {
     const host = $("download-sources");
     const view = state.downloads;
@@ -1548,32 +1563,24 @@
       host.innerHTML = "";
       return;
     }
-    const proxyReady = Boolean(view.proxy_configured);
+    ensureDownloadSelection(view);
     host.innerHTML = (view.sources || []).map((source) => {
       const toolReady = Boolean(view.tools?.[source.tool]?.available);
-      const usable = proxyReady && toolReady;
-      const title = !proxyReady
-        ? "先在「代理」页启用代理后才能使用来源代理"
-        : (!toolReady ? `${source.tool} 命令不可用` : "为该来源的搜索与下载启用代理");
-      return `<label class="source-proxy ${usable ? "" : "disabled"}" title="${esc(title)}">
-        <input type="checkbox" data-download-source="${esc(source.id)}"${source.use_proxy ? " checked" : ""}${usable ? "" : " disabled"} />
+      const selected = Boolean(state.downloadSelection[source.id]) && toolReady;
+      const title = toolReady ? "搜索时包含该来源" : `${source.tool} 命令不可用`;
+      return `<label class="source-filter ${toolReady ? "" : "disabled"}" title="${esc(title)}">
+        <input type="checkbox" data-download-source="${esc(source.id)}"${selected ? " checked" : ""}${toolReady ? "" : " disabled"} />
         ${esc(source.label)}${toolReady ? "" : "（未安装）"}
       </label>`;
     }).join("");
   }
 
-  async function saveSourceProxy(sourceId, checked) {
-    try {
-      const view = await api("/router/downloads/settings", {
-        method: "POST",
-        body: JSON.stringify({ sources: { [sourceId]: { use_proxy: checked } } }),
-      });
-      applyDownloadsView(view);
-      toast(`${downloadSourceName(sourceId)}：${checked ? "使用代理" : "不使用代理"}`, "ok");
-    } catch (error) {
-      toast(error.message, "bad");
-      loadDownloads();
-    }
+  function selectedDownloadSources() {
+    const view = state.downloads;
+    if (!view || !state.downloadSelection) return [];
+    return (view.sources || [])
+      .filter((source) => source.available && state.downloadSelection[source.id])
+      .map((source) => source.id);
   }
 
   function downloadCard(item) {
@@ -1607,7 +1614,7 @@
     const search = state.downloadSearch;
     let text = "";
     if (state.downloadSearchBusy) {
-      text = "正在并发搜索三个来源…";
+      text = "正在并发搜索所选来源…";
     } else if (search) {
       const bits = (search.sources || []).map((source) => {
         const timing = source.elapsed_ms ? ` ${(source.elapsed_ms / 1000).toFixed(1)}s` : "";
@@ -1615,7 +1622,7 @@
       });
       text = `关键词「${search.query}」· ${bits.join(" · ")}`;
     } else {
-      text = "填写关键词后搜索；三个来源并发查询，结果按来源标注。";
+      text = "填写关键词后搜索；勾选的来源并发查询，结果按来源标注。";
     }
     host.textContent = text;
     const allFailed = Boolean(search) && !state.downloadSearchBusy
@@ -1667,6 +1674,11 @@
       $("download-query").focus();
       return;
     }
+    const sources = selectedDownloadSources();
+    if (!sources.length) {
+      toast("请至少选择一个可用的搜索来源", "bad");
+      return;
+    }
     state.downloadSearchBusy = true;
     state.downloadFilter = "all";
     $("download-search").disabled = true;
@@ -1674,14 +1686,15 @@
     renderDownloadStatus();
     try {
       state.downloadSearch = await api(
-        `/router/downloads/search?q=${encodeURIComponent(query)}&limit=30`,
+        `/router/downloads/search?q=${encodeURIComponent(query)}&limit=30`
+        + `&sources=${encodeURIComponent(sources.join(","))}`,
       );
     } catch (error) {
       toast(error.message, "bad");
     } finally {
       state.downloadSearchBusy = false;
       $("download-search").disabled = false;
-      $("download-search").textContent = "搜索三个来源";
+      $("download-search").textContent = "搜索";
       renderDownloadSearch();
     }
   }
@@ -2778,7 +2791,8 @@
   $("download-sources").addEventListener("change", (event) => {
     const box = event.target.closest("input[data-download-source]");
     if (!box) return;
-    saveSourceProxy(box.dataset.downloadSource, box.checked);
+    if (!state.downloadSelection) state.downloadSelection = {};
+    state.downloadSelection[box.dataset.downloadSource] = box.checked;
   });
   $("download-results").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-plan-source]");
