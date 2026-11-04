@@ -1754,8 +1754,8 @@ def resolve_binary_path(base_dir: Path, value: str) -> str:
 
 
 def validate_engine_paths(
-    engine_id: str, paths: dict[str, Any], base_dir: Path
-) -> dict[str, str]:
+    engine_id: str, paths: dict[str, Any], base_dir: Path, create: bool = False
+) -> tuple[dict[str, str], list[tuple[str, Path]]]:
     spec = ENGINE_SLOTS[engine_id]
     if not isinstance(paths, dict):
         raise BadRequest("paths 必须是对象")
@@ -1783,7 +1783,6 @@ def validate_engine_paths(
     for key, message in (
         ("binary", "文件不存在"),
         ("cwd", "目录不存在"),
-        ("models_dir", "目录不存在"),
     ):
         path = Path(fields[key])
         ok = path.is_file() if key == "binary" else path.is_dir()
@@ -1792,13 +1791,62 @@ def validate_engine_paths(
     binary = Path(fields["binary"])
     if not os.access(binary, os.X_OK):
         raise BadRequest(f"binary：文件不可执行（{binary}）")
+
+    # Data paths may legitimately be absent when creating a fresh slot. They
+    # are not created here: the caller probes the binary first, then calls
+    # materialize_engine_paths(), so a failed probe leaves no stray files.
+    pending: list[tuple[str, Path]] = []
+    models_dir = Path(fields["models_dir"])
+    if models_dir.is_dir():
+        pass
+    elif models_dir.exists():
+        raise BadRequest(f"models_dir：不是目录（{models_dir}）")
+    elif create:
+        pending.append(("models_dir", models_dir))
+    else:
+        raise BadRequest(f"models_dir：目录不存在（{models_dir}）")
+
     model_key = str(spec["model_key"])
     preset_value = fields.get(model_key) or ""
     if preset_value:
-        path = Path(preset_value)
-        if not path.is_file():
-            raise BadRequest(f"{model_key}：文件不存在（{path}）")
-    return fields
+        preset = Path(preset_value)
+        if preset.is_file():
+            pass
+        elif preset.exists():
+            raise BadRequest(f"{model_key}：不是文件（{preset}）")
+        elif create and engine_id == "llama":
+            pending.append(("llama_preset", preset))
+        elif create and engine_id == "kvmem":
+            pending.append(("kvmem_meta", preset))
+        else:
+            raise BadRequest(f"{model_key}：文件不存在（{preset}）")
+    return fields, pending
+
+
+def materialize_engine_paths(pending: list[tuple[str, Path]]) -> list[str]:
+    """Create the empty data paths offered for a brand-new engine slot."""
+    notes: list[str] = []
+    for kind, path in pending:
+        try:
+            if kind == "models_dir":
+                if path.is_dir():
+                    continue
+                path.mkdir(parents=True, exist_ok=True)
+                notes.append(f"已创建模型目录 {path}")
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                handle = path.open("x", encoding="utf-8")
+            except FileExistsError:
+                continue
+            with handle:
+                handle.write("version = 1\n" if kind == "llama_preset" else "{}\n")
+            notes.append(
+                f"已创建空预设 {path}" if kind == "llama_preset" else f"已创建空元数据 {path}"
+            )
+        except OSError as exc:
+            raise BadRequest(f"无法创建 {path}：{exc}") from exc
+    return notes
 
 
 def _probe_tail(text: str, limit: int = 600) -> str:
@@ -3252,9 +3300,12 @@ class Gateway:
                 raise BadRequest(
                     f"engines.{engine_id}.models.kind={kind!r} 与固定槽位不匹配"
                 )
-        fields = validate_engine_paths(engine_id, paths, self.base_dir)
+        fields, pending_paths = validate_engine_paths(
+            engine_id, paths, self.base_dir, create=existing is None
+        )
         candidate = build_engine_cfg(engine_id, fields, existing)
         probe_engine_binary(engine_id, fields, candidate)
+        created_notes = materialize_engine_paths(pending_paths)
         scanned = scan_engine_models(engine_id, candidate)
         with self._config_lock:
             backup_path = None
@@ -3314,10 +3365,13 @@ class Gateway:
                 "backup": str(backup_path) if backup_path else None,
             }
         )
+        notes = list(created_notes)
         if not scanned:
-            view["note"] = (
+            notes.append(
                 f"{ENGINE_SLOTS[engine_id]['label']} 引擎已配置，但目录中没有发现模型。"
             )
+        if notes:
+            view["note"] = " ".join(notes)
         return view
 
     def restart_engine_paths(self, engine_id: str) -> dict[str, Any]:

@@ -898,7 +898,7 @@
       }).join("");
       const note = configured
         ? `${esc(data.config_file || "config.json")} 已记录 · 内部地址 ${esc(item.address || "—")}`
-        : "未配置；灰色提示为建议路径，可先填入再修改，保存后写入 config.json。";
+        : "未配置；灰色提示为建议路径，创建时缺失的模型目录会自动创建，保存后写入 config.json。";
       const prefill = !configured && Object.values(defaults).some(Boolean)
         ? '<button class="btn ghost" type="button" data-path-action="prefill">填入建议路径</button>'
         : "";
