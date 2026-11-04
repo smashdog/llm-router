@@ -2546,6 +2546,12 @@ class Gateway:
             raise BadRequest("name must be a string")
         smoke = payload.get("smoke", True) is not False
         vision_path = (vision or "").strip() or None
+        vision_device = payload.get("vision_device", "cpu")
+        if vision_device is None:
+            vision_device = "cpu"
+        if not isinstance(vision_device, str) or vision_device.strip().lower() not in ("cpu", "gpu"):
+            raise BadRequest('vision_device must be "cpu" or "gpu"')
+        vision_gpu = vision_device.strip().lower() == "gpu"
         steps = [
             {"key": "paths", "label": "检查模型路径", "status": "pending", "detail": ""},
             {"key": "metadata", "label": "读取 GGUF 元数据", "status": "pending", "detail": ""},
@@ -2564,6 +2570,7 @@ class Gateway:
             "engine": engine_id,
             "model": model.strip(),
             "vision": vision_path,
+            "vision_device": "gpu" if vision_gpu else "cpu",
             "name": (name or "").strip() or None,
             "params": params,
             "smoke": smoke,
@@ -2582,7 +2589,8 @@ class Gateway:
         thread = threading.Thread(
             target=self._model_add_worker,
             args=(job, engine_id, kind, Path(model.strip()).expanduser(),
-                  Path(vision_path).expanduser() if vision_path else None, smoke),
+                  Path(vision_path).expanduser() if vision_path else None, smoke,
+                  vision_gpu),
             name=f"model-add-{job['id']}",
             daemon=True,
         )
@@ -2720,6 +2728,7 @@ class Gateway:
         model: Path,
         vision: Path | None,
         smoke: bool,
+        vision_gpu: bool = False,
     ) -> None:
         engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
         short = self._short_kind(kind)
@@ -2805,7 +2814,8 @@ class Gateway:
                 values = {"c": str(context), "model": str(model)}
                 if vision is not None:
                     values["mmproj"] = str(vision)
-                    values["mmproj-offload"] = "off"
+                    if not vision_gpu:
+                        values["mmproj-offload"] = "off"
                 if cache_override:
                     values["cache-type-k"] = "q8_0"
                     values["cache-type-v"] = "q8_0"
@@ -2815,7 +2825,10 @@ class Gateway:
                 self._job_step(
                     job, "config", "ok",
                     f"已写入 {preset_path} 的 [{name}] 段"
-                    + ("；视觉 mmproj 走 CPU" if vision is not None else ""),
+                    + (
+                        f"；视觉 mmproj 走 {'GPU' if vision_gpu else 'CPU'}"
+                        if vision is not None else ""
+                    ),
                 )
             else:
                 models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
@@ -2853,8 +2866,7 @@ class Gateway:
                     vision_cfg = dict(kv_cfg.get("vision") or {})
                     vision_cfg["mmproj"] = str(vision)
                     vision_cfg["model"] = str(model)
-                    vision_cfg["gpu"] = False
-                    vision_cfg.pop("cuda_device", None)
+                    vision_cfg["gpu"] = bool(vision_gpu)
                     vision_cfg.pop("video", None)
                     if not vision_cfg.get("exe"):
                         vision_cfg["exe"] = str(Path(str(kv_cfg.get("exe"))).with_name("strata-vision"))
@@ -2870,7 +2882,10 @@ class Gateway:
                 self._job_step(
                     job, "config", "ok",
                     f"已写入 {config_file}；tokenizer {tokenizer}"
-                    + ("；视觉走 CPU" if vision is not None else "；无视觉"),
+                    + (
+                        f"；视觉走 {'GPU' if vision_gpu else 'CPU'}"
+                        if vision is not None else "；无视觉"
+                    ),
                 )
 
             self._job_step(job, "start", "running", "正在停止当前引擎…")
@@ -2898,7 +2913,8 @@ class Gateway:
                     values = {"c": str(context), "model": str(model)}
                     if vision is not None:
                         values["mmproj"] = str(vision)
-                        values["mmproj-offload"] = "off"
+                        if not vision_gpu:
+                            values["mmproj-offload"] = "off"
                     append_llama_preset(preset_path, name, values)
                 elif config_file is not None and config_file.is_file():
                     kv_cfg = read_json(config_file, {})

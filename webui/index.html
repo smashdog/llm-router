@@ -267,6 +267,13 @@
     background: #0c121a; color: var(--text); font: inherit; font-size: 12.5px; outline: none;
   }
   .add-fields input:focus { border-color: rgba(94,234,212,.45); }
+  .device-row {
+    display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+    margin-top: 10px; color: var(--muted); font-size: 12.5px;
+  }
+  .device-row .device-label { color: var(--faint); font-size: 12px; }
+  .device-row .check { margin-top: 0; }
+  .device-row.disabled { opacity: .45; }
   .check { display: flex; gap: 8px; align-items: center; margin-top: 13px; color: var(--muted); font-size: 12.5px; }
   .check input { accent-color: var(--accent); }
   .progress {
@@ -456,6 +463,11 @@
           <input id="add-model" type="text" spellcheck="false" placeholder="/path/to/model.gguf" /></label>
         <label>视觉路径 <span class="name">mmproj .gguf，选填</span>
           <input id="add-vision" type="text" spellcheck="false" placeholder="/path/to/mmproj.gguf（留空表示无视觉）" /></label>
+      </div>
+      <div class="device-row disabled" id="add-vision-device" role="radiogroup" aria-label="视觉运行位置">
+        <span class="device-label">视觉运行位置</span>
+        <label class="check"><input type="radio" name="add-vision-device" value="cpu" checked /> CPU（默认）</label>
+        <label class="check"><input type="radio" name="add-vision-device" value="gpu" /> GPU</label>
       </div>
       <p class="params-hint" id="add-defaults"></p>
       <div class="params-grid" id="add-params">
@@ -1049,8 +1061,15 @@
     form.elements.top_k.max = kv ? 64 : 1000;
     form.elements.repeat_last_n.min = kv ? 1 : -1;
     $("add-defaults").textContent = !engine ? "" : engine.kind === "kvmem"
-      ? "KV 精度 k8v8（--kv q8_0；引擎不支持时省略，使用默认）；上下文取 GGUF 上限；视觉默认 CPU；其余引擎参数复制 ornith 模板，采样默认来自 ornith。"
-      : "KV 精度 k8v8（cache-type-k/v = q8_0；引擎不支持时省略）；上下文取 GGUF 上限；有视觉时 mmproj 默认 CPU；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
+      ? "KV 精度 k8v8（--kv q8_0；引擎不支持时省略，使用默认）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数复制 ornith 模板，采样默认来自 ornith。"
+      : "KV 精度 k8v8（cache-type-k/v = q8_0；引擎不支持时省略）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
+  }
+
+  function syncVisionDevice() {
+    const has = $("add-vision").value.trim() !== "";
+    const row = $("add-vision-device");
+    row.classList.toggle("disabled", !has);
+    row.querySelectorAll("input").forEach((el) => { el.disabled = !has; });
   }
 
   function renderAddEngines() {
@@ -1078,6 +1097,7 @@
     const dialog = $("add-dialog");
     const form = $("add-form");
     form.reset();
+    syncVisionDevice();
     showAddError("");
     $("add-progress").hidden = true;
     $("add-progress").innerHTML = "";
@@ -1167,6 +1187,7 @@
       engine,
       model,
       vision: $("add-vision").value.trim() || null,
+      vision_device: (document.querySelector('input[name="add-vision-device"]:checked') || {}).value || "cpu",
       smoke: $("add-smoke").checked,
     };
     if (Object.keys(params).length) body.params = params;
@@ -1268,6 +1289,7 @@
   $("btn-add-model").addEventListener("click", () => openAddDialog().catch((e) => toast(e.message, "bad")));
   $("add-form").addEventListener("submit", submitAdd);
   $("add-cancel").addEventListener("click", () => $("add-dialog").close());
+  $("add-vision").addEventListener("input", syncVisionDevice);
   $("add-engines").addEventListener("change", (event) => {
     const input = event.target.closest('input[name="add-engine"]');
     if (!input) return;
