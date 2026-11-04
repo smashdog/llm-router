@@ -770,6 +770,8 @@ try:
         "cacheV: document.querySelector('#add-cache-v').value,"
         "repeat: document.querySelector('[name=repeat_last_n]').disabled,"
         "visionHidden: document.querySelector('#add-vision-field').hidden,"
+        "visionHintHidden: document.querySelector('#add-vision-hint').hidden,"
+        "visionHint: document.querySelector('#add-vision-hint').textContent,"
         "kvmemTabHidden: document.querySelector('#add-kvmem-tab').hidden,"
         "kvmemCount: document.querySelector('#add-kvmem-count').textContent,"
         "kvmemFields: document.querySelectorAll('#add-kvmem [data-param-key]').length,"
@@ -787,6 +789,8 @@ try:
     assert form["cacheV"] == "q8_0", form
     assert form["repeat"] is True, form
     assert form["visionHidden"] is False, form
+    assert form["visionHintHidden"] is False and "mmproj" in form["visionHint"], form
+    assert "主模型" in form["visionHint"], form
     assert form["kvmemTabHidden"] is False, form
     assert int(form["kvmemCount"] or 0) >= 40, form
     assert form["kvmemFields"] == int(form["kvmemCount"]), form

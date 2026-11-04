@@ -3519,7 +3519,8 @@ class EngineManager:
         )):
             return EngineFailure(
                 f"llama 加载 {entry.id} 失败：显存不足，模型或 KV cache 无法装入 GPU"
-                f"（exit code {code}）；日志：{self.log_path}"
+                f"（exit code {code}）；可减小上下文长度、切换 KV 精度，或改用"
+                f" KVMem + llama.cpp 限制 KV 预算；日志：{self.log_path}"
             )
         return EngineFailure(f"llama failed to load {entry.id} (exit code {code}); log: {tail}")
 

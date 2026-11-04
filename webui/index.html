@@ -871,6 +871,7 @@
         <label class="check"><input type="radio" name="add-vision-device" value="cpu" checked /> CPU（默认）</label>
         <label class="check"><input type="radio" name="add-vision-device" value="gpu" /> GPU</label>
       </div>
+      <p class="params-hint" id="add-vision-hint">只控制视觉编码器（mmproj）；主模型和 KV cache 仍按 n-gpu-layers 与上下文加载到 GPU。</p>
       <div class="param-tabs" role="tablist" aria-label="模型参数分类">
         <button type="button" class="param-tab active" data-param-tab="basic" role="tab" aria-selected="true">基本参数</button>
         <button type="button" class="param-tab" data-param-tab="more" role="tab" aria-selected="false">更多参数<span class="tab-count" id="add-more-count"></span></button>
@@ -2691,8 +2692,8 @@
         ? (kv
             ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
             : kvllama
-              ? "写入模型配置的 vision.gpu；llama-kvmem-server 按 --mmproj-offload / --no-mmproj-offload 切换，CPU 与 GPU 共用同一份 mmproj。"
-              : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off。")
+              ? "写入模型配置的 vision.gpu；llama-kvmem-server 按 --mmproj-offload / --no-mmproj-offload 切换，CPU 与 GPU 共用同一份 mmproj；主模型仍按 --device 与 GPU 层数加载。"
+              : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off，主模型仍按 n-gpu-layers 加载。")
         : "当前模型没有可编辑的引擎配置，无法修改视觉运行位置。";
     }
     $("params-title").textContent = `模型参数 · ${model.name || model.display_name || model.id}`;
@@ -2911,6 +2912,7 @@
         : "/path/to/model.gguf";
     $("add-vision-field").hidden = ninfer;
     $("add-vision-device").hidden = ninfer;
+    $("add-vision-hint").hidden = ninfer;
     if (ninfer) $("add-vision").value = "";
     syncVisionDevice();
     setKvmemTabVisible($("add-dialog"), kvllama);
