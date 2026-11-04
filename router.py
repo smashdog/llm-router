@@ -20,6 +20,7 @@ import mimetypes
 import os
 import queue
 import re
+import shutil
 import signal
 import socket
 import struct
@@ -1417,6 +1418,7 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "host": "127.0.0.1",
         "port": 18080,
         "start_timeout_s": 120,
+        "probe_timeout_s": 15,
         "log_path": "logs/llama-engine.log",
     },
     "kvmem": {
@@ -1428,10 +1430,16 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "host": "127.0.0.1",
         "port": 18081,
         "start_timeout_s": 900,
+        "probe_timeout_s": 30,
         "log_path": "logs/kvmem-engine.log",
     },
 }
 ENGINE_SLOT_ORDER = ("llama", "kvmem")
+KV_PROBE_CODE = (
+    "import serve.server\n"
+    "print('LLM_ROUTER_KVPROBE_' + str(6 * 7))\n"
+)
+KV_PROBE_MARKER = "LLM_ROUTER_KVPROBE_42"
 
 
 def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
@@ -1554,6 +1562,18 @@ def resolve_engine_path(base_dir: Path, value: str) -> Path:
     return Path(os.path.abspath(str(path)))
 
 
+def resolve_binary_path(base_dir: Path, value: str) -> str:
+    """Allow either a path or a bare executable name resolved from PATH."""
+    text = value.strip()
+    has_sep = os.sep in text or (os.altsep is not None and os.altsep in text)
+    if has_sep or text.startswith("~"):
+        return str(resolve_engine_path(base_dir, text))
+    found = shutil.which(text)
+    if not found:
+        raise BadRequest(f"binary：在 PATH 中找不到 {text}")
+    return str(Path(os.path.abspath(found)))
+
+
 def validate_engine_paths(
     engine_id: str, paths: dict[str, Any], base_dir: Path
 ) -> dict[str, str]:
@@ -1577,7 +1597,10 @@ def validate_engine_paths(
                 fields[key] = ""
                 continue
             raise BadRequest(f"{key} 不能为空")
-        fields[key] = str(resolve_engine_path(base_dir, text))
+        if key == "binary":
+            fields[key] = resolve_binary_path(base_dir, text)
+        else:
+            fields[key] = str(resolve_engine_path(base_dir, text))
     for key, message in (
         ("binary", "文件不存在"),
         ("cwd", "目录不存在"),
@@ -1597,6 +1620,70 @@ def validate_engine_paths(
         if not path.is_file():
             raise BadRequest(f"{model_key}：文件不存在（{path}）")
     return fields
+
+
+def _probe_tail(text: str, limit: int = 600) -> str:
+    compact = " ".join(text.split())
+    return compact[-limit:]
+
+
+def probe_engine_binary(
+    engine_id: str,
+    fields: dict[str, str],
+    engine_cfg: dict[str, Any] | None = None,
+) -> None:
+    """Cheaply verify the chosen executable is the right program.
+
+    llama.cpp is asked for its version; KVMem's interpreter must import
+    serve.server from the working directory. Neither probe starts a server.
+    """
+    spec = ENGINE_SLOTS[engine_id]
+    binary = fields["binary"]
+    if engine_id == "kvmem":
+        command = [binary, "-c", KV_PROBE_CODE]
+    else:
+        command = [binary, "--version"]
+    env = os.environ.copy()
+    extra = (engine_cfg or {}).get("env")
+    if isinstance(extra, dict):
+        env.update({str(key): str(value) for key, value in extra.items()})
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    timeout = float(spec.get("probe_timeout_s") or 15)
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=fields["cwd"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BadRequest(f"binary：探测超时（{int(timeout)} 秒，{binary}）") from exc
+    except OSError as exc:
+        raise BadRequest(f"binary：无法执行探测（{exc}）") from exc
+    stdout = proc.stdout.decode("utf-8", "replace") if proc.stdout else ""
+    stderr = proc.stderr.decode("utf-8", "replace") if proc.stderr else ""
+    output = (stdout + "\n" + stderr).strip()
+    if engine_id == "kvmem":
+        if proc.returncode != 0 or KV_PROBE_MARKER not in stdout:
+            detail = _probe_tail(output)
+            message = "binary：无法导入 serve.server"
+            if proc.returncode:
+                message += f"（退出码 {proc.returncode}）"
+            if detail:
+                message += f"：{detail}"
+            raise BadRequest(message)
+        return
+    if proc.returncode != 0 or not re.search(r"version\s*:\s*\S+", output, re.I):
+        detail = _probe_tail(output)
+        message = "binary：不是可用的 llama-server"
+        if proc.returncode:
+            message += f"（退出码 {proc.returncode}）"
+        if detail:
+            message += f"：{detail}"
+        raise BadRequest(message)
 
 
 def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
@@ -2875,6 +2962,7 @@ class Gateway:
                 )
         fields = validate_engine_paths(engine_id, paths, self.base_dir)
         candidate = build_engine_cfg(engine_id, fields, existing)
+        probe_engine_binary(engine_id, fields, candidate)
         scanned = scan_engine_models(engine_id, candidate)
         with self._config_lock:
             backup_path = None

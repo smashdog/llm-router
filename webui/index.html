@@ -408,7 +408,7 @@
       <div class="manage-content">
         <section class="manage-panel" data-panel="engines" aria-labelledby="engine-paths-title">
           <h2 id="engine-paths-title">引擎路径</h2>
-          <p class="panel-hint">配置 llama.cpp 与 KVMem 的启动路径；保存后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
+          <p class="panel-hint">配置 llama.cpp 与 KVMem 的启动路径；保存前会轻量探测二进制是否可用，成功后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
           <div class="engine-paths" id="engine-paths">
             <div class="empty">正在读取引擎配置…</div>
           </div>
