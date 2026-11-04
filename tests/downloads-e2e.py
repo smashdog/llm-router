@@ -65,7 +65,7 @@ if args[0] == "models" and args[1] == "list" and "--search" in args:
 
 if args[0] == "models" and args[1] == "list" and "-R" in args:
     repo = args[2]
-    if repo == "fake/slow":
+    if repo.startswith("fake/slow"):
         files = [{{"path": "slow.bin", "size": 2048, "type": "file"}}]
     else:
         files = [
@@ -512,6 +512,35 @@ def main() -> int:
         job = wait_job(job["id"])
         assert job["status"] == "cancelled", job
         assert not (MODELS / "fake" / "slow" / "slow.bin").exists()
+        checks += 1
+
+        # -- concurrent downloads ------------------------------------------
+        job_a = request("POST", "/router/downloads/start", {
+            "source": "huggingface", "repo_id": "fake/slow", "files": ["slow.bin"],
+        }, expect=202)
+        job_b = request("POST", "/router/downloads/start", {
+            "source": "huggingface", "repo_id": "fake/slow-b", "files": ["slow.bin"],
+        }, expect=202)
+        assert job_a["id"] != job_b["id"], (job_a, job_b)
+        view = request("GET", "/router/downloads")
+        active_ids = {item["id"] for item in view.get("active_jobs") or []}
+        assert {job_a["id"], job_b["id"]} <= active_ids, view
+        assert view["running_count"] == len(active_ids) >= 2, view
+        assert all(
+            item.get("status") == "running" for item in view.get("active_jobs") or []
+        ), view
+        checks += 1
+        for entry in (job_a, job_b):
+            stopped = request(
+                "POST", "/router/downloads/cancel", {"id": entry["id"]}, expect=202
+            )
+            assert stopped["status"] in ("running", "cancelled"), stopped
+        for entry in (job_a, job_b):
+            done = wait_job(entry["id"])
+            assert done["status"] == "cancelled", done
+        view = request("GET", "/router/downloads")
+        assert not view.get("active_jobs"), view
+        assert view["running_count"] == 0, view
         checks += 1
 
         # -- validation ----------------------------------------------------

@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import requests
 
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 
 STATIC_TYPES = {
     ".css": "text/css; charset=utf-8",
@@ -4039,8 +4039,10 @@ class Gateway:
                 }
             )
         with self.download_jobs_lock:
-            jobs = [
-                {
+            ordered = list(self.download_jobs.values())
+
+            def compact(job: dict[str, Any]) -> dict[str, Any]:
+                return {
                     key: job.get(key)
                     for key in (
                         "id", "source", "source_label", "repo_id", "dir",
@@ -4048,9 +4050,12 @@ class Gateway:
                         "started_at", "finished_at", "error",
                     )
                 }
-                for job in list(self.download_jobs.values())[-5:]
+
+            active_jobs = [
+                compact(job) for job in ordered if job.get("status") == "running"
             ]
-            last_job_id = next(reversed(self.download_jobs), None) if self.download_jobs else None
+            jobs = [compact(job) for job in ordered[-5:]]
+            last_job_id = ordered[-1].get("id") if ordered else None
         return {
             "dir": str(root) if root else "",
             "dir_configured": bool(root),
@@ -4059,6 +4064,8 @@ class Gateway:
             "sources": sources,
             "tools": tools,
             "jobs": jobs,
+            "active_jobs": active_jobs,
+            "running_count": len(active_jobs),
             "last_job_id": last_job_id,
             "config_file": self._engine_config_label(),
         }
@@ -4460,11 +4467,6 @@ class Gateway:
     def start_download(self, payload: dict[str, Any]) -> dict[str, Any]:
         source_id = self._validate_source_id(payload.get("source"))
         repo_id = normalize_repo_id(payload.get("repo_id"))
-        with self.download_jobs_lock:
-            if any(
-                job.get("status") == "running" for job in self.download_jobs.values()
-            ):
-                raise ModelBusy("已有下载任务进行中，请等待完成或取消")
         plan = self.plan_download(payload)
         known = {item["path"]: item for item in plan["files"]}
         requested = payload.get("files")
@@ -4533,11 +4535,6 @@ class Gateway:
             "log_file": str(log_path.relative_to(self.base_dir)),
         }
         with self.download_jobs_lock:
-            if any(
-                entry.get("status") == "running"
-                for entry in self.download_jobs.values()
-            ):
-                raise ModelBusy("已有下载任务进行中，请等待完成或取消")
             self.download_jobs[job_id] = job
             self.download_logs[job_id] = log_path
         try:

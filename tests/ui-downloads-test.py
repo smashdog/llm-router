@@ -130,6 +130,16 @@ try:
       return true;
     """)
 
+    click("#btn-downloads")
+    wait("return !document.getElementById('download-popover').hidden",
+         message="empty header popover")
+    assert js("return document.getElementById('download-popover-list').textContent.trim()") == "没有下载"
+    assert js("return document.getElementById('download-badge').hidden") is True
+    shot("download-header-empty.png")
+    click("#btn-downloads")
+    wait("return document.getElementById('download-popover').hidden",
+         message="header popover closed")
+
     click("#btn-manage")
     wait("return !document.getElementById('manage-view').hidden", message="manage view")
     click('.manage-menu .menu-item[data-panel="proxy"]')
@@ -260,18 +270,132 @@ try:
     assert "tokenizer.json" in log_text, log_text
     shot("download-job-desktop.png")
 
+    # -- header download button: badge, popover and progress modal ------
+    wait("return !document.getElementById('download-badge').hidden && "
+         "document.getElementById('download-badge').textContent === '1'",
+         message="header badge count")
+    click("#btn-downloads")
+    wait("return !document.getElementById('download-popover').hidden",
+         message="header popover")
+    wait("return document.querySelectorAll('.download-popover-item').length === 1",
+         message="header popover item")
+    popover = js("""return {
+      repo: document.querySelector('.download-popover-item .repo').textContent,
+      meta: document.querySelector('.download-popover-item .meta').textContent,
+      expanded: document.getElementById('btn-downloads').getAttribute('aria-expanded'),
+    }""")
+    assert "Qwen/Qwen3-8B-GGUF" in popover["repo"], popover
+    assert "个文件" in popover["meta"], popover
+    assert popover["expanded"] == "true", popover
+    shot("download-header-desktop.png")
+
+    click(".download-popover-item")
+    wait("return document.getElementById('download-progress-dialog').open",
+         message="progress dialog")
+    wait("return document.getElementById('download-progress-title')"
+         ".textContent.includes('Qwen/Qwen3-8B-GGUF')",
+         message="progress title")
+    wait("return document.querySelector('#download-progress-job .job-log')",
+         message="progress log")
+    progress = js("""return {
+      log: document.querySelector('#download-progress-job .job-log').textContent,
+      stopHidden: document.getElementById('download-progress-cancel').hidden,
+      status: document.querySelector('#download-progress-job .tag').textContent,
+      popoverHidden: document.getElementById('download-popover').hidden,
+    }""")
+    assert "tokenizer.json" in progress["log"], progress
+    assert progress["stopHidden"] is False, progress
+    assert progress["status"] == "进行中", progress
+    assert progress["popoverHidden"] is True, progress
+    shot("download-progress-desktop.png")
+    click("#download-progress-close")
+    wait("return !document.getElementById('download-progress-dialog').open",
+         message="progress dialog closed")
+
     click("#download-job button[data-download-cancel]")
     wait("return document.getElementById('confirm-dialog').open",
          message="cancel confirm")
     click("#confirm-ok")
     wait("return document.querySelector('#download-job .tag').textContent === '已取消'",
          message="job cancelled")
+    wait("return document.getElementById('download-badge').hidden",
+         message="header badge hidden")
     shot("download-job-cancelled-desktop.png")
 
     rect(420, 1000)
     time.sleep(0.3)
     shot("download-job-mobile.png")
     rect(1440, 1200)
+
+    # -- two downloads at the same time ---------------------------------
+    click(".download-card button[data-plan-source]")
+    wait("return document.getElementById('download-files-dialog').open",
+         message="first concurrent plan")
+    wait("return document.getElementById('download-files-start').disabled === false")
+    click("#download-files-start")
+    wait("return !document.getElementById('download-files-dialog').open",
+         message="first concurrent started")
+    wait("return document.getElementById('download-badge').textContent === '1'",
+         message="first concurrent badge")
+
+    js("""
+      const buttons = document.querySelectorAll('.download-card button[data-plan-source]');
+      buttons[1].click();
+      return true;
+    """)
+    wait("return document.getElementById('download-files-dialog').open",
+         message="second concurrent plan")
+    wait("return document.getElementById('download-files-start').disabled === false")
+    click("#download-files-start")
+    wait("return !document.getElementById('download-files-dialog').open",
+         message="second concurrent started")
+    wait("return document.getElementById('download-badge').textContent === '2'",
+         message="two running downloads")
+
+    click("#btn-downloads")
+    wait("return !document.getElementById('download-popover').hidden")
+    wait("return document.querySelectorAll('.download-popover-item').length === 2",
+         message="two popover items")
+    assert js("return document.getElementById('download-popover-count').textContent") == "进行中 2"
+    shot("download-header-multi-desktop.png")
+
+    rect(420, 1000)
+    time.sleep(0.3)
+    bounds = js("""const rect = document.getElementById('download-popover').getBoundingClientRect();
+      return {left: rect.left, right: rect.right, width: rect.width, vw: window.innerWidth};""")
+    assert bounds["left"] >= 0 and bounds["right"] <= bounds["vw"], bounds
+    shot("download-header-multi-mobile.png")
+    rect(1440, 1200)
+    time.sleep(0.3)
+
+    click(".download-popover-item")
+    wait("return document.getElementById('download-progress-dialog').open")
+    wait("return document.getElementById('download-progress-cancel').hidden === false")
+    click("#download-progress-cancel")
+    wait("return document.getElementById('confirm-dialog').open")
+    click("#confirm-ok")
+    wait("return document.querySelector('#download-progress-job .tag').textContent === '已取消'",
+         message="first concurrent cancelled")
+    wait("return document.getElementById('download-badge').textContent === '1'",
+         message="badge after one concurrent cancel")
+    click("#download-progress-close")
+    wait("return !document.getElementById('download-progress-dialog').open")
+
+    click("#btn-downloads")
+    wait("return !document.getElementById('download-popover').hidden")
+    wait("return document.querySelectorAll('.download-popover-item').length === 1",
+         message="one popover item left")
+    click(".download-popover-item")
+    wait("return document.getElementById('download-progress-dialog').open")
+    wait("return document.getElementById('download-progress-cancel').hidden === false")
+    click("#download-progress-cancel")
+    wait("return document.getElementById('confirm-dialog').open")
+    click("#confirm-ok")
+    wait("return document.querySelector('#download-progress-job .tag').textContent === '已取消'",
+         message="second concurrent cancelled")
+    wait("return document.getElementById('download-badge').hidden",
+         message="badge hidden after all concurrent downloads")
+    click("#download-progress-close")
 
     state = mock_state()
     assert state["proxy"]["enabled"] is True, state["proxy"]
@@ -288,6 +412,9 @@ try:
     assert state["sources"]["modelscope"] is False, state
     assert state["start"]["files"] == ["config.json", "sub/tokenizer.json"], state["start"]
     assert state["cancel"] is True, state
+    assert len(state["starts"]) == 3, state["starts"]
+    assert len(state["cancels"]) == 3, state["cancels"]
+    assert all(job["status"] == "cancelled" for job in state["jobs"]), state["jobs"]
     errors = js("return window.__uiErrors || []")
     assert not errors, errors
     print("PASS: proxy + download UI checks")

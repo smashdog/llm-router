@@ -21,13 +21,16 @@ STATE = {
     "sources": {
         "huggingface": False, "hf-mirror": False, "modelscope": False,
     },
-    "job": None,
+    "jobs": [],
+    "next_job": 0,
     "test_calls": [],
     "settings_posts": [],
     "search_q": None,
     "search_sources": None,
     "start": None,
+    "starts": [],
     "cancel": False,
+    "cancels": [],
 }
 
 SOURCES = [
@@ -113,7 +116,8 @@ def proxy_view() -> dict:
 
 def downloads_view() -> dict:
     proxy = proxy_view()
-    job = STATE["job"]
+    jobs = STATE["jobs"]
+    active = [job for job in jobs if job.get("status") == "running"]
     return {
         "dir": STATE["dir"],
         "dir_configured": bool(STATE["dir"]),
@@ -131,22 +135,24 @@ def downloads_view() -> dict:
             "hf": {"command": "hf", "path": "/srv/llm-router/.venv/bin/hf", "available": True},
             "modelscope": {
                 "command": "modelscope",
-                "path": "/srv/llm-router/.venv/bin/modelscope",
-                "available": True,
+                "path": "/srv/llm-router/.venv/bin/modelscope", "available": True,
             },
         },
-        "jobs": [job] if job else [],
-        "last_job_id": job["id"] if job else None,
+        "jobs": jobs[-5:],
+        "active_jobs": active,
+        "running_count": len(active),
+        "last_job_id": jobs[-1]["id"] if jobs else None,
         "config_file": "config.json",
     }
 
 
-def make_job(body: dict) -> dict:
+def make_job(body: dict, index: int) -> dict:
     repo = body.get("repo_id") or "Qwen/Qwen3-8B-GGUF"
     source_id = body.get("source", "huggingface")
     label = next((item[1] for item in SOURCES if item[0] == source_id), source_id)
+    job_id = f"ui-job-{index}"
     return {
-        "id": "ui-job-1",
+        "id": job_id,
         "kind": "download",
         "source": source_id,
         "source_label": label,
@@ -162,9 +168,9 @@ def make_job(body: dict) -> dict:
         "error": None,
         "cancel_requested": False,
         "exit_code": None,
-        "log_file": "logs/downloads/ui-job-1.log",
+        "log_file": f"logs/downloads/{job_id}.log",
         "log_tail": (
-            "Fetching 2 files: 100%|##########| 2/2\n"
+            f"Fetching {len(body.get('files') or [])} files: 100%|##########| 2/2\n"
             "config.json: 100%|##########| 123/123\n"
             "sub/tokenizer.json: 100%|##########| 456/456\n"
             "saved to " + f"{STATE['dir']}/{repo}"
@@ -248,7 +254,9 @@ class Handler(BaseHTTPRequestHandler):
                 })
             return self.send_json({"query": query, "limit": 30, "sources": sources, "items": items})
         if path == "/router/downloads/job":
-            job = STATE["job"]
+            params = parse_qs(parsed.query)
+            job_id = (params.get("id") or [""])[0]
+            job = next((item for item in STATE["jobs"] if item["id"] == job_id), None)
             if not job:
                 return self.send_json({"error": {"message": "not found"}}, 404)
             return self.send_json(job)
@@ -331,12 +339,16 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/router/downloads/start":
             STATE["start"] = body
-            STATE["job"] = make_job(body)
-            STATE["cancel"] = False
-            return self.send_json(STATE["job"], 202)
+            STATE["starts"].append(body)
+            STATE["next_job"] += 1
+            job = make_job(body, STATE["next_job"])
+            STATE["jobs"].append(job)
+            return self.send_json(job, 202)
         if path == "/router/downloads/cancel":
             STATE["cancel"] = True
-            job = STATE["job"]
+            job_id = str(body.get("id") or "")
+            STATE["cancels"].append(job_id)
+            job = next((item for item in STATE["jobs"] if item["id"] == job_id), None)
             if job:
                 job["status"] = "cancelled"
                 job["cancel_requested"] = True

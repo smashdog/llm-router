@@ -81,6 +81,54 @@
   .btn.ghost { background: transparent; }
   .btn.sm { min-height: 30px; padding: 5px 10px; font-size: 12px; border-radius: 8px; }
 
+  .download-menu { position: relative; display: inline-flex; }
+  .download-badge {
+    min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+    display: inline-grid; place-items: center;
+    background: #e5484d; color: #fff; font-size: 10.5px; font-weight: 700;
+    line-height: 1; box-shadow: 0 0 0 2px rgba(229,72,77,.16);
+  }
+  .download-badge[hidden] { display: none; }
+  .download-popover {
+    position: absolute; top: calc(100% + 8px); right: 0; z-index: 80;
+    width: min(340px, calc(100vw - 28px)); padding: 10px;
+    border-radius: 12px; border: 1px solid var(--line);
+    background: #101923; box-shadow: 0 18px 44px rgba(0,0,0,.5);
+  }
+  .download-popover[hidden] { display: none; }
+  .download-popover-head {
+    display: flex; align-items: center; gap: 8px; padding: 2px 4px 8px;
+    color: var(--muted); font-size: 11.5px; letter-spacing: .02em;
+  }
+  .download-popover-head .count { margin-left: auto; color: var(--faint); font-size: 11px; }
+  .download-popover-list { display: flex; flex-direction: column; gap: 6px; max-height: 330px; overflow: auto; }
+  .download-popover-empty { padding: 18px 10px; text-align: center; color: var(--faint); font-size: 12.5px; }
+  .download-popover-item {
+    display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 9px;
+    width: 100%; padding: 9px 10px; border-radius: 9px; border: 1px solid transparent;
+    background: rgba(255,255,255,.025); color: var(--text); text-align: left; cursor: pointer;
+  }
+  .download-popover-item:hover, .download-popover-item:focus-visible {
+    background: rgba(94,234,212,.07); border-color: rgba(94,234,212,.22); outline: none;
+  }
+  .download-popover-item .pulse {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--amber);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  .download-popover-item .text { min-width: 0; }
+  .download-popover-item .repo {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+  }
+  .download-popover-item .meta { display: block; margin-top: 2px; color: var(--faint); font-size: 10.5px; }
+  .download-popover-item .tag { font-size: 10px; }
+
+  #download-progress-job { margin-top: 12px; }
+  #download-progress-job .job-log { max-height: 44vh; }
+  #download-progress-dialog .dialog-actions .hint {
+    margin-right: auto; align-self: center; color: var(--faint); font-size: 11.5px;
+  }
+
   .manage-head { margin-bottom: 14px; }
   .manage-head h2 { margin: 0; font-size: 18px; letter-spacing: -.015em; }
   .manage-head p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
@@ -471,6 +519,7 @@
   @media (max-width: 820px) {
     .shell { width: calc(100% - 24px); padding-top: 18px; }
     .top-right { width: 100%; }
+    .download-popover { left: 0; right: auto; }
     .search { max-width: none; }
     .auth-form { grid-template-columns: 1fr; }
     .auth-actions { padding-bottom: 0; }
@@ -493,6 +542,20 @@
       </div>
     </div>
     <div class="top-right">
+      <div class="download-menu" id="download-menu">
+        <button class="btn" id="btn-downloads" type="button" aria-haspopup="true"
+          aria-expanded="false" aria-label="下载" title="没有正在下载的模型">
+          下载
+          <span class="download-badge" id="download-badge" hidden>0</span>
+        </button>
+        <div class="download-popover" id="download-popover" hidden>
+          <div class="download-popover-head">
+            <span>正在下载</span>
+            <span class="count" id="download-popover-count"></span>
+          </div>
+          <div class="download-popover-list" id="download-popover-list"></div>
+        </div>
+      </div>
       <a class="btn ghost" href="/ui/" target="_blank" rel="noopener">打开聊天 UI</a>
       <button class="btn" id="btn-manage" type="button" aria-pressed="false">管理</button>
     </div>
@@ -706,6 +769,19 @@
   </div>
 </dialog>
 
+<dialog id="download-progress-dialog" class="download-dialog">
+  <div class="dialog-body">
+    <h3 id="download-progress-title">下载进度</h3>
+    <p id="download-progress-sub">正在读取任务…</p>
+    <div id="download-progress-job"></div>
+  </div>
+  <div class="dialog-actions">
+    <span class="hint" id="download-progress-hint"></span>
+    <button class="btn" type="button" id="download-progress-close">关闭</button>
+    <button class="btn danger" type="button" id="download-progress-cancel" hidden>停止下载</button>
+  </div>
+</dialog>
+
 <dialog id="params-dialog" class="wide">
   <form id="params-form">
     <div class="dialog-body">
@@ -873,6 +949,14 @@
     downloadJobBusy: false,
     downloadJobTimer: null,
     downloadPlan: null,
+    activeDownloads: [],
+    activeDownloadsLoading: false,
+    activeTimer: null,
+    downloadPopoverOpen: false,
+    progressJob: null,
+    progressJobId: null,
+    progressBusy: false,
+    progressTimer: null,
   };
 
   const MODEL_STATES = {
@@ -1465,6 +1549,7 @@
     renderDownloadDirState();
     renderDownloadTools();
     renderDownloadSources();
+    applyActiveDownloads(view);
     if (view.last_job_id && (!state.downloadJob || state.downloadJob.id !== view.last_job_id)) {
       loadDownloadJob(view.last_job_id)
         .catch((error) => toast("无法读取下载任务：" + error.message, "bad"));
@@ -1481,6 +1566,67 @@
     } finally {
       state.downloadsLoading = false;
     }
+  }
+
+  function applyActiveDownloads(view) {
+    const jobs = Array.isArray(view && view.active_jobs)
+      ? view.active_jobs
+      : ((view && Array.isArray(view.jobs)) ? view.jobs : [])
+        .filter((job) => job && job.status === "running");
+    state.activeDownloads = jobs;
+    renderDownloadBadge();
+    if (state.downloadPopoverOpen) renderDownloadPopover();
+  }
+
+  async function loadActiveDownloads() {
+    if (state.activeDownloadsLoading) return;
+    state.activeDownloadsLoading = true;
+    try {
+      applyActiveDownloads(await api("/router/downloads"));
+    } catch (_) {
+      /* 网关不可达时保持现有状态，等待下一次轮询 */
+    } finally {
+      state.activeDownloadsLoading = false;
+    }
+  }
+
+  function renderDownloadBadge() {
+    const count = state.activeDownloads.length;
+    const badge = $("download-badge");
+    const button = $("btn-downloads");
+    badge.textContent = String(count);
+    badge.hidden = count === 0;
+    button.setAttribute("aria-label", count ? `下载，${count} 个进行中` : "下载");
+    button.title = count ? `${count} 个模型正在下载` : "没有正在下载的模型";
+  }
+
+  function setDownloadPopover(open) {
+    state.downloadPopoverOpen = open;
+    $("download-popover").hidden = !open;
+    $("btn-downloads").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      renderDownloadPopover();
+      loadActiveDownloads();
+    }
+  }
+
+  function renderDownloadPopover() {
+    const host = $("download-popover-list");
+    const jobs = state.activeDownloads;
+    $("download-popover-count").textContent = jobs.length ? `进行中 ${jobs.length}` : "";
+    if (!jobs.length) {
+      host.innerHTML = `<div class="download-popover-empty">没有下载</div>`;
+      return;
+    }
+    host.innerHTML = jobs.map((job) => `
+      <button class="download-popover-item" type="button" data-download-job="${esc(job.id)}">
+        <span class="pulse" aria-hidden="true"></span>
+        <span class="text">
+          <span class="repo">${esc(job.repo_id || job.id)}</span>
+          <span class="meta">${esc(job.source_label || job.source || "")} · ${job.files_count || 0} 个文件 · ${fmtBytes(job.total_bytes || 0)}</span>
+        </span>
+        <span class="tag amber">进行中</span>
+      </button>`).join("");
   }
 
   function renderDownloadDirState() {
@@ -1816,9 +1962,18 @@
       $("download-files-dialog").close();
       state.downloadJob = job;
       renderDownloadJob();
-      if (job.status === "running") scheduleDownloadJob();
+      if (job.status === "running") {
+        state.activeDownloads = [
+          job,
+          ...state.activeDownloads.filter((item) => item.id !== job.id),
+        ];
+        renderDownloadBadge();
+        renderDownloadPopover();
+        scheduleDownloadJob();
+      }
       toast(`已开始下载 ${job.repo_id}（${job.files_count} 个文件）`, "ok");
       loadDownloads();
+      loadActiveDownloads();
     } catch (error) {
       toast(error.message, "bad");
     } finally {
@@ -1830,6 +1985,48 @@
     }
   }
 
+  function downloadStatus(status) {
+    return {
+      running: ["进行中", "amber"],
+      success: ["已完成", "green"],
+      failed: ["失败", "red"],
+      cancelled: ["已取消", ""],
+    }[status] || [status || "未知", ""];
+  }
+
+  function dropActiveDownload(jobId) {
+    const before = state.activeDownloads.length;
+    state.activeDownloads = state.activeDownloads.filter((job) => job.id !== jobId);
+    if (state.activeDownloads.length !== before) {
+      renderDownloadBadge();
+      if (state.downloadPopoverOpen) renderDownloadPopover();
+    }
+  }
+
+  function downloadJobMarkup(job, options = {}) {
+    const status = downloadStatus(job.status);
+    const meta = [
+      `${job.files_count || 0} 个文件`,
+      fmtBytes(job.total_bytes || 0),
+    ];
+    if (job.target_dir) meta.push(`保存到 ${job.target_dir}`);
+    if (job.started_at) meta.push(`开始 ${fmtTime(job.started_at)}`);
+    if (job.finished_at) meta.push(`结束 ${fmtTime(job.finished_at)}`);
+    if (job.error) meta.push(job.error);
+    return `<div class="download-job">
+      <div class="job-head">
+        <strong>${esc(job.source_label || job.source)} · ${esc(job.repo_id || job.id)}</strong>
+        <span class="tag ${status[1]}">${esc(status[0])}</span>
+      </div>
+      <p class="job-meta">${esc(meta.join(" · "))}</p>
+      ${job.log_tail ? `<pre class="job-log">${esc(job.log_tail)}</pre>` : ""}
+      <div class="job-actions">
+        <span class="hint">任务 ${esc(job.id)}${job.status === "running" && options.autoRefresh !== false ? " · 自动刷新中" : ""}</span>
+        ${options.cancel && job.status === "running" ? `<button class="btn danger" type="button" data-download-cancel="${esc(job.id)}">取消下载</button>` : ""}
+      </div>
+    </div>`;
+  }
+
   function renderDownloadJob() {
     const host = $("download-job");
     const job = state.downloadJob;
@@ -1837,37 +2034,136 @@
       host.innerHTML = "";
       return;
     }
-    const status = {
-      running: ["进行中", "amber"],
-      success: ["已完成", "green"],
-      failed: ["失败", "red"],
-      cancelled: ["已取消", ""],
-    }[job.status] || [job.status || "未知", ""];
     const oldLog = host.querySelector(".job-log");
     const stick = !oldLog || oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 32;
     const oldScroll = oldLog ? oldLog.scrollTop : 0;
-    const meta = [
-      `${job.files_count} 个文件`,
-      fmtBytes(job.total_bytes),
-      `保存到 ${job.target_dir}`,
-      `开始 ${fmtTime(job.started_at)}`,
-    ];
-    if (job.finished_at) meta.push(`结束 ${fmtTime(job.finished_at)}`);
-    if (job.error) meta.push(job.error);
-    host.innerHTML = `<div class="download-job">
-      <div class="job-head">
-        <strong>${esc(job.source_label)} · ${esc(job.repo_id)}</strong>
-        <span class="tag ${status[1]}">${esc(status[0])}</span>
-      </div>
-      <p class="job-meta">${esc(meta.join(" · "))}</p>
-      ${job.log_tail ? `<pre class="job-log">${esc(job.log_tail)}</pre>` : ""}
-      <div class="job-actions">
-        <span class="hint">任务 ${esc(job.id)}${job.status === "running" ? " · 自动刷新中" : ""}</span>
-        ${job.status === "running" ? `<button class="btn danger" type="button" data-download-cancel="${esc(job.id)}">取消下载</button>` : ""}
-      </div>
-    </div>`;
+    host.innerHTML = downloadJobMarkup(job, { cancel: true });
     const log = host.querySelector(".job-log");
     if (log) log.scrollTop = stick ? log.scrollHeight : oldScroll;
+  }
+
+  function renderProgressJob() {
+    const host = $("download-progress-job");
+    const job = state.progressJob;
+    const cancel = $("download-progress-cancel");
+    const hint = $("download-progress-hint");
+    if (!job) {
+      host.innerHTML = "";
+      $("download-progress-title").textContent = "下载进度";
+      $("download-progress-sub").textContent = "正在读取任务…";
+      cancel.hidden = true;
+      hint.textContent = "";
+      return;
+    }
+    $("download-progress-title").textContent = job.repo_id || "下载任务";
+    const sub = [
+      job.source_label || job.source,
+      `${job.files_count || 0} 个文件`,
+      fmtBytes(job.total_bytes || 0),
+    ];
+    $("download-progress-sub").textContent = sub.filter(Boolean).join(" · ");
+    cancel.hidden = job.status !== "running";
+    cancel.disabled = state.progressBusy;
+    cancel.textContent = state.progressBusy ? "正在停止…" : "停止下载";
+    hint.textContent = job.status === "running" ? "进度每 1.5 秒自动刷新" : "";
+    const oldLog = host.querySelector(".job-log");
+    const stick = !oldLog || oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 32;
+    const oldScroll = oldLog ? oldLog.scrollTop : 0;
+    host.innerHTML = downloadJobMarkup(job, { cancel: false, autoRefresh: false });
+    const log = host.querySelector(".job-log");
+    if (log) log.scrollTop = stick ? log.scrollHeight : oldScroll;
+  }
+
+  async function openDownloadProgress(jobId) {
+    const key = String(jobId || "").trim();
+    if (!key) return;
+    setDownloadPopover(false);
+    state.progressJobId = key;
+    state.progressJob = state.activeDownloads.find((job) => job.id === key) || null;
+    renderProgressJob();
+    const dialog = $("download-progress-dialog");
+    if (!dialog.open) dialog.showModal();
+    try {
+      await loadProgressJob();
+    } catch (error) {
+      toast("无法读取下载任务：" + error.message, "bad");
+    }
+  }
+
+  async function loadProgressJob() {
+    const jobId = state.progressJobId;
+    if (!jobId) return;
+    const job = await api(`/router/downloads/job?id=${encodeURIComponent(jobId)}`);
+    if (state.progressJobId !== jobId) return;
+    state.progressJob = job;
+    renderProgressJob();
+    if (job.status === "running") scheduleProgressJob(job);
+    else if (state.progressTimer) {
+      clearTimeout(state.progressTimer);
+      state.progressTimer = null;
+    }
+  }
+
+  function scheduleProgressJob(job) {
+    if (state.progressTimer) {
+      clearTimeout(state.progressTimer);
+      state.progressTimer = null;
+    }
+    if (!job || job.status !== "running" || !state.progressJobId) return;
+    state.progressTimer = setTimeout(() => {
+      state.progressTimer = null;
+      loadProgressJob().catch((error) => toast("下载进度读取失败：" + error.message, "bad"));
+    }, 1500);
+  }
+
+  function closeDownloadProgress() {
+    const dialog = $("download-progress-dialog");
+    if (dialog.open) dialog.close();
+  }
+
+  function resetDownloadProgress() {
+    if (state.progressTimer) {
+      clearTimeout(state.progressTimer);
+      state.progressTimer = null;
+    }
+    state.progressJob = null;
+    state.progressJobId = null;
+    state.progressBusy = false;
+    renderProgressJob();
+    loadActiveDownloads();
+  }
+
+  async function stopProgressDownload() {
+    const job = state.progressJob;
+    if (!job || state.progressBusy || job.status !== "running") return;
+    const ok = await askConfirm(
+      "停止下载",
+      "将终止下载进程，已经下载完成的文件会保留。",
+      "停止下载",
+      true,
+    );
+    if (!ok) return;
+    state.progressBusy = true;
+    renderProgressJob();
+    try {
+      const updated = await api("/router/downloads/cancel", {
+        method: "POST",
+        body: JSON.stringify({ id: job.id }),
+      });
+      if (state.progressJobId === job.id) {
+        state.progressJob = updated;
+        renderProgressJob();
+        scheduleProgressJob(updated);
+      }
+      if (updated.status !== "running") dropActiveDownload(job.id);
+      loadActiveDownloads();
+      toast("已请求停止下载", "ok");
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      state.progressBusy = false;
+      if (state.progressJobId === job.id) renderProgressJob();
+    }
   }
 
   async function loadDownloadJob(jobId) {
@@ -1910,6 +2206,8 @@
       state.downloadJob = job;
       renderDownloadJob();
       if (job.status === "running") scheduleDownloadJob();
+      else dropActiveDownload(jobId);
+      loadActiveDownloads();
       toast("已请求取消下载", "ok");
     } catch (error) {
       toast(error.message, "bad");
@@ -2873,6 +3171,30 @@
     cancelDownloadJob(button.dataset.downloadCancel);
   });
 
+  $("btn-downloads").addEventListener("click", (event) => {
+    event.stopPropagation();
+    setDownloadPopover(!state.downloadPopoverOpen);
+  });
+  $("download-popover-list").addEventListener("click", (event) => {
+    const item = event.target.closest("button[data-download-job]");
+    if (!item) return;
+    openDownloadProgress(item.dataset.downloadJob)
+      .catch((error) => toast(error.message, "bad"));
+  });
+  document.addEventListener("click", (event) => {
+    if (!state.downloadPopoverOpen) return;
+    if (event.target.closest("#download-menu")) return;
+    setDownloadPopover(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.downloadPopoverOpen) setDownloadPopover(false);
+  });
+  $("download-progress-close").addEventListener("click", closeDownloadProgress);
+  $("download-progress-dialog").addEventListener("close", resetDownloadProgress);
+  $("download-progress-cancel").addEventListener("click", () => {
+    stopProgressDownload().catch((error) => toast(error.message, "bad"));
+  });
+
   $("search").addEventListener("input", (event) => {
     state.query = event.target.value;
     renderModels();
@@ -2899,11 +3221,16 @@
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) refresh();
+    if (!document.hidden) {
+      refresh();
+      loadActiveDownloads();
+    }
   });
 
   refresh();
   state.timer = setInterval(refresh, 1800);
+  loadActiveDownloads();
+  state.activeTimer = setInterval(loadActiveDownloads, 2200);
 })();
 </script>
 </body>
