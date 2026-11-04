@@ -527,6 +527,8 @@ class Model:
     display_name: str = ""
     aliases: list[str] = field(default_factory=list)
     context_length: int | None = None
+    cache_type_k: str | None = None
+    cache_type_v: str | None = None
     max_output_tokens: int | None = None
     multimodal: bool = False
     video: bool = False
@@ -577,6 +579,8 @@ class Model:
             "display_name": self.display_name or self.id,
             "aliases": list(self.aliases),
             "context_length": self.context_length,
+            "cache_type_k": self.cache_type_k,
+            "cache_type_v": self.cache_type_v,
             "multimodal": self.multimodal,
             "video": self.video,
             "audio": self.audio,
@@ -767,6 +771,65 @@ def append_llama_preset(path: Path, name: str, values: dict[str, str]) -> None:
     write_text_atomic(path, text + "\n".join(block) + "\n")
 
 
+_PRESET_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "c": ("c", "ctx-size"),
+    "cache-type-k": ("cache-type-k",),
+    "cache-type-v": ("cache-type-v",),
+}
+
+
+def update_llama_preset(path: Path, name: str, values: dict[str, str]) -> None:
+    """Update keys inside an existing preset section, keeping everything else intact."""
+    wanted = {str(key): str(value) for key, value in values.items()}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    except OSError:
+        lines = []
+    start: int | None = None
+    end: int | None = None
+    for index, raw in enumerate(lines):
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if start is not None:
+                end = index
+                break
+            if stripped[1:-1].strip() == name:
+                start = index
+    if start is None:
+        append_llama_preset(path, name, wanted)
+        return
+    if end is None:
+        end = len(lines)
+    missing = dict(wanted)
+    seen: set[str] = set()
+    section: list[str] = []
+    for raw in lines[start + 1:end]:
+        stripped = raw.strip()
+        if stripped and not stripped.startswith((";", "#")) and "=" in stripped:
+            current = stripped.split("=", 1)[0].strip().lower().replace("_", "-")
+            matched = None
+            for key in wanted:
+                if current in _PRESET_KEY_ALIASES.get(key, (key,)):
+                    matched = key
+                    break
+            if matched is not None:
+                if matched in seen:
+                    continue
+                seen.add(matched)
+                if matched in missing:
+                    indent = raw[: len(raw) - len(raw.lstrip())]
+                    section.append(f"{indent}{stripped.split('=', 1)[0].strip()} = {missing.pop(matched)}\n")
+                continue
+        section.append(raw)
+    trailing: list[str] = []
+    while section and not section[-1].strip():
+        trailing.insert(0, section.pop())
+    for key, value in missing.items():
+        section.append(f"{key} = {value}\n")
+    section.extend(trailing)
+    write_text_atomic(path, "".join(lines[: start + 1] + section + lines[end:]))
+
+
 def remove_llama_preset(path: Path, name: str) -> bool:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
@@ -878,6 +941,39 @@ def engine_help_text(engine_cfg: dict[str, Any], timeout: float = 20.0) -> str:
     return binary_help_text(Path(str(command[0])), cwd, timeout)
 
 
+# Used when the engine help cannot be read; mirrors llama.cpp's choice list.
+LLAMA_CACHE_TYPE_FALLBACK = (
+    "q8_0", "f16", "bf16", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl", "f32",
+)
+
+
+def parse_cache_type_choices(help_text: str) -> list[str]:
+    """Extract `--cache-type-k/v` allowed values from llama-server --help."""
+    lines = str(help_text or "").splitlines()
+    for flag in ("--cache-type-k", "--cache-type-v"):
+        for index, line in enumerate(lines):
+            if flag not in line or (flag + "-draft") in line:
+                continue
+            for follow in lines[index + 1:index + 4]:
+                marker = follow.find("allowed values:")
+                if marker < 0:
+                    continue
+                choices: list[str] = []
+                for item in follow[marker + len("allowed values:"):].split(","):
+                    name = item.strip().split()[0] if item.strip() else ""
+                    if name and name not in choices:
+                        choices.append(name)
+                if choices:
+                    if "q8_0" in choices:
+                        choices = ["q8_0"] + [item for item in choices if item != "q8_0"]
+                    return choices
+    return list(LLAMA_CACHE_TYPE_FALLBACK)
+
+
+def llama_cache_type_choices(engine_cfg: dict[str, Any]) -> list[str]:
+    return parse_cache_type_choices(engine_help_text(engine_cfg))
+
+
 def llama_reasoning_enabled(settings: dict[str, str]) -> bool:
     """A llama preset opts into thinking only when it configures reasoning
     parsing/budget or passes a thinking switch through the chat template.
@@ -927,6 +1023,8 @@ def discover_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
         merged = dict(base)
         merged.update(section)
         ctx = parse_int(merged.get("c") or merged.get("ctx-size") or merged.get("ctx_size"))
+        cache_k = str(merged.get("cache-type-k") or merged.get("cache_type_k") or "").strip() or None
+        cache_v = str(merged.get("cache-type-v") or merged.get("cache_type_v") or "").strip() or None
         max_out = parse_int(merged.get("n-predict") or merged.get("n_predict") or merged.get("max_tokens"))
         if max_out is not None and max_out <= 0:
             max_out = None
@@ -987,6 +1085,8 @@ def discover_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 display_name=name,
                 aliases=aliases,
                 context_length=ctx,
+                cache_type_k=cache_k,
+                cache_type_v=cache_v,
                 max_output_tokens=max_out,
                 multimodal=vision,
                 # video comes from mtmd_helper_cap: vision AND MTMD_VIDEO, which is
@@ -2492,6 +2592,7 @@ class Gateway:
                     "models_dir": models_cfg.get("dir"),
                     "preset": models_cfg.get("preset"),
                     "defaults": llama_preset_defaults(engine_cfg),
+                    "cache_types": llama_cache_type_choices(engine_cfg),
                     "default_params": self.default_sampling(engine_id),
                 }
             elif kind == "kvmem_dir":
@@ -2570,6 +2671,21 @@ class Gateway:
         if not isinstance(vision_device, str) or vision_device.strip().lower() not in ("cpu", "gpu"):
             raise BadRequest('vision_device must be "cpu" or "gpu"')
         vision_gpu = vision_device.strip().lower() == "gpu"
+        context_length = payload.get("context_length")
+        if context_length is not None:
+            if isinstance(context_length, bool) or not isinstance(context_length, int):
+                raise BadRequest("context_length must be an integer")
+            if context_length < 256:
+                raise BadRequest("context_length must be at least 256")
+        cache_type_k = payload.get("cache_type_k")
+        cache_type_v = payload.get("cache_type_v")
+        for label, value in (("cache_type_k", cache_type_k), ("cache_type_v", cache_type_v)):
+            if value is not None and not isinstance(value, str):
+                raise BadRequest(f"{label} must be a string")
+        if kind == "kvmem_dir" and (
+            context_length is not None or cache_type_k is not None or cache_type_v is not None
+        ):
+            raise BadRequest("KVMem 引擎固定使用模型上下文与 q8 量化，不能设置上下文或 K/V 精度")
         steps = [
             {"key": "paths", "label": "检查模型路径", "status": "pending", "detail": ""},
             {"key": "metadata", "label": "读取 GGUF 元数据", "status": "pending", "detail": ""},
@@ -2589,6 +2705,9 @@ class Gateway:
             "model": model.strip(),
             "vision": vision_path,
             "vision_device": "gpu" if vision_gpu else "cpu",
+            "context_length": context_length,
+            "cache_type_k": (cache_type_k or "").strip() or None,
+            "cache_type_v": (cache_type_v or "").strip() or None,
             "name": (name or "").strip() or None,
             "params": params,
             "smoke": smoke,
@@ -2781,9 +2900,20 @@ class Gateway:
             info = gguf_model_info(model)
             if info is None:
                 raise BadRequest("无法读取 GGUF 头：文件不是有效的 GGUF 模型")
-            context = int(info.get("context_length") or 0)
-            if context <= 0:
+            gguf_context = int(info.get("context_length") or 0)
+            if gguf_context <= 0:
                 raise BadRequest("GGUF 中没有 context_length；无法确定上下文上限")
+            requested_context = job.get("context_length")
+            if requested_context is None:
+                context = gguf_context
+                context_note = f"上下文 {context:,}（GGUF 上限）"
+            else:
+                context = int(requested_context)
+                if context > gguf_context:
+                    raise BadRequest(
+                        f"上下文长度 {context:,} 超过 GGUF 上限 {gguf_context:,}"
+                    )
+                context_note = f"上下文 {context:,}（GGUF 上限 {gguf_context:,}）"
             name = slugify_model_id(job.get("name") or model.stem)
             if self.registry.resolve(name) is not None:
                 raise BadRequest(f"模型 ID {name} 已存在")
@@ -2799,14 +2929,35 @@ class Gateway:
             job["name"] = name
             self._job_step(
                 job, "metadata", "ok",
-                f"架构 {info.get('architecture') or '未知'}；上下文上限 {context:,}；ID {name}"
+                f"架构 {info.get('architecture') or '未知'}；{context_note}；ID {name}"
                 + ("；视觉 mmproj 有效" if vision is not None else ""),
             )
 
             self._job_step(job, "kv", "running")
             help_text = engine_help_text(engine_cfg)
+            cache_k = "q8_0"
+            cache_v = "q8_0"
+            explicit_cache = False
             if short == "llama":
-                cache_override = "--cache-type-k" in help_text and "--cache-type-v" in help_text
+                requested_k = job.get("cache_type_k")
+                requested_v = job.get("cache_type_v")
+                explicit_cache = bool(requested_k or requested_v)
+                if explicit_cache:
+                    choices = parse_cache_type_choices(help_text)
+                    cache_k = requested_k or "q8_0"
+                    cache_v = requested_v or "q8_0"
+                    for label, value in (("cache_type_k", cache_k), ("cache_type_v", cache_v)):
+                        if value not in choices:
+                            raise BadRequest(
+                                f"{label} {value!r} 不受支持；可选：{', '.join(choices)}"
+                            )
+                    if help_text and not (
+                        "--cache-type-k" in help_text and "--cache-type-v" in help_text
+                    ):
+                        raise BadRequest("该 llama.cpp 不支持 --cache-type-k/v，无法设置 K/V 量化精度")
+                    cache_override = True
+                else:
+                    cache_override = "--cache-type-k" in help_text and "--cache-type-v" in help_text
             else:
                 cache_override = False
                 _, kv_template = kvmem_reference_config(engine_cfg)
@@ -2816,7 +2967,14 @@ class Gateway:
                         cwd = Path(str(kv_template.get("cwd") or engine_cfg.get("cwd") or "."))
                         cache_override = "--kv" in binary_help_text(exe, cwd)
             if cache_override:
-                self._job_step(job, "kv", "ok", "k8v8（K/V 均为 q8_0）")
+                if short == "llama":
+                    detail = (
+                        f"K {cache_k} / V {cache_v}（自定义）"
+                        if explicit_cache else "k8v8（K/V 均为 q8_0）"
+                    )
+                else:
+                    detail = "q8_0（固定）"
+                self._job_step(job, "kv", "ok", detail)
             else:
                 note = "引擎帮助不可读，保守使用引擎默认" if not help_text else "引擎不支持 k8v8"
                 self._job_step(job, "kv", "warn", f"{note}，使用引擎默认 KV 精度")
@@ -2842,8 +3000,8 @@ class Gateway:
                     if not vision_gpu:
                         values["mmproj-offload"] = "off"
                 if cache_override:
-                    values["cache-type-k"] = "q8_0"
-                    values["cache-type-v"] = "q8_0"
+                    values["cache-type-k"] = cache_k
+                    values["cache-type-v"] = cache_v
                 append_llama_preset(preset_path, name, values)
                 config_file = preset_path
                 job["config_path"] = str(preset_path)
@@ -2930,7 +3088,12 @@ class Gateway:
             try:
                 self.preload(name)
             except EngineFailure as exc:
-                if not (cache_override and self._cache_startup_error(str(exc))):
+                # Only the default q8_0 choice retries without a cache override;
+                # an explicit q4/f16/... selection fails so the user sees why.
+                retry_cache = cache_override and (
+                    short != "llama" or (cache_k, cache_v) == ("q8_0", "q8_0")
+                )
+                if not (retry_cache and self._cache_startup_error(str(exc))):
                     raise
                 self._job_step(job, "kv", "warn", "k8v8 启动失败，回退引擎默认精度后重试")
                 if short == "llama" and preset_path is not None:
@@ -3123,6 +3286,183 @@ class Gateway:
                 if still else "配置已删除，模型文件未改动"
             ),
         }
+
+    # -- per-model engine parameters (llama.cpp preset) ---------------------
+
+    @staticmethod
+    def _llama_model_file(
+        engine_cfg: dict[str, Any], name: str, merged: dict[str, str]
+    ) -> Path | None:
+        models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+        models_dir = Path(str(models_cfg.get("dir") or ""))
+        raw = str(merged.get("model") or "").strip()
+        if raw:
+            path = Path(raw)
+            if path.is_absolute():
+                return path if path.is_file() else None
+            for root in (models_dir / name, models_dir):
+                candidate = root / path
+                if candidate.is_file():
+                    return candidate
+            return None
+        model_dir = models_dir / name
+        try:
+            files = sorted(model_dir.glob("*.gguf"))
+        except OSError:
+            files = []
+        return files[0] if files else None
+
+    def _engine_params_values(self, entry: Model, raw: Any) -> dict[str, str] | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, dict) or not raw:
+            raise BadRequest("engine_params must be a non-empty object")
+        if entry.engine != "llama":
+            raise BadRequest("KVMem 模型固定使用模型上下文与 q8 量化，不支持修改上下文或 K/V 精度")
+        preset_path = Path(str(entry.config_path or ""))
+        if entry.source != "preset" or not preset_path.is_file():
+            raise BadRequest("该模型由目录扫描发现，没有可编辑的 models.ini 预设段")
+        engine_cfg = self.config.get("engines", {}).get(entry.engine) or {}
+        presets = parse_llama_presets(preset_path)
+        section = presets.get(entry.engine_model) or {}
+        if not section:
+            raise BadRequest(f"models.ini 中找不到 [{entry.engine_model}] 段")
+        merged = dict(presets.get("*") or {})
+        merged.update(section)
+        values: dict[str, str] = {}
+        if "context_length" in raw:
+            context_raw = raw.get("context_length")
+            max_context: int | None = None
+            model_file = self._llama_model_file(engine_cfg, entry.engine_model, merged)
+            info = gguf_model_info(model_file) if model_file is not None else None
+            if info:
+                max_context = int(info.get("context_length") or 0) or None
+            if context_raw is None or (isinstance(context_raw, str) and not context_raw.strip()):
+                if max_context is None:
+                    current = parse_int(merged.get("c") or merged.get("ctx-size"))
+                    if not current:
+                        raise BadRequest("无法读取 GGUF 上下文上限，请填写上下文长度")
+                    context = current
+                else:
+                    context = max_context
+            else:
+                if (
+                    isinstance(context_raw, bool)
+                    or not isinstance(context_raw, (int, float))
+                    or int(context_raw) != context_raw
+                ):
+                    raise BadRequest("context_length must be an integer")
+                context = int(context_raw)
+                if context < 256:
+                    raise BadRequest("上下文长度至少为 256")
+                if max_context is not None and context > max_context:
+                    raise BadRequest(
+                        f"上下文长度 {context:,} 超过 GGUF 上限 {max_context:,}"
+                    )
+            values["c"] = str(context)
+        choices = llama_cache_type_choices(engine_cfg)
+        for field, key in (("cache_type_k", "cache-type-k"), ("cache_type_v", "cache-type-v")):
+            if field not in raw:
+                continue
+            value = raw.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise BadRequest(f"{field} must be a cache type")
+            value = value.strip()
+            if value not in choices:
+                raise BadRequest(f"{field} {value!r} 不受支持；可选：{', '.join(choices)}")
+            values[key] = value
+        if not values:
+            raise BadRequest("engine_params 没有可应用的字段")
+        return values
+
+    def save_model_params(
+        self, entry: Model, values: dict[str, Any], engine_params: Any = None
+    ) -> dict[str, Any]:
+        """Validate and persist sampling plus llama preset parameters."""
+        cleaned = normalize_sampling(values, entry.engine)
+        engine_values = self._engine_params_values(entry, engine_params)
+        saved = self.params.replace(entry.id, cleaned, entry.engine)
+        result: dict[str, Any] = {
+            "params": saved,
+            "engine_params": None,
+            "restarting": False,
+            "restart_pending": False,
+        }
+        if not engine_values:
+            return result
+        preset_path = Path(str(entry.config_path or ""))
+        update_llama_preset(preset_path, entry.engine_model, engine_values)
+        self.registry.reload()
+        fresh = self.registry.resolve(entry.id)
+        result["engine_params"] = {
+            "context_length": fresh.context_length if fresh else None,
+            "cache_type_k": fresh.cache_type_k if fresh else None,
+            "cache_type_v": fresh.cache_type_v if fresh else None,
+        }
+        started, pending, note = self._schedule_engine_restart(entry.engine)
+        result["restarting"] = started
+        result["restart_pending"] = pending
+        if note:
+            result["note"] = note
+        return result
+
+    def _schedule_engine_restart(self, engine_id: str) -> tuple[bool, bool, str | None]:
+        """Restart a live engine so it re-reads models.ini.
+
+        Returns (started, pending, note).  pending means the save is valid but the
+        engine is busy; the new values then apply on the next engine start.
+        """
+        with self.cond:
+            if self._shutting_down:
+                return False, True, "网关正在关闭，新参数将在下次启动时生效"
+            if self.async_operation is not None:
+                return False, True, "另一个加载/卸载操作正在进行，新参数将在下次加载模型时生效"
+            if self.switching:
+                return False, True, "网关正在切换模型，新参数将在下次加载模型时生效"
+            manager = self.engine
+            if manager is None or not manager.alive() or manager.engine_id != engine_id:
+                return False, False, "引擎未运行，新参数将在下次加载模型时生效"
+            active = self.active
+            reload_id = active.id if active is not None and active.engine == engine_id else None
+            self.async_operation = {
+                "kind": "restart",
+                "model": reload_id,
+                "engine": engine_id,
+                "started_at": iso_now(),
+            }
+            self.phase = "queued"
+            self.cond.notify_all()
+        thread = threading.Thread(
+            target=self._restart_engine_worker,
+            args=(engine_id, reload_id),
+            name=f"restart-{engine_id}",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception as exc:
+            with self.cond:
+                self.async_operation = None
+                self.phase = "error"
+                self.last_error = f"cannot start restart thread: {exc}"
+                self.cond.notify_all()
+            return False, True, f"无法启动重启线程：{exc}；新参数将在下次加载模型时生效"
+        return True, False, None
+
+    def _restart_engine_worker(self, engine_id: str, reload_id: str | None) -> None:
+        try:
+            self.stop_engine()
+            if reload_id:
+                self.preload(reload_id)
+        except Exception as exc:
+            self.log.exception("engine restart after parameter change failed")
+            with self.cond:
+                self.phase = "error"
+                self.last_error = str(exc)
+        finally:
+            with self.cond:
+                self.async_operation = None
+                self.cond.notify_all()
 
     # -- views -------------------------------------------------------------
 
@@ -3911,10 +4251,12 @@ class Handler(BaseHTTPRequestHandler):
                 values = {}
             if not isinstance(values, dict):
                 raise BadRequest("params must be an object")
-            saved = self.gateway.params.replace(entry.id, values, entry.engine)
+            result = self.gateway.save_model_params(
+                entry, values, payload.get("engine_params")
+            )
             self._json(
                 200,
-                {"status": "ok", "model": entry.id, "engine": entry.engine, "params": saved},
+                {"status": "ok", "model": entry.id, "engine": entry.engine, **result},
             )
             return
         if normalized == "/router/models/manage":

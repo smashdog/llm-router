@@ -237,17 +237,22 @@
 
   dialog.wide { width: min(560px, calc(100vw - 32px)); }
   .params-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-top: 14px; }
+  .params-grid.engine-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .params-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
   .params-grid label .name { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--faint); font-size: 10.5px; }
-  .params-grid input {
+  .params-grid input, .params-grid select {
     width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 8px;
     border: 1px solid var(--line); background: #0c121a; color: var(--text);
     font: inherit; font-size: 12.5px; outline: none;
   }
-  .params-grid input:focus { border-color: rgba(94,234,212,.45); }
+  .params-grid input:focus, .params-grid select:focus { border-color: rgba(94,234,212,.45); }
+  .params-group-title {
+    margin: 16px 0 -4px; color: var(--muted); font-size: 12.5px; font-weight: 600;
+  }
+  .params-group-title span { color: var(--faint); font-weight: 400; margin-left: 6px; }
   .params-hint { margin-top: 12px !important; color: var(--faint) !important; font-size: 12px !important; }
   .params-error { margin-top: 10px !important; color: #ffc1ca !important; font-size: 12.5px !important; }
-  @media (max-width: 520px) { .params-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 520px) { .params-grid, .params-grid.engine-grid { grid-template-columns: 1fr; } }
 
   dialog.add-wide { width: min(680px, calc(100vw - 32px)); }
   .radio-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
@@ -422,8 +427,20 @@
 <dialog id="params-dialog" class="wide">
   <form id="params-form">
     <div class="dialog-body">
-      <h3 id="params-title">采样参数</h3>
+      <h3 id="params-title">模型参数</h3>
       <p id="params-sub">为此模型设置默认采样参数。</p>
+      <div id="params-engine">
+        <p class="params-group-title">引擎参数 <span>llama.cpp · 保存后自动重启引擎生效</span></p>
+        <div class="params-grid engine-grid">
+          <label>上下文长度 <span class="name">ctx-size</span>
+            <input id="params-context" type="number" step="1" min="256" placeholder="留空使用 GGUF 上限" /></label>
+          <label>K 量化精度 <span class="name">cache-type-k</span>
+            <select id="params-cache-k"></select></label>
+          <label>V 量化精度 <span class="name">cache-type-v</span>
+            <select id="params-cache-v"></select></label>
+        </div>
+      </div>
+      <p class="params-group-title">采样参数 <span>留空不注入，使用引擎默认</span></p>
       <div class="params-grid">
         <label>温度 <span class="name">temperature</span>
           <input name="temperature" type="number" step="0.01" min="0" max="2" placeholder="留空不注入" /></label>
@@ -468,6 +485,17 @@
         <span class="device-label">视觉运行位置</span>
         <label class="check"><input type="radio" name="add-vision-device" value="cpu" checked /> CPU（默认）</label>
         <label class="check"><input type="radio" name="add-vision-device" value="gpu" /> GPU</label>
+      </div>
+      <div id="add-engine-params">
+        <p class="params-group-title">引擎参数 <span>llama.cpp · 上下文留空使用 GGUF 上限</span></p>
+        <div class="params-grid engine-grid">
+          <label>上下文长度 <span class="name">ctx-size</span>
+            <input id="add-context" type="number" step="1" min="256" placeholder="留空使用 GGUF 上限" /></label>
+          <label>K 量化精度 <span class="name">cache-type-k</span>
+            <select id="add-cache-k"></select></label>
+          <label>V 量化精度 <span class="name">cache-type-v</span>
+            <select id="add-cache-v"></select></label>
+        </div>
       </div>
       <p class="params-hint" id="add-defaults"></p>
       <div class="params-grid" id="add-params">
@@ -760,6 +788,8 @@
       if (status.target_model && status.target_model !== active) {
         sub += ` · 目标 <strong>${esc(status.target_model)}</strong>`;
       }
+    } else if (status.async_operation && status.async_operation.kind === "restart") {
+      sub = `正在重启引擎以应用新的上下文 / KV 精度${status.async_operation.model ? `（随后重新加载 <strong>${esc(status.async_operation.model)}</strong>）` : ""}…`;
     } else if (status.async_operation && status.async_operation.kind === "load") {
       sub = `正在加载 <strong>${esc(status.async_operation.model)}</strong>…`;
     } else {
@@ -847,6 +877,9 @@
       const meta = MODEL_STATES[value] || MODEL_STATES.unloaded;
       const facts = [];
       if (m.context_length) facts.push(`上下文 ${Number(m.context_length).toLocaleString()}`);
+      if (m.engine === "llama" && (m.cache_type_k || m.cache_type_v)) {
+        facts.push(`KV ${m.cache_type_k || "—"}/${m.cache_type_v || "—"}`);
+      }
       if (m.quantization) facts.push(m.quantization);
       if (m.multimodal) facts.push("视觉");
       if (m.reasoning) facts.push("思考");
@@ -963,9 +996,21 @@
     if (ok) await mutate("/models/unload", { model: id }, `已请求卸载 ${id}`);
   }
 
-  function openParams(id) {
+  function llamaManageEngine() {
+    const engines = (state.manage && state.manage.engines) || {};
+    return Object.values(engines).find((engine) => engine.kind === "llama") || null;
+  }
+
+  async function openParams(id) {
     const model = state.models.find((m) => m.id === id);
     if (!model) return;
+    if (!state.manage) {
+      try {
+        state.manage = await api("/router/models/manage");
+      } catch (_) {
+        state.manage = null;
+      }
+    }
     paramsModel = model.id;
     const dialog = $("params-dialog");
     const form = $("params-form");
@@ -976,15 +1021,25 @@
       if (input && params[key] != null) input.value = params[key];
     }
     const kv = model.engine === "kvmem";
+    const editable = model.engine === "llama" && model.source === "preset";
     form.elements.top_k.min = kv ? 1 : 0;
     form.elements.top_k.max = kv ? 64 : 1000;
     form.elements.repeat_last_n.min = kv ? 1 : -1;
-    $("params-title").textContent = `采样参数 · ${model.name || model.display_name || model.id}`;
+    $("params-engine").hidden = !editable;
+    if (editable) {
+      const manageEngine = llamaManageEngine();
+      $("params-context").value = model.context_length == null ? "" : model.context_length;
+      fillCacheSelect($("params-cache-k"), manageEngine && manageEngine.cache_types, model.cache_type_k || "q8_0");
+      fillCacheSelect($("params-cache-v"), manageEngine && manageEngine.cache_types, model.cache_type_v || "q8_0");
+    }
+    $("params-title").textContent = `模型参数 · ${model.name || model.display_name || model.id}`;
     $("params-sub").textContent =
       `模型 ${model.id}（${model.engine}）。留空的字段不注入，使用引擎默认值；请求中显式给出的参数优先。`;
     $("params-hint").textContent = kv
-      ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1。"
-      : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。";
+      ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文与 KV 精度固定为模型上限和 q8_0。"
+      : editable
+        ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。修改上下文或 KV 精度会自动重启引擎。"
+        : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。该模型由目录扫描发现，无法修改上下文与 KV 精度。";
     $("params-error").textContent = "";
     $("params-error").hidden = true;
     $("params-save").disabled = false;
@@ -1005,17 +1060,49 @@
         return;
       }
     }
+    const model = state.models.find((m) => m.id === paramsModel);
+    const body = { model: paramsModel, params: values };
+    if (model && model.engine === "llama" && model.source === "preset") {
+      const contextRaw = $("params-context").value.trim();
+      const engineParams = {};
+      if (contextRaw === "") {
+        engineParams.context_length = null;
+      } else {
+        const context = Number(contextRaw);
+        if (!Number.isInteger(context) || context < 256) {
+          $("params-error").textContent = "上下文长度必须是 ≥256 的整数（留空表示 GGUF 上限）";
+          $("params-error").hidden = false;
+          return;
+        }
+        engineParams.context_length = context;
+      }
+      engineParams.cache_type_k = $("params-cache-k").value;
+      engineParams.cache_type_v = $("params-cache-v").value;
+      body.engine_params = engineParams;
+    }
     const button = $("params-save");
     button.disabled = true;
     try {
       const payload = await api("/router/params", {
         method: "POST",
-        body: JSON.stringify({ model: paramsModel, params: values }),
+        body: JSON.stringify(body),
       });
-      const model = state.models.find((m) => m.id === paramsModel);
-      if (model) model.params = payload.params || {};
+      if (model) {
+        model.params = payload.params || {};
+        if (payload.engine_params) {
+          model.context_length = payload.engine_params.context_length;
+          model.cache_type_k = payload.engine_params.cache_type_k;
+          model.cache_type_v = payload.engine_params.cache_type_v;
+        }
+      }
       $("params-dialog").close();
-      toast(`已保存 ${paramsModel} 的采样参数`, "ok");
+      if (payload.restarting) {
+        toast(`已保存 ${paramsModel} 的参数，正在重启引擎以应用新的上下文/KV 精度`, "ok");
+      } else if (payload.restart_pending) {
+        toast(`已保存 ${paramsModel} 的参数；${payload.note || "引擎将在下次加载时应用新参数"}`, "ok");
+      } else {
+        toast(`已保存 ${paramsModel} 的参数`, "ok");
+      }
       await refresh();
     } catch (error) {
       $("params-error").textContent = error.message;
@@ -1046,6 +1133,15 @@
     return input ? input.value : "";
   }
 
+  const CACHE_TYPE_FALLBACK = ["q8_0", "f16", "bf16", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl", "f32"];
+
+  function fillCacheSelect(select, choices, value) {
+    if (!select) return;
+    const list = Array.isArray(choices) && choices.length ? choices : CACHE_TYPE_FALLBACK;
+    select.innerHTML = list.map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join("");
+    select.value = value && list.includes(value) ? value : (list.includes("q8_0") ? "q8_0" : list[0]);
+  }
+
   function fillAddParams(engineId) {
     const engines = (state.manage && state.manage.engines) || {};
     const engine = engines[engineId];
@@ -1060,9 +1156,16 @@
     form.elements.top_k.min = kv ? 1 : 0;
     form.elements.top_k.max = kv ? 64 : 1000;
     form.elements.repeat_last_n.min = kv ? 1 : -1;
+    const llama = engine && engine.kind === "llama";
+    $("add-engine-params").hidden = !llama;
+    $("add-context").value = "";
+    if (llama) {
+      fillCacheSelect($("add-cache-k"), engine.cache_types, "q8_0");
+      fillCacheSelect($("add-cache-v"), engine.cache_types, "q8_0");
+    }
     $("add-defaults").textContent = !engine ? "" : engine.kind === "kvmem"
-      ? "KV 精度 k8v8（--kv q8_0；引擎不支持时省略，使用默认）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数复制 ornith 模板，采样默认来自 ornith。"
-      : "KV 精度 k8v8（cache-type-k/v = q8_0；引擎不支持时省略）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
+      ? "KV 精度固定 q8_0（--kv q8_0；引擎不支持时省略，使用默认）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数复制 ornith 模板，采样默认来自 ornith。"
+      : "上下文默认取 GGUF 上限，可填更小值；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
   }
 
   function syncVisionDevice() {
@@ -1190,6 +1293,20 @@
       vision_device: (document.querySelector('input[name="add-vision-device"]:checked') || {}).value || "cpu",
       smoke: $("add-smoke").checked,
     };
+    const engineInfo = (state.manage && state.manage.engines && state.manage.engines[engine]) || {};
+    if (engineInfo.kind === "llama") {
+      const contextRaw = $("add-context").value.trim();
+      if (contextRaw !== "") {
+        const context = Number(contextRaw);
+        if (!Number.isInteger(context) || context < 256) {
+          showAddError("上下文长度必须是 ≥256 的整数。");
+          return;
+        }
+        body.context_length = context;
+      }
+      body.cache_type_k = $("add-cache-k").value || "q8_0";
+      body.cache_type_v = $("add-cache-v").value || "q8_0";
+    }
     if (Object.keys(params).length) body.params = params;
     submit.disabled = true;
     submit.textContent = "正在验证…";
@@ -1324,7 +1441,7 @@
     const id = button.dataset.id;
     if (button.dataset.action === "load") loadModel(id).catch((e) => toast(e.message, "bad"));
     if (button.dataset.action === "unload") unloadModel(id).catch((e) => toast(e.message, "bad"));
-    if (button.dataset.action === "params") openParams(id);
+    if (button.dataset.action === "params") openParams(id).catch((e) => toast(e.message, "bad"));
     if (button.dataset.action === "delete") deleteModel(id).catch((e) => toast(e.message, "bad"));
   });
 
