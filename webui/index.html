@@ -159,6 +159,139 @@
   .auth-note { margin: 12px 0 0; color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
   .auth-error { margin: 10px 0 0; color: #ffc1ca; font-size: 12.5px; overflow-wrap: anywhere; }
 
+  .proxy-panel, .downloads-panel {
+    padding: 16px; border-radius: 14px; background: rgba(255,255,255,.02);
+    border: 1px solid var(--line);
+  }
+  .proxy-head, .downloads-headline {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .proxy-head .tag, .downloads-headline .tag { margin-left: auto; }
+  .proxy-grid {
+    display: grid; grid-template-columns: 140px minmax(0, 1fr) 120px;
+    gap: 10px 12px; margin-top: 14px;
+  }
+  .proxy-grid .wide { grid-column: span 2; }
+  .proxy-field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+  .proxy-field .name { color: var(--faint); font-size: 10.5px; }
+  .proxy-field input, .proxy-field select, .download-dir-row input, .download-search-row input {
+    width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line);
+    background: #0c121a; color: var(--text); font: inherit; font-size: 12.5px; outline: none;
+  }
+  .proxy-field input:focus, .proxy-field select:focus,
+  .download-dir-row input:focus, .download-search-row input:focus { border-color: rgba(94,234,212,.45); }
+  .proxy-field input::placeholder, .download-dir-row input::placeholder,
+  .download-search-row input::placeholder { color: var(--faint); opacity: .85; }
+  .proxy-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .proxy-actions .hint { margin-right: auto; color: var(--faint); font-size: 11.5px; }
+  .proxy-result { margin: 11px 0 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+  .proxy-result.ok { color: #b9f6cb; }
+  .proxy-result.bad { color: #ffc1ca; }
+  .proxy-result .probe { display: block; color: var(--faint); font-size: 11.5px; margin-top: 3px; }
+
+  .downloads-panel { display: flex; flex-direction: column; gap: 14px; }
+  .download-dir-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .download-dir-row .label { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .download-dir-row input { flex: 1 1 240px; min-width: 160px; }
+  .download-dir-state { color: var(--faint); font-size: 11.5px; min-width: 80px; }
+  .download-dir-state.ok { color: #b9f6cb; }
+  .download-dir-state.bad { color: #ffc1ca; }
+  .download-search-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .download-search-row input { flex: 1 1 220px; min-width: 160px; }
+  .download-source-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .source-proxy {
+    display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px;
+    border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+    font-size: 11.5px; line-height: 1.4;
+  }
+  .source-proxy input { accent-color: var(--accent); }
+  .source-proxy.disabled { opacity: .45; }
+  .source-proxy .dot { width: 6px; height: 6px; }
+  .download-note { color: var(--faint); font-size: 11.5px; margin: 0; }
+  .download-note.bad { color: #ffc1ca; }
+  .download-summary { color: var(--muted); font-size: 12.5px; }
+  .download-summary .filters { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-left: 8px; }
+  .download-summary .chip { padding: 3px 9px; font-size: 11px; }
+  .download-results {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 12px;
+  }
+  .download-card {
+    display: flex; flex-direction: column; gap: 9px; padding: 14px;
+    border-radius: 14px; background: var(--panel); border: 1px solid var(--line);
+  }
+  .download-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .source-badge {
+    flex: 0 0 auto; padding: 2px 7px; border-radius: 6px; font-size: 10.5px;
+    border: 1px solid rgba(125,211,252,.26); color: #c7efff; background: rgba(125,211,252,.07);
+  }
+  .source-badge.hf-mirror { border-color: rgba(94,234,212,.30); color: #b7fff3; background: rgba(94,234,212,.08); }
+  .source-badge.modelscope { border-color: rgba(251,191,36,.28); color: #ffe5a3; background: rgba(251,191,36,.07); }
+  .download-card .repo {
+    font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+  .download-card .meta { display: flex; gap: 6px; flex-wrap: wrap; color: var(--faint); font-size: 11.5px; }
+  .download-card .meta .sep::before { content: "·"; margin-right: 6px; }
+  .download-card .stats { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; }
+  .download-card .tags { display: flex; gap: 5px; flex-wrap: wrap; }
+  .download-card .tags .tag { padding: 2px 6px; font-size: 10px; }
+  .download-card .actions { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 3px; }
+  .download-card .actions .hint { color: var(--faint); font-size: 11px; margin-right: auto; }
+  .download-empty {
+    grid-column: 1 / -1; padding: 28px 16px; border-radius: 12px; text-align: center;
+    border: 1px dashed var(--line); color: var(--faint); font-size: 12.5px;
+  }
+  .download-errors { display: flex; flex-direction: column; gap: 5px; }
+  .download-error { margin: 0; color: #ffc1ca; font-size: 11.5px; overflow-wrap: anywhere; }
+
+  .download-job {
+    padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line);
+    background: #0c121a;
+  }
+  .job-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .job-head strong { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+  .job-head .tag { margin-left: auto; }
+  .job-meta { margin: 6px 0 0; color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
+  .job-log {
+    margin: 9px 0 0; max-height: 220px; overflow: auto; white-space: pre-wrap;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 10.5px; line-height: 1.5; color: #aab6c8;
+    background: #080c12; border: 1px solid var(--line-soft); border-radius: 8px; padding: 9px;
+  }
+  .job-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .job-actions .hint { color: var(--faint); font-size: 11.5px; margin-right: auto; }
+
+  dialog.download-dialog { width: min(800px, calc(100vw - 32px)); }
+  #download-files-sub { white-space: pre-line; overflow-wrap: anywhere; }
+  .file-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0 8px; }
+  .file-tools .hint { margin-right: auto; color: var(--faint); font-size: 11.5px; }
+  .file-list { max-height: 46vh; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+  .file-row {
+    display: grid; grid-template-columns: 24px minmax(0, 1fr) 100px 92px;
+    gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line-soft);
+    font-size: 12px; color: var(--muted);
+  }
+  .file-row:last-child { border-bottom: 0; }
+  .file-row .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .file-row .size { text-align: right; color: var(--faint); font-size: 11.5px; }
+  .file-row .state { text-align: right; font-size: 11px; }
+  .file-row .state.ok { color: #ffe5a3; }
+  .file-row.existing { background: rgba(251,191,36,.05); }
+  .file-row input { accent-color: var(--accent); }
+  .file-summary { color: var(--muted); font-size: 12.5px; margin-top: 9px; }
+  .file-summary.bad { color: #ffc1ca; }
+  .download-dialog .dialog-body { max-height: 72vh; overflow: auto; }
+  @media (max-width: 720px) {
+    .proxy-grid { grid-template-columns: 1fr 1fr; }
+    .proxy-grid .wide { grid-column: span 2; }
+    .file-row { grid-template-columns: 24px minmax(0, 1fr) 76px; }
+    .file-row .state { display: none; }
+  }
+  @media (max-width: 520px) {
+    .proxy-grid { grid-template-columns: 1fr; }
+    .proxy-grid .wide { grid-column: span 1; }
+  }
+
   section.block { margin-top: 26px; }
   .section-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
   .section-head h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
@@ -334,7 +467,7 @@
     .search { max-width: none; }
     .auth-form { grid-template-columns: 1fr; }
     .auth-actions { padding-bottom: 0; }
-    .manage-layout { grid-template-columns: 1fr; }
+    .manage-layout { grid-template-columns: minmax(0, 1fr); }
     .head-actions { width: 100%; margin-left: 0; }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -424,6 +557,8 @@
         <p class="menu-label">设置</p>
         <button class="menu-item on" type="button" data-panel="engines">引擎路径</button>
         <button class="menu-item" type="button" data-panel="auth">API 密钥管理</button>
+        <button class="menu-item" type="button" data-panel="proxy">代理</button>
+        <button class="menu-item" type="button" data-panel="downloads">模型下载</button>
       </aside>
       <div class="manage-content">
         <section class="manage-panel" data-panel="engines" aria-labelledby="engine-paths-title">
@@ -457,6 +592,69 @@
             <p class="auth-note">密钥保存在服务端 api-key 文件中，保存后立即生效。聊天 UI 的 API Key 只作为客户端 Authorization 请求头发送，不会写入服务端。</p>
           </div>
         </section>
+        <section class="manage-panel" data-panel="proxy" aria-labelledby="proxy-title" hidden>
+          <h2 id="proxy-title">代理</h2>
+          <p class="panel-hint">模型搜索与下载可选用 HTTP 或 SOCKS5 代理。保存后，每个下载来源可以单独勾选是否走代理；未启用时来源代理选项不可用。</p>
+          <div class="proxy-panel">
+            <div class="proxy-head">
+              <label class="check" style="margin-top:0"><input id="proxy-enabled" type="checkbox" /> 启用代理</label>
+              <span class="tag" id="proxy-state">未配置</span>
+            </div>
+            <div class="proxy-grid">
+              <label class="proxy-field">类型 <span class="name">type</span>
+                <select id="proxy-type">
+                  <option value="http">HTTP</option>
+                  <option value="socks5">SOCKS5</option>
+                </select>
+              </label>
+              <label class="proxy-field">地址 <span class="name">host</span>
+                <input id="proxy-host" type="text" spellcheck="false" autocomplete="off" placeholder="127.0.0.1" />
+              </label>
+              <label class="proxy-field">端口 <span class="name">port</span>
+                <input id="proxy-port" type="number" min="1" max="65535" placeholder="10809" />
+              </label>
+              <label class="proxy-field">用户名（选填） <span class="name">username</span>
+                <input id="proxy-user" type="text" spellcheck="false" autocomplete="username" placeholder="留空表示不认证" />
+              </label>
+              <label class="proxy-field">密码（选填） <span class="name">password</span>
+                <input id="proxy-pass" type="password" autocomplete="current-password" placeholder="留空表示不认证" />
+              </label>
+              <label class="check" id="proxy-clear-field" style="margin-top:22px" hidden>
+                <input id="proxy-clear" type="checkbox" /> 清除已保存密码
+              </label>
+            </div>
+            <div class="proxy-actions">
+              <span class="hint" id="proxy-hint">密码只写入本机 config.json，接口不会回显。</span>
+              <button class="btn" type="button" id="proxy-test">测试连接</button>
+              <button class="btn primary" type="button" id="proxy-save">保存代理</button>
+            </div>
+            <p class="proxy-result" id="proxy-result" hidden></p>
+          </div>
+        </section>
+        <section class="manage-panel" data-panel="downloads" aria-labelledby="downloads-title" hidden>
+          <h2 id="downloads-title">模型下载</h2>
+          <p class="panel-hint">同时用 hf 与 modelscope 命令行搜索 Hugging Face、HF-Mirror、ModelScope，聚合展示结果；下载保存为「仓库/文件名」目录结构，已有文件会提示并跳过开始下载。</p>
+          <div class="downloads-panel">
+            <div class="download-dir-row">
+              <span class="label">下载目录</span>
+              <input id="download-dir" type="text" spellcheck="false" placeholder="/path/to/models" />
+              <span class="download-dir-state" id="download-dir-state">未设置</span>
+            </div>
+            <div class="download-search-row">
+              <input id="download-query" type="search" placeholder="搜索模型，例如 qwen3 gguf" autocomplete="off" />
+              <button class="btn primary" type="button" id="download-search">搜索三个来源</button>
+            </div>
+            <div class="download-source-row" id="download-sources"></div>
+            <p class="download-note" id="download-tools"></p>
+            <div class="download-note" id="download-status"></div>
+            <div class="download-errors" id="download-errors"></div>
+            <div id="download-job"></div>
+            <div class="download-summary" id="download-summary"></div>
+            <div class="download-results" id="download-results">
+              <div class="download-empty">填写下载目录并搜索模型；三个来源会并发查询。</div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   </main>
@@ -475,6 +673,23 @@
       <button class="btn danger" value="ok" id="confirm-ok" type="submit">确认</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="download-files-dialog" class="download-dialog">
+  <div class="dialog-body">
+    <h3>选择下载文件</h3>
+    <p id="download-files-sub">正在读取仓库文件列表…</p>
+    <div class="file-tools">
+      <label class="check" style="margin-top:0"><input id="download-select-all" type="checkbox" checked /> 全选可下载文件</label>
+      <span class="hint" id="download-files-total"></span>
+    </div>
+    <div class="file-list" id="download-file-list"></div>
+    <p class="file-summary" id="download-files-summary"></p>
+  </div>
+  <div class="dialog-actions">
+    <button class="btn" type="button" id="download-files-cancel">取消</button>
+    <button class="btn primary" type="button" id="download-files-start" disabled>开始下载</button>
+  </div>
 </dialog>
 
 <dialog id="params-dialog" class="wide">
@@ -622,6 +837,18 @@
     pathsBusy: false,
     addJob: null,
     addTimer: null,
+    proxy: null,
+    proxyBusy: false,
+    downloads: null,
+    downloadsLoading: false,
+    downloadDirBusy: false,
+    downloadSearch: null,
+    downloadSearchBusy: false,
+    downloadFilter: "all",
+    downloadJob: null,
+    downloadJobBusy: false,
+    downloadJobTimer: null,
+    downloadPlan: null,
   };
 
   const MODEL_STATES = {
@@ -874,6 +1101,8 @@
     });
     if (panel === "auth") loadAuth();
     if (panel === "engines") loadEnginePaths();
+    if (panel === "proxy") loadProxy();
+    if (panel === "downloads") loadDownloads();
   }
 
   function setView(view) {
@@ -989,6 +1218,628 @@
     } finally {
       state.authBusy = false;
       renderAuth();
+    }
+  }
+
+  // ------------------------------------------------------------- proxy / downloads
+
+  const DOWNLOAD_SOURCE_NAMES = {
+    huggingface: "Hugging Face",
+    "hf-mirror": "HF-Mirror",
+    modelscope: "ModelScope",
+  };
+
+  function downloadSourceName(id) {
+    return DOWNLOAD_SOURCE_NAMES[id] || String(id || "");
+  }
+
+  function fmtCount(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "—";
+    const abs = Math.abs(n);
+    if (abs >= 1e9) return `${(n / 1e9).toFixed(1).replace(/\.0$/, "")}B`;
+    if (abs >= 1e6) return `${(n / 1e6).toFixed(1).replace(/\.0$/, "")}M`;
+    if (abs >= 1e3) return `${(n / 1e3).toFixed(1).replace(/\.0$/, "")}k`;
+    return String(Math.round(n));
+  }
+
+  function fmtBytes(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let size = n;
+    let index = 0;
+    while (size >= 1024 && index < units.length - 1) {
+      size /= 1024;
+      index += 1;
+    }
+    return `${index === 0 ? Math.round(size) : size.toFixed(1)} ${units[index]}`;
+  }
+
+  function fmtDateShort(value) {
+    if (!value) return "";
+    const date = new Date(typeof value === "number" ? value * 1000 : value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleDateString("zh-CN");
+  }
+
+  function fmtParams(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    return `${fmtCount(n)} 参数`;
+  }
+
+  function applyProxyView(view) {
+    state.proxy = view || null;
+    if (!view) return;
+    $("proxy-enabled").checked = Boolean(view.enabled);
+    $("proxy-type").value = view.type || "http";
+    $("proxy-host").value = view.host || "";
+    $("proxy-port").value = view.port ? String(view.port) : "";
+    $("proxy-user").value = view.username || "";
+    $("proxy-pass").value = "";
+    $("proxy-pass").placeholder = view.has_password
+      ? "已保存，留空保持不变"
+      : "留空表示不认证";
+    $("proxy-pass").disabled = false;
+    $("proxy-clear").checked = false;
+    const tag = $("proxy-state");
+    if (view.configured) {
+      tag.textContent = "已启用";
+      tag.className = "tag green";
+    } else if (view.enabled) {
+      tag.textContent = "配置不完整";
+      tag.className = "tag amber";
+    } else {
+      tag.textContent = "未启用";
+      tag.className = "tag";
+    }
+    syncProxyClear();
+  }
+
+  function syncProxyClear() {
+    const hasSaved = Boolean(state.proxy && state.proxy.has_password);
+    const clear = $("proxy-clear").checked;
+    $("proxy-clear-field").hidden = !hasSaved;
+    $("proxy-pass").disabled = hasSaved && clear;
+    if (clear) $("proxy-pass").value = "";
+  }
+
+  async function loadProxy() {
+    try {
+      applyProxyView(await api("/router/proxy"));
+    } catch (error) {
+      toast("无法读取代理配置：" + error.message, "bad");
+    }
+  }
+
+  function setProxyBusy(busy) {
+    state.proxyBusy = busy;
+    $("proxy-save").disabled = busy;
+    $("proxy-test").disabled = busy;
+  }
+
+  function proxyPayload() {
+    const payload = {
+      enabled: $("proxy-enabled").checked,
+      type: $("proxy-type").value,
+      host: $("proxy-host").value.trim(),
+      port: $("proxy-port").value.trim(),
+      username: $("proxy-user").value.trim(),
+    };
+    const password = $("proxy-pass").value;
+    if (password) payload.password = password;
+    if ($("proxy-clear").checked) payload.clear_password = true;
+    return payload;
+  }
+
+  async function saveProxy() {
+    if (state.proxyBusy) return;
+    setProxyBusy(true);
+    $("proxy-save").textContent = "保存中…";
+    $("proxy-result").hidden = true;
+    try {
+      const view = await api("/router/proxy", {
+        method: "POST",
+        body: JSON.stringify(proxyPayload()),
+      });
+      applyProxyView(view);
+      toast("代理设置已保存", "ok");
+      if (state.downloads) loadDownloads();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setProxyBusy(false);
+      $("proxy-save").textContent = "保存代理";
+    }
+  }
+
+  function renderProxyResult(data) {
+    const box = $("proxy-result");
+    box.hidden = false;
+    box.className = "proxy-result " + (data.ok ? "ok" : "bad");
+    const head = data.ok
+      ? `代理可连通 · ${data.address} · ${String(data.type || "").toUpperCase()}`
+      : (data.error || "代理不可连通");
+    const lines = (data.tests || []).map((test) => (test.ok
+      ? `${test.target}：HTTP ${test.status} · ${test.elapsed_ms} ms`
+      : `${test.target}：${test.error || "访问失败"}`));
+    box.innerHTML = `<strong>${esc(head)}</strong>` + lines
+      .map((line) => `<span class="probe">${esc(line)}</span>`)
+      .join("");
+  }
+
+  async function testProxy() {
+    if (state.proxyBusy) return;
+    setProxyBusy(true);
+    $("proxy-test").textContent = "测试中…";
+    $("proxy-result").hidden = true;
+    try {
+      renderProxyResult(await api("/router/proxy/test", {
+        method: "POST",
+        body: JSON.stringify(proxyPayload()),
+      }));
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setProxyBusy(false);
+      $("proxy-test").textContent = "测试连接";
+    }
+  }
+
+  function applyDownloadsView(view) {
+    state.downloads = view;
+    const input = $("download-dir");
+    if (document.activeElement !== input) input.value = view.dir || "";
+    renderDownloadDirState();
+    renderDownloadTools();
+    renderDownloadSources();
+    if (view.last_job_id && (!state.downloadJob || state.downloadJob.id !== view.last_job_id)) {
+      loadDownloadJob(view.last_job_id)
+        .catch((error) => toast("无法读取下载任务：" + error.message, "bad"));
+    }
+  }
+
+  async function loadDownloads() {
+    if (state.downloadsLoading) return;
+    state.downloadsLoading = true;
+    try {
+      applyDownloadsView(await api("/router/downloads"));
+    } catch (error) {
+      toast("无法读取下载设置：" + error.message, "bad");
+    } finally {
+      state.downloadsLoading = false;
+    }
+  }
+
+  function renderDownloadDirState() {
+    const host = $("download-dir-state");
+    const view = state.downloads;
+    const typed = $("download-dir").value.trim();
+    host.className = "download-dir-state";
+    if (state.downloadDirBusy) {
+      host.textContent = "保存中…";
+      return;
+    }
+    if (!view || !view.dir_configured) {
+      host.textContent = "未设置";
+      host.classList.add("bad");
+      return;
+    }
+    if (typed && typed !== view.dir) {
+      host.textContent = "有未保存更改";
+      return;
+    }
+    host.title = view.dir;
+    if (view.dir_exists) {
+      host.textContent = "已就绪";
+      host.classList.add("ok");
+    } else {
+      host.textContent = "目录不存在";
+      host.classList.add("bad");
+    }
+  }
+
+  async function commitDownloadDir() {
+    if (state.downloadDirBusy) return;
+    const raw = $("download-dir").value.trim();
+    if (!raw) {
+      toast("请填写下载目录", "bad");
+      $("download-dir").focus();
+      return;
+    }
+    if (state.downloads && raw === state.downloads.dir) return;
+    state.downloadDirBusy = true;
+    renderDownloadDirState();
+    try {
+      const view = await api("/router/downloads/settings", {
+        method: "POST",
+        body: JSON.stringify({ dir: raw }),
+      });
+      applyDownloadsView(view);
+      $("download-dir").value = view.dir || raw;
+      toast("下载目录已保存", "ok");
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      state.downloadDirBusy = false;
+      renderDownloadDirState();
+    }
+  }
+
+  function renderDownloadTools() {
+    const host = $("download-tools");
+    const view = state.downloads;
+    if (!view) {
+      host.textContent = "";
+      return;
+    }
+    const tools = view.tools || {};
+    const names = ["hf", "modelscope"];
+    const parts = names.map((name) => {
+      const tool = tools[name] || {};
+      return `${name} ${tool.available ? "可用" : "未安装"}`;
+    });
+    host.textContent = `命令行：${parts.join(" · ")}。未安装的工具会在下次启动 llm-router 时自动尝试安装。`;
+    host.className = "download-note" + (names.every((name) => !tools[name]?.available) ? " bad" : "");
+    host.title = names.map((name) => tools[name]?.path).filter(Boolean).join("\n");
+  }
+
+  function renderDownloadSources() {
+    const host = $("download-sources");
+    const view = state.downloads;
+    if (!view) {
+      host.innerHTML = "";
+      return;
+    }
+    const proxyReady = Boolean(view.proxy_configured);
+    host.innerHTML = (view.sources || []).map((source) => {
+      const toolReady = Boolean(view.tools?.[source.tool]?.available);
+      const usable = proxyReady && toolReady;
+      const title = !proxyReady
+        ? "先在「代理」页启用代理后才能使用来源代理"
+        : (!toolReady ? `${source.tool} 命令不可用` : "为该来源的搜索与下载启用代理");
+      return `<label class="source-proxy ${usable ? "" : "disabled"}" title="${esc(title)}">
+        <input type="checkbox" data-download-source="${esc(source.id)}"${source.use_proxy ? " checked" : ""}${usable ? "" : " disabled"} />
+        ${esc(source.label)}${toolReady ? "" : "（未安装）"}
+      </label>`;
+    }).join("");
+  }
+
+  async function saveSourceProxy(sourceId, checked) {
+    try {
+      const view = await api("/router/downloads/settings", {
+        method: "POST",
+        body: JSON.stringify({ sources: { [sourceId]: { use_proxy: checked } } }),
+      });
+      applyDownloadsView(view);
+      toast(`${downloadSourceName(sourceId)}：${checked ? "使用代理" : "不使用代理"}`, "ok");
+    } catch (error) {
+      toast(error.message, "bad");
+      loadDownloads();
+    }
+  }
+
+  function downloadCard(item) {
+    const meta = [];
+    if (item.pipeline_tag) meta.push(`<span>${esc(item.pipeline_tag)}</span>`);
+    if (item.library) meta.push(`<span class="sep">${esc(item.library)}</span>`);
+    if (item.params) meta.push(`<span class="sep">${esc(fmtParams(item.params))}</span>`);
+    if (item.updated_at) meta.push(`<span class="sep">更新 ${esc(fmtDateShort(item.updated_at))}</span>`);
+    const stats = [];
+    if (item.downloads != null) stats.push(`<span>下载 ${esc(fmtCount(item.downloads))}</span>`);
+    if (item.likes != null) stats.push(`<span>点赞 ${esc(fmtCount(item.likes))}</span>`);
+    if (item.license) stats.push(`<span>许可 ${esc(item.license)}</span>`);
+    if (item.visibility) stats.push(`<span>${esc(item.visibility)}</span>`);
+    const tags = (item.tags || []).slice(0, 8)
+      .map((tag) => `<span class="tag">${esc(tag)}</span>`);
+    return `<article class="download-card">
+      <div class="download-card-head">
+        <span class="source-badge ${esc(item.source)}">${esc(item.source_label)}</span>
+        <span class="repo" title="${esc(item.repo_id)}">${esc(item.repo_id)}</span>
+      </div>
+      ${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
+      ${stats.length ? `<div class="stats">${stats.join("")}</div>` : ""}
+      ${tags.length ? `<div class="tags">${tags.join("")}</div>` : ""}
+      <div class="actions">
+        <span class="hint">${esc(item.source_label)}</span>
+        <button class="btn" type="button" data-plan-source="${esc(item.source)}" data-plan-repo="${esc(item.repo_id)}">选择文件</button>
+      </div>
+    </article>`;
+  }
+
+  function renderDownloadStatus() {
+    const host = $("download-status");
+    const errors = $("download-errors");
+    const search = state.downloadSearch;
+    let text = "";
+    if (state.downloadSearchBusy) {
+      text = "正在并发搜索三个来源…";
+    } else if (search) {
+      const bits = (search.sources || []).map((source) => {
+        const timing = source.elapsed_ms ? ` ${(source.elapsed_ms / 1000).toFixed(1)}s` : "";
+        return `${source.label} ${source.ok ? `${source.count} 条` : "失败"}${timing}`;
+      });
+      text = `关键词「${search.query}」· ${bits.join(" · ")}`;
+    } else {
+      text = "填写关键词后搜索；三个来源并发查询，结果按来源标注。";
+    }
+    host.textContent = text;
+    const allFailed = Boolean(search) && !state.downloadSearchBusy
+      && (search.sources || []).every((source) => !source.ok);
+    host.className = "download-note" + (allFailed ? " bad" : "");
+    const failures = search && !state.downloadSearchBusy
+      ? (search.sources || []).filter((source) => !source.ok)
+      : [];
+    errors.innerHTML = failures.map((source) =>
+      `<p class="download-error">${esc(source.label)} 搜索失败：${esc(source.error || "未知错误")}</p>`).join("");
+  }
+
+  function renderDownloadResults() {
+    const search = state.downloadSearch;
+    const summary = $("download-summary");
+    const host = $("download-results");
+    if (!search) {
+      summary.innerHTML = "";
+      host.innerHTML = '<div class="download-empty">填写下载目录并搜索模型；三个来源会并发查询。</div>';
+      return;
+    }
+    const counts = {};
+    for (const item of search.items || []) {
+      counts[item.source] = (counts[item.source] || 0) + 1;
+    }
+    const chips = [
+      `<button class="chip ${state.downloadFilter === "all" ? "on" : ""}" type="button" data-download-filter="all">全部 ${(search.items || []).length}</button>`,
+    ].concat((search.sources || []).map((source) =>
+      `<button class="chip ${state.downloadFilter === source.id ? "on" : ""}" type="button" data-download-filter="${esc(source.id)}">${esc(source.label)} ${counts[source.id] || 0}</button>`));
+    summary.innerHTML = `<span>聚合 ${(search.items || []).length} 条结果</span><span class="filters">${chips.join("")}</span>`;
+    const items = state.downloadFilter === "all"
+      ? (search.items || [])
+      : (search.items || []).filter((item) => item.source === state.downloadFilter);
+    host.innerHTML = items.length
+      ? items.map(downloadCard).join("")
+      : '<div class="download-empty">该来源没有返回结果。</div>';
+  }
+
+  function renderDownloadSearch() {
+    renderDownloadStatus();
+    renderDownloadResults();
+  }
+
+  async function searchDownloads() {
+    if (state.downloadSearchBusy) return;
+    const query = $("download-query").value.trim();
+    if (!query) {
+      toast("请输入搜索关键词", "bad");
+      $("download-query").focus();
+      return;
+    }
+    state.downloadSearchBusy = true;
+    state.downloadFilter = "all";
+    $("download-search").disabled = true;
+    $("download-search").textContent = "搜索中…";
+    renderDownloadStatus();
+    try {
+      state.downloadSearch = await api(
+        `/router/downloads/search?q=${encodeURIComponent(query)}&limit=30`,
+      );
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      state.downloadSearchBusy = false;
+      $("download-search").disabled = false;
+      $("download-search").textContent = "搜索三个来源";
+      renderDownloadSearch();
+    }
+  }
+
+  async function openDownloadPlan(source, repoId) {
+    const dialog = $("download-files-dialog");
+    const plan = { source, repo_id: repoId, view: null, selected: new Set(), busy: true };
+    state.downloadPlan = plan;
+    $("download-files-sub").textContent =
+      `正在读取 ${downloadSourceName(source)} 上 ${repoId} 的文件列表…`;
+    $("download-file-list").innerHTML = '<div class="download-empty">读取文件列表…</div>';
+    $("download-files-total").textContent = "";
+    $("download-files-summary").textContent = "";
+    $("download-files-summary").classList.remove("bad");
+    $("download-files-start").disabled = true;
+    $("download-files-start").textContent = "开始下载";
+    $("download-select-all").disabled = true;
+    $("download-select-all").checked = true;
+    $("download-select-all").indeterminate = false;
+    if (!dialog.open) dialog.showModal();
+    try {
+      const view = await api("/router/downloads/plan", {
+        method: "POST",
+        body: JSON.stringify({ source, repo_id: repoId }),
+      });
+      if (state.downloadPlan !== plan || !dialog.open) return;
+      plan.view = view;
+      plan.busy = false;
+      plan.selected = new Set(
+        view.files.filter((file) => !file.exists).map((file) => file.path),
+      );
+      renderDownloadPlan();
+    } catch (error) {
+      if (state.downloadPlan !== plan || !dialog.open) return;
+      plan.busy = false;
+      $("download-files-sub").textContent = `${downloadSourceName(source)} · ${repoId}`;
+      $("download-file-list").innerHTML = `<p class="download-error">${esc(error.message)}</p>`;
+      $("download-files-summary").textContent = "无法读取文件列表，请关闭后重试。";
+      $("download-files-summary").classList.add("bad");
+      toast(error.message, "bad");
+    }
+  }
+
+  function renderDownloadPlan() {
+    const plan = state.downloadPlan;
+    if (!plan || !plan.view) return;
+    const view = plan.view;
+    $("download-files-sub").textContent =
+      `${view.source_label} · ${view.repo_id}\n保存到 ${view.target_dir}`;
+    $("download-files-total").textContent =
+      `${view.file_count} 个文件 · 共 ${fmtBytes(view.total_bytes)}` +
+      (view.existing_count ? ` · ${view.existing_count} 个已存在` : "");
+    $("download-file-list").innerHTML = view.files.map((file) => {
+      const checked = plan.selected.has(file.path);
+      return `<label class="file-row${file.exists ? " existing" : ""}">
+        <input type="checkbox" data-file-path="${esc(file.path)}"${file.exists ? " disabled" : ""}${checked ? " checked" : ""} />
+        <span class="path" title="${esc(file.path)}">${esc(file.path)}</span>
+        <span class="size">${file.size ? fmtBytes(file.size) : "大小未知"}</span>
+        <span class="state${file.exists ? " ok" : ""}">${file.exists ? "已存在" : "可下载"}</span>
+      </label>`;
+    }).join("") || '<div class="download-empty">仓库中没有文件。</div>';
+    updateDownloadPlanSummary();
+  }
+
+  function updateDownloadPlanSummary() {
+    const plan = state.downloadPlan;
+    if (!plan || !plan.view) return;
+    const view = plan.view;
+    const selectable = view.files.filter((file) => !file.exists);
+    const selected = selectable.filter((file) => plan.selected.has(file.path));
+    const bytes = selected.reduce((sum, file) => sum + (file.size || 0), 0);
+    const summary = $("download-files-summary");
+    if (selected.length) {
+      summary.textContent = `已选 ${selected.length} 个文件 · ${fmtBytes(bytes)}`;
+      summary.classList.remove("bad");
+    } else if (!selectable.length) {
+      summary.textContent = "仓库文件都已存在，无需下载。";
+      summary.classList.add("bad");
+    } else {
+      summary.textContent = "请选择要下载的文件。";
+      summary.classList.add("bad");
+    }
+    const selectAll = $("download-select-all");
+    selectAll.disabled = plan.busy || !selectable.length;
+    const allSelected = selectable.length > 0
+      && selectable.every((file) => plan.selected.has(file.path));
+    selectAll.checked = allSelected;
+    selectAll.indeterminate = !allSelected && selected.length > 0;
+    $("download-files-start").disabled = plan.busy || selected.length === 0;
+  }
+
+  async function startPlannedDownload() {
+    const plan = state.downloadPlan;
+    if (!plan || !plan.view || plan.busy) return;
+    const files = plan.view.files
+      .filter((file) => !file.exists && plan.selected.has(file.path))
+      .map((file) => file.path);
+    if (!files.length) {
+      toast("请选择要下载的文件", "bad");
+      return;
+    }
+    plan.busy = true;
+    $("download-files-start").disabled = true;
+    $("download-files-start").textContent = "正在启动…";
+    try {
+      const job = await api("/router/downloads/start", {
+        method: "POST",
+        body: JSON.stringify({ source: plan.source, repo_id: plan.repo_id, files }),
+      });
+      $("download-files-dialog").close();
+      state.downloadJob = job;
+      renderDownloadJob();
+      if (job.status === "running") scheduleDownloadJob();
+      toast(`已开始下载 ${job.repo_id}（${job.files_count} 个文件）`, "ok");
+      loadDownloads();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      $("download-files-start").textContent = "开始下载";
+      if (state.downloadPlan === plan) {
+        plan.busy = false;
+        updateDownloadPlanSummary();
+      }
+    }
+  }
+
+  function renderDownloadJob() {
+    const host = $("download-job");
+    const job = state.downloadJob;
+    if (!job) {
+      host.innerHTML = "";
+      return;
+    }
+    const status = {
+      running: ["进行中", "amber"],
+      success: ["已完成", "green"],
+      failed: ["失败", "red"],
+      cancelled: ["已取消", ""],
+    }[job.status] || [job.status || "未知", ""];
+    const oldLog = host.querySelector(".job-log");
+    const stick = !oldLog || oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 32;
+    const oldScroll = oldLog ? oldLog.scrollTop : 0;
+    const meta = [
+      `${job.files_count} 个文件`,
+      fmtBytes(job.total_bytes),
+      `保存到 ${job.target_dir}`,
+      `开始 ${fmtTime(job.started_at)}`,
+    ];
+    if (job.finished_at) meta.push(`结束 ${fmtTime(job.finished_at)}`);
+    if (job.error) meta.push(job.error);
+    host.innerHTML = `<div class="download-job">
+      <div class="job-head">
+        <strong>${esc(job.source_label)} · ${esc(job.repo_id)}</strong>
+        <span class="tag ${status[1]}">${esc(status[0])}</span>
+      </div>
+      <p class="job-meta">${esc(meta.join(" · "))}</p>
+      ${job.log_tail ? `<pre class="job-log">${esc(job.log_tail)}</pre>` : ""}
+      <div class="job-actions">
+        <span class="hint">任务 ${esc(job.id)}${job.status === "running" ? " · 自动刷新中" : ""}</span>
+        ${job.status === "running" ? `<button class="btn danger" type="button" data-download-cancel="${esc(job.id)}">取消下载</button>` : ""}
+      </div>
+    </div>`;
+    const log = host.querySelector(".job-log");
+    if (log) log.scrollTop = stick ? log.scrollHeight : oldScroll;
+  }
+
+  async function loadDownloadJob(jobId) {
+    const job = await api(`/router/downloads/job?id=${encodeURIComponent(jobId)}`);
+    state.downloadJob = job;
+    renderDownloadJob();
+    if (job.status === "running") {
+      scheduleDownloadJob();
+    } else if (state.downloadJobTimer) {
+      clearTimeout(state.downloadJobTimer);
+      state.downloadJobTimer = null;
+    }
+  }
+
+  function scheduleDownloadJob() {
+    if (state.downloadJobTimer) clearTimeout(state.downloadJobTimer);
+    state.downloadJobTimer = setTimeout(() => {
+      state.downloadJobTimer = null;
+      const job = state.downloadJob;
+      if (!job || job.status !== "running") return;
+      loadDownloadJob(job.id).catch((error) => toast("下载状态读取失败：" + error.message, "bad"));
+    }, 1500);
+  }
+
+  async function cancelDownloadJob(jobId) {
+    if (state.downloadJobBusy) return;
+    const ok = await askConfirm(
+      "取消下载",
+      "将终止下载进程，已经下载完成的文件会保留。",
+      "取消下载",
+      true,
+    );
+    if (!ok) return;
+    state.downloadJobBusy = true;
+    try {
+      const job = await api("/router/downloads/cancel", {
+        method: "POST",
+        body: JSON.stringify({ id: jobId }),
+      });
+      state.downloadJob = job;
+      renderDownloadJob();
+      if (job.status === "running") scheduleDownloadJob();
+      toast("已请求取消下载", "ok");
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      state.downloadJobBusy = false;
     }
   }
 
@@ -1845,6 +2696,77 @@
   bindParamTabs($("add-dialog"));
   $("auth-form").addEventListener("submit", saveAuth);
   $("auth-clear").addEventListener("click", clearAuth);
+
+  document.querySelector('.manage-panel[data-panel="proxy"]').addEventListener("input", () => {
+    $("proxy-result").hidden = true;
+  });
+  document.querySelector('.manage-panel[data-panel="proxy"]').addEventListener("change", () => {
+    $("proxy-result").hidden = true;
+  });
+  $("proxy-clear").addEventListener("change", syncProxyClear);
+  $("proxy-save").addEventListener("click", saveProxy);
+  $("proxy-test").addEventListener("click", testProxy);
+
+  $("download-dir").addEventListener("input", renderDownloadDirState);
+  $("download-dir").addEventListener("change", commitDownloadDir);
+  $("download-dir").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commitDownloadDir();
+  });
+  $("download-search").addEventListener("click", searchDownloads);
+  $("download-query").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    searchDownloads();
+  });
+  $("download-sources").addEventListener("change", (event) => {
+    const box = event.target.closest("input[data-download-source]");
+    if (!box) return;
+    saveSourceProxy(box.dataset.downloadSource, box.checked);
+  });
+  $("download-results").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-plan-source]");
+    if (!button) return;
+    openDownloadPlan(button.dataset.planSource, button.dataset.planRepo);
+  });
+  $("download-summary").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-download-filter]");
+    if (!button) return;
+    state.downloadFilter = button.dataset.downloadFilter;
+    renderDownloadSearch();
+  });
+  $("download-files-dialog").addEventListener("close", () => {
+    state.downloadPlan = null;
+  });
+  $("download-files-cancel").addEventListener("click", () => {
+    $("download-files-dialog").close();
+  });
+  $("download-select-all").addEventListener("change", (event) => {
+    const plan = state.downloadPlan;
+    if (!plan || !plan.view) return;
+    plan.selected = event.target.checked
+      ? new Set(plan.view.files.filter((file) => !file.exists).map((file) => file.path))
+      : new Set();
+    $("download-file-list").querySelectorAll("input[data-file-path]").forEach((box) => {
+      if (!box.disabled) box.checked = event.target.checked;
+    });
+    updateDownloadPlanSummary();
+  });
+  $("download-file-list").addEventListener("change", (event) => {
+    const box = event.target.closest("input[data-file-path]");
+    const plan = state.downloadPlan;
+    if (!box || !plan) return;
+    if (box.checked) plan.selected.add(box.dataset.filePath);
+    else plan.selected.delete(box.dataset.filePath);
+    updateDownloadPlanSummary();
+  });
+  $("download-files-start").addEventListener("click", startPlannedDownload);
+  $("download-job").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-download-cancel]");
+    if (!button) return;
+    cancelDownloadJob(button.dataset.downloadCancel);
+  });
 
   $("search").addEventListener("input", (event) => {
     state.query = event.target.value;

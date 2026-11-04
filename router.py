@@ -30,6 +30,7 @@ import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,7 +41,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import requests
 
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 STATIC_TYPES = {
     ".css": "text/css; charset=utf-8",
@@ -75,6 +76,27 @@ OPENAI_JSON_PATHS = {
     "/v1/messages",
 }
 MODEL_REQUIRED_PATHS = OPENAI_JSON_PATHS
+
+# Model search / download sources.  HF and HF-Mirror share the ``hf`` CLI; the
+# mirror is selected with HF_ENDPOINT.  ModelScope uses its own CLI.
+DOWNLOAD_SOURCES: dict[str, dict[str, str]] = {
+    "huggingface": {"label": "Hugging Face", "tool": "hf", "kind": "hf"},
+    "hf-mirror": {"label": "HF-Mirror", "tool": "hf", "kind": "hf"},
+    "modelscope": {"label": "ModelScope", "tool": "modelscope", "kind": "modelscope"},
+}
+DOWNLOAD_SOURCE_ORDER = ("huggingface", "hf-mirror", "modelscope")
+DOWNLOAD_LIMIT_MAX = 50
+PROXY_TYPES = ("http", "socks5")
+PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+)
 
 HOP_BY_HOP = {
     "connection",
@@ -228,6 +250,169 @@ def first_key(value: Any) -> str | None:
 def resolve_path(base_dir: Path, value: Any) -> Path:
     path = Path(str(value))
     return path if path.is_absolute() else base_dir / path
+
+
+# ---------------------------------------------------------------------------
+# proxy / model download helpers
+
+def proxy_url(proxy_cfg: dict[str, Any] | None) -> str | None:
+    """Build a requests/CLI proxy URL without ever logging the credentials."""
+    if not isinstance(proxy_cfg, dict):
+        return None
+    kind = str(proxy_cfg.get("type") or "http").strip().lower()
+    scheme = "socks5h" if kind == "socks5" else "http"
+    host = str(proxy_cfg.get("host") or "").strip()
+    port = parse_int(proxy_cfg.get("port"))
+    if not host or not port:
+        return None
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    auth = ""
+    username = str(proxy_cfg.get("username") or "")
+    password = str(proxy_cfg.get("password") or "")
+    if username:
+        auth = quote(username, safe="")
+        if password:
+            auth += ":" + quote(password, safe="")
+        auth += "@"
+    return f"{scheme}://{auth}{host}:{port}"
+
+
+def apply_proxy_env(
+    env: dict[str, str], proxy_cfg: dict[str, Any] | None, use_proxy: bool
+) -> None:
+    """Replace inherited proxy settings so "no proxy" really means direct."""
+    for key in PROXY_ENV_KEYS:
+        env.pop(key, None)
+    if not use_proxy:
+        return
+    url = proxy_url(proxy_cfg)
+    if not url:
+        return
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                "http_proxy", "https_proxy", "all_proxy"):
+        env[key] = url
+
+
+def find_tool(name: str) -> Path | None:
+    """Prefer the executable next to the running interpreter (the managed .venv)."""
+    candidate = Path(sys.executable).parent / name
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return candidate
+    found = shutil.which(name)
+    return Path(found) if found else None
+
+
+def tool_python(tool: Path) -> str:
+    """Interpreter that owns a CLI tool, used for small library calls."""
+    for name in ("python", "python3"):
+        candidate = tool.parent / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return sys.executable
+
+
+def normalize_repo_id(value: Any) -> str:
+    text = str(value or "").strip()
+    parts = text.split("/")
+    if len(parts) != 2:
+        raise BadRequest("模型仓库名必须是 owner/name 格式")
+    for part in parts:
+        if not part or part in (".", "..") or not re.fullmatch(r"[\w.-]+", part):
+            raise BadRequest(f"模型仓库名不合法：{text!r}")
+    return text
+
+
+def safe_repo_file(value: Any) -> str | None:
+    text = str(value or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    if not text or text.startswith("/"):
+        return None
+    if any(ord(ch) < 32 for ch in text):
+        return None
+    parts = text.split("/")
+    if any(not part or part in (".", "..") for part in parts):
+        return None
+    return text
+
+
+def parse_modelscope_table(text: str) -> tuple[list[dict[str, Any]], int | None]:
+    """Parse the human table printed by ``modelscope list``.
+
+    The CLI has no JSON mode for listings; the banner goes to stderr, so stdout
+    contains the header, a dashed separator and one row per repository.
+    """
+    lines = text.splitlines()
+    separator = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.strip()
+            and re.fullmatch(r"[- ]+", line)
+            and index > 0
+            and "repo_id" in lines[index - 1]
+        ),
+        None,
+    )
+    if separator is None:
+        return [], None
+    headers = [cell.strip() for cell in re.split(r"\s{2,}", lines[separator - 1].strip())]
+    items: list[dict[str, Any]] = []
+    total: int | None = None
+    for line in lines[separator + 1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("page "):
+            match = re.search(r"total\s+(\d+)", stripped)
+            if match:
+                total = int(match.group(1))
+            break
+        if stripped.startswith("(no repositories"):
+            break
+        cells = [cell.strip() for cell in re.split(r"\s{2,}", stripped)]
+        if len(cells) < 2:
+            continue
+        row = dict(zip(headers, cells))
+        repo_id = row.get("repo_id")
+        if not repo_id:
+            continue
+        items.append(
+            {
+                "repo_id": repo_id,
+                "downloads": parse_int(row.get("downloads")),
+                "likes": parse_int(row.get("likes")),
+                "license": row.get("license") or None,
+                "visibility": row.get("visibility") or None,
+            }
+        )
+    return items, total
+
+
+def hf_search_item(raw: dict[str, Any], source: str) -> dict[str, Any]:
+    tags = [str(tag) for tag in (raw.get("tags") or []) if isinstance(tag, str)]
+    license_name = next(
+        (tag.split(":", 1)[1] for tag in tags if tag.startswith("license:")), None
+    )
+    params = None
+    safetensors = raw.get("safetensors")
+    if isinstance(safetensors, dict):
+        params = parse_int(safetensors.get("total"))
+    return {
+        "source": source,
+        "source_label": DOWNLOAD_SOURCES[source]["label"],
+        "repo_id": str(raw.get("id") or ""),
+        "pipeline_tag": raw.get("pipeline_tag"),
+        "library": raw.get("library_name"),
+        "downloads": parse_int(raw.get("downloads")),
+        "likes": parse_int(raw.get("likes")),
+        "license": license_name,
+        "params": params,
+        "updated_at": raw.get("last_modified") or raw.get("created_at"),
+        "created_at": raw.get("created_at"),
+        "tags": tags[:20],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2776,6 +2961,10 @@ class Gateway:
         self.status_hub = StatusHub(self._hub_model_list, self._hub_stamp, log)
         self.model_jobs_lock = threading.Lock()
         self.model_jobs: dict[str, dict[str, Any]] = {}
+        self.download_jobs_lock = threading.Lock()
+        self.download_jobs: dict[str, dict[str, Any]] = {}
+        self.download_procs: dict[str, subprocess.Popen[Any]] = {}
+        self.download_logs: dict[str, Path] = {}
         self.smoke_image_path = resolve_path(
             base_dir, config.get("smoke_image") or "smoke.png"
         )
@@ -3323,6 +3512,7 @@ class Gateway:
                     manager.stop()
                 except Exception:
                     self.log.exception("error while stopping engine during shutdown")
+            self.cancel_all_downloads()
             self.status_hub.close()
 
     # -- model management (console add/delete) ------------------------------
@@ -3533,6 +3723,879 @@ class Gateway:
             "note": note,
             "view": self.engine_paths_view(),
         }
+
+    # -- proxy / model search and download ---------------------------------
+
+    def _proxy_config(self, create: bool = False) -> dict[str, Any]:
+        proxy = self.config.get("proxy")
+        if isinstance(proxy, dict):
+            return proxy
+        if create:
+            proxy = {}
+            self.config["proxy"] = proxy
+            return proxy
+        return {}
+
+    def _downloads_config(self, create: bool = False) -> dict[str, Any]:
+        downloads = self.config.get("downloads")
+        if isinstance(downloads, dict):
+            return downloads
+        if create:
+            downloads = {}
+            self.config["downloads"] = downloads
+            return downloads
+        return {}
+
+    def _download_sources_config(self) -> dict[str, Any]:
+        sources = self._downloads_config().get("sources")
+        return sources if isinstance(sources, dict) else {}
+
+    def _normalize_proxy(
+        self, payload: dict[str, Any], current: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        current = current if isinstance(current, dict) else {}
+        enabled = payload.get("enabled", current.get("enabled", False))
+        if not isinstance(enabled, bool):
+            raise BadRequest("enabled 必须是布尔值")
+        kind = str(payload.get("type", current.get("type") or "http")).strip().lower()
+        if kind not in PROXY_TYPES:
+            raise BadRequest("代理类型必须是 http 或 socks5")
+        host = str(payload.get("host", current.get("host")) or "").strip()
+        if len(host) > 255:
+            raise BadRequest("代理地址过长")
+        if any(ch in host for ch in ("/", "@", "#", "?", "\\")) or any(
+            ch.isspace() for ch in host
+        ):
+            raise BadRequest("代理地址不能包含协议、路径或空格")
+        raw_port = payload.get("port", current.get("port"))
+        if raw_port is None or raw_port == "":
+            port = 0
+        else:
+            parsed = parse_int(raw_port)
+            if parsed is None:
+                raise BadRequest("代理端口必须是整数")
+            port = parsed
+        if port and not (1 <= port <= 65535):
+            raise BadRequest("代理端口必须在 1-65535 之间")
+        username = str(payload.get("username", current.get("username")) or "").strip()
+        if "password" in payload:
+            password = str(payload.get("password") or "")
+        else:
+            password = str(current.get("password") or "")
+        if payload.get("clear_password") is True:
+            password = ""
+        for label, value in (("用户名", username), ("密码", password)):
+            if len(value) > (256 if label == "用户名" else 512):
+                raise BadRequest(f"代理{label}过长")
+            if any(ord(ch) < 32 for ch in value):
+                raise BadRequest(f"代理{label}不能包含控制字符")
+        if enabled and (not host or not port):
+            raise BadRequest("启用代理时必须填写地址和端口")
+        if (host or port) and not (host and port):
+            raise BadRequest("代理地址和端口需要同时填写")
+        return {
+            "enabled": enabled,
+            "type": kind,
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+        }
+
+    def proxy_view(self) -> dict[str, Any]:
+        proxy = self._proxy_config()
+        kind = str(proxy.get("type") or "http").strip().lower()
+        if kind not in PROXY_TYPES:
+            kind = "http"
+        host = str(proxy.get("host") or "").strip()
+        port = parse_int(proxy.get("port")) or 0
+        enabled = bool(proxy.get("enabled"))
+        configured = bool(
+            enabled and host and 1 <= port <= 65535 and kind in PROXY_TYPES
+        )
+        return {
+            "enabled": enabled,
+            "type": kind,
+            "host": host,
+            "port": port or None,
+            "username": str(proxy.get("username") or ""),
+            "has_password": bool(str(proxy.get("password") or "")),
+            "configured": configured,
+            "config_file": self._engine_config_label(),
+        }
+
+    def _write_config_locked(self, new_config: dict[str, Any]) -> None:
+        try:
+            write_json_atomic(self.config_path, new_config)
+        except OSError as exc:
+            self.log.exception("cannot write %s", self.config_path)
+            raise GatewayError(f"无法写入 {self.config_path.name}：{exc}") from exc
+        self.config.clear()
+        self.config.update(new_config)
+
+    def save_proxy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        settings = self._normalize_proxy(payload, self._proxy_config())
+        with self._config_lock:
+            new_config = copy.deepcopy(self.config)
+            new_config["proxy"] = settings
+            downloads = new_config.get("downloads")
+            if not isinstance(downloads, dict):
+                downloads = {}
+                new_config["downloads"] = downloads
+            sources = downloads.get("sources")
+            if not isinstance(sources, dict):
+                sources = {}
+                downloads["sources"] = sources
+            if not (settings["enabled"] and settings["host"] and settings["port"]):
+                for source_id in DOWNLOAD_SOURCE_ORDER:
+                    entry = sources.get(source_id)
+                    if isinstance(entry, dict):
+                        entry["use_proxy"] = False
+            self._write_config_locked(new_config)
+        if settings.get("password"):
+            try:
+                os.chmod(self.config_path, 0o600)
+            except OSError:
+                pass
+        self.log.info(
+            "proxy settings updated (enabled=%s, type=%s, host=%s:%s)",
+            settings["enabled"], settings["type"], settings["host"], settings["port"],
+        )
+        return self.proxy_view()
+
+    def test_proxy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        probe = dict(payload or {})
+        probe["enabled"] = True
+        settings = self._normalize_proxy(probe, self._proxy_config())
+        host = settings["host"]
+        port = settings["port"]
+        url = proxy_url(settings)
+        if not url:
+            raise BadRequest("代理地址和端口不完整")
+        tcp_host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+        reachable = False
+        tcp_error = None
+        try:
+            with socket.create_connection((tcp_host, port), timeout=6.0):
+                reachable = True
+        except OSError as exc:
+            tcp_error = f"{type(exc).__name__}: {exc}"
+        tests: list[dict[str, Any]] = []
+        if reachable:
+            targets = (
+                ("HF-Mirror", "https://hf-mirror.com/"),
+                ("ModelScope", "https://www.modelscope.cn/"),
+            )
+
+            def probe_target(label: str, target_url: str) -> dict[str, Any]:
+                started = time.monotonic()
+                try:
+                    response = requests.get(
+                        target_url,
+                        proxies={"http": url, "https": url},
+                        timeout=(6, 12),
+                        headers={"User-Agent": f"llm-router/{VERSION}"},
+                        stream=True,
+                        allow_redirects=True,
+                    )
+                    status = response.status_code
+                    response.close()
+                    return {
+                        "target": label,
+                        "ok": status < 500 and status != 407,
+                        "status": status,
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    }
+                except Exception as exc:
+                    return {
+                        "target": label,
+                        "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}"[:400],
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    }
+
+            with ThreadPoolExecutor(
+                max_workers=len(targets), thread_name_prefix="proxy-probe"
+            ) as pool:
+                tests = list(pool.map(lambda item: probe_target(*item), targets))
+        ok = bool(reachable and any(test.get("ok") for test in tests))
+        error = None
+        if not reachable:
+            error = f"无法连接代理 {host}:{port}（{tcp_error or '连接失败'}）"
+        elif not ok:
+            error = "代理端口可连接，但通过代理访问目标站点失败"
+        self.log.info(
+            "proxy connectivity test %s:%s: reachable=%s ok=%s",
+            host, port, reachable, ok,
+        )
+        return {
+            "ok": ok,
+            "reachable": reachable,
+            "type": settings["type"],
+            "address": f"{host}:{port}",
+            "tests": tests,
+            "error": error,
+        }
+
+    def _source_uses_proxy(self, source_id: str) -> bool:
+        if not self.proxy_view()["configured"]:
+            return False
+        entry = self._download_sources_config().get(source_id)
+        return bool(isinstance(entry, dict) and entry.get("use_proxy"))
+
+    def _validate_source_id(self, value: Any) -> str:
+        source_id = str(value or "").strip()
+        if source_id not in DOWNLOAD_SOURCES:
+            raise BadRequest("source 必须是 huggingface、hf-mirror 或 modelscope")
+        return source_id
+
+    def _download_root(self) -> Path:
+        raw = str(self._downloads_config().get("dir") or "").strip()
+        if not raw:
+            raise BadRequest("请先在下载模型页设置下载目录")
+        path = resolve_path(self.base_dir, os.path.expanduser(raw))
+        if path.exists() and not path.is_dir():
+            raise BadRequest(f"下载目录不是文件夹：{path}")
+        return path
+
+    def downloads_view(self) -> dict[str, Any]:
+        proxy = self.proxy_view()
+        tools: dict[str, dict[str, Any]] = {}
+        for command in ("hf", "modelscope"):
+            tool = find_tool(command)
+            tools[command] = {
+                "command": command,
+                "path": str(tool) if tool else None,
+                "available": tool is not None,
+            }
+        raw_dir = str(self._downloads_config().get("dir") or "").strip()
+        root = resolve_path(self.base_dir, os.path.expanduser(raw_dir)) if raw_dir else None
+        sources_cfg = self._download_sources_config()
+        sources = []
+        for source_id in DOWNLOAD_SOURCE_ORDER:
+            spec = DOWNLOAD_SOURCES[source_id]
+            entry = sources_cfg.get(source_id)
+            use_proxy = bool(
+                proxy["configured"]
+                and isinstance(entry, dict)
+                and entry.get("use_proxy")
+            )
+            sources.append(
+                {
+                    "id": source_id,
+                    "label": spec["label"],
+                    "tool": spec["tool"],
+                    "available": tools[spec["tool"]]["available"],
+                    "use_proxy": use_proxy,
+                }
+            )
+        with self.download_jobs_lock:
+            jobs = [
+                {
+                    key: job.get(key)
+                    for key in (
+                        "id", "source", "source_label", "repo_id", "dir",
+                        "files_count", "total_bytes", "status",
+                        "started_at", "finished_at", "error",
+                    )
+                }
+                for job in list(self.download_jobs.values())[-5:]
+            ]
+            last_job_id = next(reversed(self.download_jobs), None) if self.download_jobs else None
+        return {
+            "dir": str(root) if root else "",
+            "dir_configured": bool(root),
+            "dir_exists": bool(root and root.is_dir()),
+            "proxy_configured": proxy["configured"],
+            "sources": sources,
+            "tools": tools,
+            "jobs": jobs,
+            "last_job_id": last_job_id,
+            "config_file": self._engine_config_label(),
+        }
+
+    def save_download_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = payload or {}
+        if "dir" not in payload and "sources" not in payload:
+            raise BadRequest("没有可保存的下载设置")
+        new_dir: str | None = None
+        if "dir" in payload:
+            raw = str(payload.get("dir") or "").strip()
+            if not raw:
+                raise BadRequest("下载目录不能为空")
+            if "\x00" in raw:
+                raise BadRequest("下载目录不合法")
+            path = Path(os.path.expanduser(raw))
+            if not path.is_absolute():
+                path = self.base_dir / path
+            path = path.resolve()
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise BadRequest(f"无法创建下载目录 {path}：{exc}") from exc
+            if not path.is_dir():
+                raise BadRequest(f"下载目录不是文件夹：{path}")
+            new_dir = str(path)
+        source_updates: dict[str, bool] = {}
+        if "sources" in payload:
+            raw_sources = payload.get("sources")
+            if not isinstance(raw_sources, dict):
+                raise BadRequest("sources 必须是对象")
+            for source_id, entry in raw_sources.items():
+                if source_id not in DOWNLOAD_SOURCES:
+                    raise BadRequest(f"未知下载源：{source_id}")
+                if not isinstance(entry, dict):
+                    raise BadRequest("每个下载源设置必须是对象")
+                use_proxy = entry.get("use_proxy")
+                if not isinstance(use_proxy, bool):
+                    raise BadRequest("use_proxy 必须是布尔值")
+                if use_proxy and not self.proxy_view()["configured"]:
+                    raise BadRequest("代理尚未启用或配置不完整，不能为下载源启用代理")
+                source_updates[source_id] = use_proxy
+        with self._config_lock:
+            new_config = copy.deepcopy(self.config)
+            downloads = new_config.get("downloads")
+            if not isinstance(downloads, dict):
+                downloads = {}
+                new_config["downloads"] = downloads
+            if new_dir is not None:
+                downloads["dir"] = new_dir
+            sources = downloads.get("sources")
+            if not isinstance(sources, dict):
+                sources = {}
+                downloads["sources"] = sources
+            for source_id, use_proxy in source_updates.items():
+                sources[source_id] = {"use_proxy": use_proxy}
+            self._write_config_locked(new_config)
+        if new_dir is not None:
+            self.log.info("download directory set to %s", new_dir)
+        if source_updates:
+            self.log.info("download source proxy settings updated: %s", source_updates)
+        return self.downloads_view()
+
+    def _source_tool(self, source_id: str) -> Path:
+        command = DOWNLOAD_SOURCES[source_id]["tool"]
+        tool = find_tool(command)
+        if tool is None:
+            raise GatewayError(
+                f"未找到 {command} 命令；请重新启动 llm-router 以安装模型下载工具"
+            )
+        return tool
+
+    def _cli_env(self, source_id: str, use_proxy: bool) -> dict[str, str]:
+        proxy_cfg = self._proxy_config()
+        if use_proxy and not self.proxy_view()["configured"]:
+            raise BadRequest("代理尚未启用或配置不完整")
+        env = os.environ.copy()
+        apply_proxy_env(env, proxy_cfg, use_proxy)
+        env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        env["HF_HUB_DISABLE_UPDATE_CHECK"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        if source_id == "hf-mirror":
+            env["HF_ENDPOINT"] = "https://hf-mirror.com"
+        else:
+            env.pop("HF_ENDPOINT", None)
+        return env
+
+    def _run_cli(
+        self, args: list[str], env: dict[str, str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                args,
+                cwd=str(self.base_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            raise GatewayError(f"未找到命令：{args[0]}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise GatewayError(
+                f"命令执行超时（{int(timeout)}s）：{Path(str(args[0])).name}"
+            ) from exc
+        except OSError as exc:
+            raise GatewayError(f"命令启动失败：{exc}") from exc
+
+    def _redact_secrets(self, text: str) -> str:
+        value = str(text or "")
+        password = str(self._proxy_config().get("password") or "")
+        if password:
+            for variant in {password, quote(password, safe="")}:
+                if variant:
+                    value = value.replace(variant, "***")
+        return re.sub(r"(://[^/\s:@]+):[^/\s@]+@", r"\1:***@", value)
+
+    def _search_source(
+        self, source_id: str, query: str, limit: int
+    ) -> dict[str, Any]:
+        spec = DOWNLOAD_SOURCES[source_id]
+        started = time.monotonic()
+        use_proxy = self._source_uses_proxy(source_id)
+        try:
+            tool = self._source_tool(source_id)
+            env = self._cli_env(source_id, use_proxy)
+            total: int | None = None
+            if spec["kind"] == "hf":
+                args = [
+                    str(tool), "models", "list",
+                    "--search", query,
+                    "--limit", str(limit),
+                    "--json",
+                    "--expand",
+                    "downloads,likes,lastModified,createdAt,pipeline_tag,tags,"
+                    "library_name,safetensors",
+                ]
+                proc = self._run_cli(args, env, 60.0)
+                if proc.returncode != 0 and "expand" in (proc.stderr or "").lower():
+                    # Older hf releases do not support --expand; the default
+                    # JSON still carries the main listing fields.
+                    proc = self._run_cli(
+                        [arg for arg in args if arg != "--expand"
+                         and not arg.startswith("downloads,likes,")],
+                        env,
+                        60.0,
+                    )
+                if proc.returncode != 0:
+                    message = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
+                    raise GatewayError("Hugging Face 搜索失败：" + message[-600:])
+                try:
+                    raw = json.loads(proc.stdout or "[]")
+                except ValueError as exc:
+                    raise GatewayError("Hugging Face 搜索输出不是 JSON") from exc
+                if not isinstance(raw, list):
+                    raise GatewayError("Hugging Face 搜索输出格式不正确")
+                items = [
+                    hf_search_item(item, source_id)
+                    for item in raw
+                    if isinstance(item, dict) and item.get("id")
+                ]
+            else:
+                args = [
+                    str(tool), "list",
+                    "--repo-type", "model",
+                    "--search", query,
+                    "--page-size", str(min(limit, 50)),
+                ]
+                proc = self._run_cli(args, env, 60.0)
+                if proc.returncode != 0:
+                    message = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
+                    raise GatewayError("ModelScope 搜索失败：" + message[-600:])
+                rows, total = parse_modelscope_table(proc.stdout or "")
+                items = [
+                    {
+                        "source": source_id,
+                        "source_label": spec["label"],
+                        "repo_id": row["repo_id"],
+                        "pipeline_tag": None,
+                        "library": None,
+                        "downloads": row.get("downloads"),
+                        "likes": row.get("likes"),
+                        "license": row.get("license"),
+                        "params": None,
+                        "updated_at": None,
+                        "created_at": None,
+                        "tags": [],
+                        "visibility": row.get("visibility"),
+                    }
+                    for row in rows
+                ]
+            return {
+                "id": source_id,
+                "label": spec["label"],
+                "ok": True,
+                "items": items,
+                "count": len(items),
+                "total": total,
+                "error": None,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        except Exception as exc:
+            message = self._redact_secrets(str(exc) or type(exc).__name__)
+            self.log.warning("download search %s failed: %s", source_id, message)
+            return {
+                "id": source_id,
+                "label": spec["label"],
+                "ok": False,
+                "items": [],
+                "count": 0,
+                "total": None,
+                "error": message,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+
+    def search_downloads(self, query: Any, limit: Any = None) -> dict[str, Any]:
+        text = str(query or "").strip()
+        if not text:
+            raise BadRequest("请输入搜索关键词")
+        if len(text) > 200:
+            raise BadRequest("搜索关键词过长")
+        parsed_limit = parse_int(limit)
+        limit_value = max(1, min(parsed_limit or 30, DOWNLOAD_LIMIT_MAX))
+        results: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(
+            max_workers=len(DOWNLOAD_SOURCE_ORDER), thread_name_prefix="download-search"
+        ) as pool:
+            futures = {
+                pool.submit(self._search_source, source_id, text, limit_value): source_id
+                for source_id in DOWNLOAD_SOURCE_ORDER
+            }
+            for future in as_completed(futures):
+                source_id = futures[future]
+                try:
+                    results[source_id] = future.result()
+                except Exception as exc:
+                    message = self._redact_secrets(str(exc) or type(exc).__name__)
+                    results[source_id] = {
+                        "id": source_id,
+                        "label": DOWNLOAD_SOURCES[source_id]["label"],
+                        "ok": False,
+                        "items": [],
+                        "count": 0,
+                        "total": None,
+                        "error": message,
+                        "elapsed_ms": 0,
+                    }
+        ordered = [results[source_id] for source_id in DOWNLOAD_SOURCE_ORDER]
+        items: list[dict[str, Any]] = []
+        for result in ordered:
+            items.extend(result.get("items") or [])
+        return {
+            "query": text,
+            "limit": limit_value,
+            "sources": [
+                {
+                    key: result.get(key)
+                    for key in ("id", "label", "ok", "count", "total", "error", "elapsed_ms")
+                }
+                for result in ordered
+            ],
+            "items": items,
+        }
+
+    def _list_repo_files(
+        self, source_id: str, repo_id: str, use_proxy: bool
+    ) -> list[dict[str, Any]]:
+        spec = DOWNLOAD_SOURCES[source_id]
+        tool = self._source_tool(source_id)
+        env = self._cli_env(source_id, use_proxy)
+        raw: Any
+        if spec["kind"] == "hf":
+            proc = self._run_cli(
+                [str(tool), "models", "list", repo_id, "-R", "--json"],
+                env,
+                120.0,
+            )
+            if proc.returncode != 0:
+                message = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
+                raise GatewayError("读取仓库文件列表失败：" + message[-600:])
+            try:
+                raw = json.loads(proc.stdout or "[]")
+            except ValueError as exc:
+                raise GatewayError("仓库文件列表不是 JSON") from exc
+            if isinstance(raw, dict):
+                raw = raw.get("siblings") or raw.get("files") or []
+            entries = raw if isinstance(raw, list) else []
+            files: list[dict[str, Any]] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("type") or "").lower() == "directory":
+                    continue
+                # ``hf models list -R`` marks directories only with tree_id and
+                # omits size; regular files always carry a size.
+                if entry.get("size") is None:
+                    continue
+                safe = safe_repo_file(entry.get("path"))
+                if not safe:
+                    continue
+                files.append({"path": safe, "size": parse_int(entry.get("size")) or 0})
+        else:
+            python = tool_python(tool)
+            code = (
+                "import json, sys\n"
+                "from modelscope.hub.api import HubApi\n"
+                "files = HubApi().get_model_files(sys.argv[1], recursive=True)\n"
+                "print(json.dumps(files, ensure_ascii=False))\n"
+            )
+            proc = self._run_cli(
+                [python, "-c", code, repo_id], env, 120.0
+            )
+            if proc.returncode != 0:
+                message = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
+                raise GatewayError("读取 ModelScope 仓库文件列表失败：" + message[-600:])
+            try:
+                raw = json.loads(proc.stdout or "[]")
+            except ValueError as exc:
+                raise GatewayError("ModelScope 仓库文件列表不是 JSON") from exc
+            entries = raw if isinstance(raw, list) else []
+            files = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                safe = safe_repo_file(entry.get("Path") or entry.get("path"))
+                if not safe:
+                    continue
+                size = entry.get("Size", entry.get("size"))
+                files.append({"path": safe, "size": parse_int(size) or 0})
+        deduped: dict[str, dict[str, Any]] = {}
+        for entry in files:
+            deduped[entry["path"]] = entry
+        return list(deduped.values())
+
+    def plan_download(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source_id = self._validate_source_id(payload.get("source"))
+        repo_id = normalize_repo_id(payload.get("repo_id"))
+        root = self._download_root()
+        use_proxy = self._source_uses_proxy(source_id)
+        files = self._list_repo_files(source_id, repo_id, use_proxy)
+        if not files:
+            raise BadRequest("仓库中没有可下载的文件")
+        target = root / repo_id
+        items = []
+        existing = []
+        for entry in files:
+            full_path = target / entry["path"]
+            exists = full_path.is_file()
+            item = {
+                "path": entry["path"],
+                "size": entry["size"],
+                "exists": exists,
+            }
+            items.append(item)
+            if exists:
+                existing.append(item)
+        total_bytes = sum(item["size"] for item in items)
+        missing_bytes = sum(item["size"] for item in items if not item["exists"])
+        return {
+            "source": source_id,
+            "source_label": DOWNLOAD_SOURCES[source_id]["label"],
+            "repo_id": repo_id,
+            "dir": str(root),
+            "target_dir": str(target),
+            "files": items,
+            "file_count": len(items),
+            "total_bytes": total_bytes,
+            "missing_bytes": missing_bytes,
+            "existing_count": len(existing),
+            "use_proxy": use_proxy,
+        }
+
+    def start_download(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source_id = self._validate_source_id(payload.get("source"))
+        repo_id = normalize_repo_id(payload.get("repo_id"))
+        with self.download_jobs_lock:
+            if any(
+                job.get("status") == "running" for job in self.download_jobs.values()
+            ):
+                raise ModelBusy("已有下载任务进行中，请等待完成或取消")
+        plan = self.plan_download(payload)
+        known = {item["path"]: item for item in plan["files"]}
+        requested = payload.get("files")
+        if requested is None:
+            selected = [item for item in plan["files"] if not item["exists"]]
+        else:
+            if not isinstance(requested, list):
+                raise BadRequest("files 必须是文件路径数组")
+            selected = []
+            seen: set[str] = set()
+            for raw in requested:
+                safe = safe_repo_file(raw)
+                if not safe:
+                    raise BadRequest(f"文件路径不合法：{raw!r}")
+                item = known.get(safe)
+                if item is None:
+                    raise BadRequest(f"文件不在仓库中：{safe}")
+                if safe not in seen:
+                    seen.add(safe)
+                    selected.append(item)
+        if not selected:
+            if plan["existing_count"]:
+                raise BadRequest("所选文件均已存在，未开始下载")
+            raise BadRequest("没有选择要下载的文件")
+        existing = [item for item in selected if item["exists"]]
+        if existing:
+            preview = "、".join(item["path"] for item in existing[:3])
+            suffix = f" 等 {len(existing)} 个" if len(existing) > 3 else ""
+            raise BadRequest(f"文件已存在，未开始下载：{preview}{suffix}")
+        target = Path(plan["target_dir"])
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise BadRequest(f"无法创建下载目录 {target}：{exc}") from exc
+        tool = self._source_tool(source_id)
+        env = self._cli_env(source_id, plan["use_proxy"])
+        command = [
+            str(tool), "download", repo_id,
+            "--local-dir", str(target),
+            "--max-workers", "4",
+        ] + [item["path"] for item in selected]
+        job_id = uuid.uuid4().hex[:12]
+        log_dir = self.base_dir / "logs" / "downloads"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise GatewayError(f"无法创建下载日志目录：{exc}") from exc
+        log_path = log_dir / f"{job_id}.log"
+        job = {
+            "id": job_id,
+            "kind": "download",
+            "source": source_id,
+            "source_label": DOWNLOAD_SOURCES[source_id]["label"],
+            "repo_id": repo_id,
+            "dir": str(Path(plan["dir"])),
+            "target_dir": str(target),
+            "files": [item["path"] for item in selected],
+            "files_count": len(selected),
+            "total_bytes": sum(item["size"] for item in selected),
+            "status": "running",
+            "started_at": iso_now(),
+            "finished_at": None,
+            "error": None,
+            "cancel_requested": False,
+            "exit_code": None,
+            "log_file": str(log_path.relative_to(self.base_dir)),
+        }
+        with self.download_jobs_lock:
+            if any(
+                entry.get("status") == "running"
+                for entry in self.download_jobs.values()
+            ):
+                raise ModelBusy("已有下载任务进行中，请等待完成或取消")
+            self.download_jobs[job_id] = job
+            self.download_logs[job_id] = log_path
+        try:
+            with log_path.open("w", encoding="utf-8") as log_handle:
+                proc = subprocess.Popen(
+                    command,
+                    cwd=str(self.base_dir),
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+        except OSError as exc:
+            with self.download_jobs_lock:
+                job["status"] = "failed"
+                job["finished_at"] = iso_now()
+                job["error"] = f"无法启动下载命令：{exc}"
+            return self.download_job_view(job_id) or job
+        with self.download_jobs_lock:
+            self.download_procs[job_id] = proc
+        worker = threading.Thread(
+            target=self._download_worker,
+            args=(job_id, proc, target, [item["path"] for item in selected]),
+            name=f"download-{job_id}",
+            daemon=True,
+        )
+        worker.start()
+        self.log.info(
+            "download started %s (%s/%s, %d files, %.1f MB)",
+            job_id, source_id, repo_id, len(selected),
+            sum(item["size"] for item in selected) / 1_000_000,
+        )
+        return self.download_job_view(job_id) or job
+
+    def _download_worker(
+        self,
+        job_id: str,
+        proc: subprocess.Popen[Any],
+        target: Path,
+        files: list[str],
+    ) -> None:
+        try:
+            return_code = proc.wait()
+        except Exception:
+            return_code = -1
+        missing = [name for name in files if not (target / name).is_file()]
+        with self.download_jobs_lock:
+            job = self.download_jobs.get(job_id)
+            if job is None:
+                return
+            cancelled = bool(job.get("cancel_requested"))
+            job["exit_code"] = return_code
+            job["finished_at"] = iso_now()
+            if cancelled:
+                job["status"] = "cancelled"
+                job["error"] = "下载已取消"
+            elif return_code == 0 and not missing:
+                job["status"] = "success"
+                job["error"] = None
+            else:
+                job["status"] = "failed"
+                if return_code != 0:
+                    job["error"] = f"下载命令退出码 {return_code}"
+                else:
+                    preview = "、".join(missing[:3])
+                    suffix = f" 等 {len(missing)} 个" if len(missing) > 3 else ""
+                    job["error"] = f"命令已结束，但缺少文件：{preview}{suffix}"
+            self.download_procs.pop(job_id, None)
+        self.log.info(
+            "download finished %s: status=%s exit=%s missing=%d",
+            job_id, job["status"], return_code, len(missing),
+        )
+
+    def download_job_view(self, job_id: str) -> dict[str, Any] | None:
+        with self.download_jobs_lock:
+            job = self.download_jobs.get(job_id)
+            if job is None:
+                return None
+            data = json.loads(json.dumps(job))
+        log_path = self.download_logs.get(job_id)
+        data["log_tail"] = (
+            self._redact_secrets(tail_file(log_path, 120)) if log_path else ""
+        )
+        return data
+
+    def cancel_download(self, job_id: str) -> dict[str, Any] | None:
+        key = str(job_id or "").strip()
+        if not key:
+            raise BadRequest("缺少下载任务 id")
+        with self.download_jobs_lock:
+            job = self.download_jobs.get(key)
+            if job is None:
+                return None
+            if job.get("status") != "running":
+                proc = None
+            else:
+                job["cancel_requested"] = True
+                proc = self.download_procs.get(key)
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                self.log.warning("cannot terminate download %s: %s", key, exc)
+            threading.Thread(
+                target=self._force_kill_download,
+                args=(proc,),
+                name=f"download-kill-{key}",
+                daemon=True,
+            ).start()
+        return self.download_job_view(key)
+
+    @staticmethod
+    def _force_kill_download(proc: subprocess.Popen[Any]) -> None:
+        time.sleep(3.0)
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    def cancel_all_downloads(self) -> None:
+        with self.download_jobs_lock:
+            procs = list(self.download_procs.values())
+        for proc in procs:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
 
     def default_sampling(self, engine_id: str) -> dict[str, Any]:
         kind = self._short_kind(self._engine_kind(engine_id))
@@ -5459,6 +6522,76 @@ class Handler(BaseHTTPRequestHandler):
             result = self.gateway.restart_engine_paths(engine.strip())
             self._json(202 if result.get("restarting") else 200, result)
             return
+        if normalized == "/router/proxy":
+            if method in ("GET", "HEAD"):
+                self._json(200, self.gateway.proxy_view())
+                return
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            self._json(200, self.gateway.save_proxy(payload))
+            return
+        if normalized == "/router/proxy/test":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            self._json(200, self.gateway.test_proxy(payload))
+            return
+        if normalized == "/router/downloads":
+            if method not in ("GET", "HEAD"):
+                raise MethodNotAllowed("method not allowed")
+            self._json(200, self.gateway.downloads_view())
+            return
+        if normalized == "/router/downloads/settings":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            self._json(200, self.gateway.save_download_settings(payload))
+            return
+        if normalized == "/router/downloads/search":
+            if method not in ("GET", "HEAD"):
+                raise MethodNotAllowed("method not allowed")
+            values = parse_qs(query)
+            query_text = (values.get("q") or [""])[0]
+            limit_text = (values.get("limit") or [None])[0]
+            self._json(200, self.gateway.search_downloads(query_text, limit_text))
+            return
+        if normalized == "/router/downloads/plan":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            self._json(200, self.gateway.plan_download(payload))
+            return
+        if normalized == "/router/downloads/start":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            self._json(202, self.gateway.start_download(payload))
+            return
+        if normalized == "/router/downloads/job":
+            if method not in ("GET", "HEAD"):
+                raise MethodNotAllowed("method not allowed")
+            values = parse_qs(query).get("id")
+            job_id = values[0].strip() if values else ""
+            if not job_id:
+                raise BadRequest('send ?id=<download job id>')
+            job = self.gateway.download_job_view(job_id)
+            if job is None:
+                raise NotFound("download job not found")
+            self._json(200, job)
+            return
+        if normalized == "/router/downloads/cancel":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            job_id = payload.get("id")
+            if not isinstance(job_id, str) or not job_id.strip():
+                raise BadRequest('send {"id": "..."}')
+            job = self.gateway.cancel_download(job_id.strip())
+            if job is None:
+                raise NotFound("download job not found")
+            self._json(202 if job.get("status") == "running" else 200, job)
+            return
         if normalized == "/router/reload":
             if method != "POST":
                 raise MethodNotAllowed("method not allowed")
@@ -5715,6 +6848,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "pid_file": "router.pid",
     "model_params_file": "model-params.json",
     "api_keys_file": "api-keys.json",
+    "proxy": {
+        "enabled": False,
+        "type": "http",
+        "host": "",
+        "port": 0,
+        "username": "",
+        "password": "",
+    },
+    "downloads": {
+        "dir": "",
+        "sources": {
+            "huggingface": {"use_proxy": False},
+            "hf-mirror": {"use_proxy": False},
+            "modelscope": {"use_proxy": False},
+        },
+    },
 }
 
 
