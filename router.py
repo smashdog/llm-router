@@ -708,6 +708,7 @@ KVMEM_LLAMA_ENGINE_GROUPS = (
     ("retrieval", "检索与选择"),
     ("memory", "内存与存储"),
     ("runtime", "运行与并发"),
+    ("device", "设备与多卡"),
     ("spec", "推测解码（MTP）"),
     ("thinking", "思考"),
     ("vision", "视觉"),
@@ -949,6 +950,36 @@ KVMEM_LLAMA_ENGINE_SPECS: list[dict[str, Any]] = [
         "kvmem_trace", "--kvmem-trace", "KVMem 诊断日志", "runtime", "boolean",
         off_flag="--no-kvmem-trace",
         note="原始 KVMEM_* 诊断；关闭会覆盖 KVMEM_TRACE 环境变量",
+    ),
+    # -- devices -----------------------------------------------------------
+    _kv_engine_spec(
+        "device", ("--device", "-dev"), "推理设备", "device", "string",
+        note="如 CUDA0,CUDA1 或 HIP0；none 表示 CPU，留空沿用模板",
+    ),
+    _kv_engine_spec(
+        "main_gpu", ("--main-gpu", "-mg"), "主 GPU 序号", "device",
+        default=0, low=0, step=1,
+    ),
+    _kv_engine_spec(
+        "split_mode", ("--split-mode", "-sm"), "多卡切分模式", "device", "enum",
+        choices=[
+            {"value": "none", "label": "none"},
+            {"value": "layer", "label": "layer（按层）"},
+            {"value": "tensor", "label": "tensor（张量）"},
+        ],
+        note="多卡需要 layer 或 tensor；KVMem 组合还受 MTP 与 lane 约束",
+    ),
+    _kv_engine_spec(
+        "tensor_split", ("--tensor-split", "-ts"), "多卡比例", "device", "string",
+        note="每张卡一个相对权重，如 3,1",
+    ),
+    _kv_engine_spec(
+        "threads_batch", ("-tb", "--threads-batch"), "CPU batch 线程", "runtime",
+        low=-1, step=1, note="≤0 使用 --threads",
+    ),
+    _kv_engine_spec(
+        "threads_http", "--threads-http", "HTTP 线程", "runtime",
+        low=-1, step=1, note="≤0 自动（每 lane 2 个）",
     ),
     # -- speculative decoding ---------------------------------------------
     _kv_engine_spec(

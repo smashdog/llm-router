@@ -454,6 +454,12 @@ try:
         "flash_attn": "auto",
         "timeout": 600,
         "verbosity": 2,
+        "kvmem_trace": False,
+        "device": "CPU",
+        "split_mode": "layer",
+        "tensor_split": "1,1",
+        "threads_batch": 8,
+        "threads_http": 4,
         "spec_type": "draft-mtp",
         "spec_draft_n_max": 5,
         "kvmem_mtp_state": "snapshots",
@@ -493,6 +499,11 @@ try:
         "-fa": "auto",
         "--timeout": "600",
         "-lv": "2",
+        "--device": "CPU",
+        "--split-mode": "layer",
+        "--tensor-split": "1,1",
+        "-tb": "8",
+        "--threads-http": "4",
         "--spec-type": "draft-mtp",
         "--spec-draft-n-max": "5",
         "--kvmem-mtp-state": "snapshots",
@@ -503,6 +514,7 @@ try:
     for flag, value in numeric.items():
         assert flag in advanced_args and advanced_args[advanced_args.index(flag) + 1] == value, (flag, advanced_args)
     assert "--kvmem-lrfu" in advanced_args and "--no-kvmem-lrfu" not in advanced_args, advanced_args
+    assert "--no-kvmem-trace" in advanced_args and "--kvmem-trace" not in advanced_args, advanced_args
     assert "--enable-thinking" in advanced_args and "--no-think" not in advanced_args, advanced_args
     last_start = starts()[-1]
     assert "-np" in last_start["argv"] and "2" in last_start["argv"], last_start
@@ -514,6 +526,7 @@ try:
         "engine_params": {
             "kvmem_sessions": None,
             "kvmem_lrfu": None,
+            "kvmem_trace": None,
             "enable_thinking": None,
             "parallel": None,
         },
@@ -521,10 +534,12 @@ try:
     assert cleared.status_code == 200, cleared.text
     cleared_values = cleared.json()["engine_params"]
     assert "kvmem_sessions" not in cleared_values and "kvmem_lrfu" not in cleared_values, cleared_values
+    assert "kvmem_trace" not in cleared_values, cleared_values
     wait_idle()
     cleared_args = [str(value) for value in read_json(model_cfg_path)["args"]]
     assert "--kvmem-sessions" not in cleared_args, cleared_args
     assert "--kvmem-lrfu" not in cleared_args and "--no-kvmem-lrfu" not in cleared_args, cleared_args
+    assert "--kvmem-trace" not in cleared_args and "--no-kvmem-trace" not in cleared_args, cleared_args
     assert "--enable-thinking" not in cleared_args and "--no-think" not in cleared_args, cleared_args
     assert "-np" not in cleared_args, cleared_args
     for bad, needle in (
