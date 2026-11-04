@@ -727,6 +727,15 @@
               <select id="params-cache-v"></select></label>
           </div>
         </div>
+        <div id="params-vision" hidden>
+          <p class="params-group-title">视觉编码器 <span id="params-vision-caption">mmproj · 修改后自动重启引擎生效</span></p>
+          <div class="device-row" id="params-vision-device" role="radiogroup" aria-label="视觉运行位置">
+            <span class="device-label">视觉运行位置</span>
+            <label class="check"><input type="radio" name="params-vision-device" value="cpu" /> CPU</label>
+            <label class="check"><input type="radio" name="params-vision-device" value="gpu" /> GPU</label>
+          </div>
+          <p class="params-hint" id="params-vision-hint"></p>
+        </div>
         <p class="params-group-title">采样参数 <span>留空不注入，使用引擎默认</span></p>
         <div class="params-grid">
           <label>温度 <span class="name">temperature</span>
@@ -2280,6 +2289,7 @@
     const kv = model.engine === "kvmem";
     const ninfer = model.engine === "ninfer";
     const editable = model.engine === "llama" && model.source === "preset";
+    const visionEditable = !ninfer && (editable || (kv && model.source === "strata"));
     form.elements.top_k.min = kv ? 1 : 0;
     form.elements.top_k.max = kv ? 64 : 1000;
     form.elements.repeat_last_n.min = kv ? 1 : -1;
@@ -2295,6 +2305,24 @@
       $("params-context").value = model.context_length == null ? "" : model.context_length;
       fillCacheSelect($("params-cache-k"), manageEngine && manageEngine.cache_types, model.cache_type_k || "q8_0");
       fillCacheSelect($("params-cache-v"), manageEngine && manageEngine.cache_types, model.cache_type_v || "q8_0");
+    }
+    const visionRow = $("params-vision");
+    visionRow.hidden = !model.multimodal || ninfer;
+    if (!visionRow.hidden) {
+      const deviceRow = $("params-vision-device");
+      const gpu = model.vision_gpu === true;
+      const radio = document.querySelector(`input[name="params-vision-device"][value="${gpu ? "gpu" : "cpu"}"]`);
+      if (radio) radio.checked = true;
+      deviceRow.classList.toggle("disabled", !visionEditable);
+      deviceRow.querySelectorAll("input").forEach((el) => { el.disabled = !visionEditable; });
+      $("params-vision-caption").textContent = visionEditable
+        ? "mmproj · 修改后自动重启引擎生效"
+        : "mmproj · 当前配置只读";
+      $("params-vision-hint").textContent = visionEditable
+        ? (kv
+            ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
+            : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off。")
+        : "当前模型没有可编辑的引擎配置，无法修改视觉运行位置。";
     }
     $("params-title").textContent = `模型参数 · ${model.name || model.display_name || model.id}`;
     $("params-sub").textContent =
@@ -2353,6 +2381,13 @@
       engineParams.cache_type_v = $("params-cache-v").value;
       body.engine_params = engineParams;
     }
+    const visionRow = $("params-vision");
+    if (model && !visionRow.hidden && !$("params-vision-device").classList.contains("disabled")) {
+      const picked = (document.querySelector('input[name="params-vision-device"]:checked') || {}).value;
+      if (picked && picked !== (model.vision_gpu === true ? "gpu" : "cpu")) {
+        body.vision_device = picked;
+      }
+    }
     const button = $("params-save");
     button.disabled = true;
     try {
@@ -2367,10 +2402,11 @@
           model.cache_type_k = payload.engine_params.cache_type_k;
           model.cache_type_v = payload.engine_params.cache_type_v;
         }
+        if (payload.vision_gpu != null) model.vision_gpu = payload.vision_gpu;
       }
       $("params-dialog").close();
       if (payload.restarting) {
-        toast(`已保存 ${paramsModel} 的参数，正在重启引擎以应用新的上下文/KV 精度`, "ok");
+        toast(`已保存 ${paramsModel} 的参数，正在重启引擎以应用新参数`, "ok");
       } else if (payload.restart_pending) {
         toast(`已保存 ${paramsModel} 的参数；${payload.note || "引擎将在下次加载时应用新参数"}`, "ok");
       } else {

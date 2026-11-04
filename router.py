@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import requests
 
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 STATIC_TYPES = {
     ".css": "text/css; charset=utf-8",
@@ -869,6 +869,7 @@ class Model:
     cache_type_v: str | None = None
     max_output_tokens: int | None = None
     multimodal: bool = False
+    vision_gpu: bool = False
     video: bool = False
     audio: bool = False
     reasoning: bool = False
@@ -924,6 +925,7 @@ class Model:
             "cache_type_k": self.cache_type_k,
             "cache_type_v": self.cache_type_v,
             "multimodal": self.multimodal,
+            "vision_gpu": self.vision_gpu,
             "video": self.video,
             "audio": self.audio,
             "reasoning": self.reasoning,
@@ -966,6 +968,18 @@ def parse_llama_presets(path: Path) -> dict[str, dict[str, str]]:
             key, value = line.split("=", 1)
             out[current][key.strip()] = value.strip()
     return out
+
+
+def llama_vision_gpu(section: dict[str, str]) -> bool:
+    """llama.cpp offloads the mmproj to the GPU unless mmproj-offload is off."""
+    raw = ""
+    for key, value in section.items():
+        if key.strip().lower().replace("_", "-") == "mmproj-offload":
+            raw = str(value).strip().lower()
+            break
+    if not raw:
+        return True
+    return raw not in ("off", "disabled", "false", "0")
 
 
 _GGUF_SCALAR_SIZES = {
@@ -1456,6 +1470,7 @@ def discover_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 cache_type_v=cache_v,
                 max_output_tokens=max_out,
                 multimodal=vision,
+                vision_gpu=llama_vision_gpu(merged) if vision else False,
                 # video comes from mtmd_helper_cap: vision AND MTMD_VIDEO, which is
                 # compiled in here; offline preset discovery does not report it.
                 video=vision,
@@ -1555,6 +1570,7 @@ def discover_kvmem_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 context_length=ctx,
                 max_output_tokens=max_out,
                 multimodal=bool(cfg.get("vision")),
+                vision_gpu=bool(vision_cfg.get("gpu")) if isinstance(vision_cfg, dict) else False,
                 video=video,
                 reasoning=reasoning,
                 notes=notes,
@@ -5633,30 +5649,80 @@ class Gateway:
             raise BadRequest("engine_params 没有可应用的字段")
         return values
 
+    def _vision_device_value(self, entry: Model, raw: Any) -> bool | None:
+        """Validate an optional vision-device change and return the GPU flag."""
+        if raw is None:
+            return None
+        if isinstance(raw, bool) or not isinstance(raw, str):
+            raise BadRequest('vision_device must be "cpu" or "gpu"')
+        value = raw.strip().lower()
+        if value not in ("cpu", "gpu"):
+            raise BadRequest('vision_device must be "cpu" or "gpu"')
+        if entry.engine == "ninfer":
+            raise BadRequest("NInfer 模型不支持修改视觉运行位置")
+        if not entry.multimodal:
+            raise BadRequest("该模型没有视觉编码器，无法设置视觉运行位置")
+        if entry.engine == "llama":
+            preset_path = Path(str(entry.config_path or ""))
+            if entry.source != "preset" or not preset_path.is_file():
+                raise BadRequest("该模型由目录扫描发现，没有可编辑的 models.ini 预设段")
+        elif entry.engine == "kvmem":
+            config_path = Path(str(entry.config_path or ""))
+            if not config_path.is_file():
+                raise BadRequest("找不到该模型的 KVMem 配置文件")
+            config = read_json(config_path, {})
+            if not isinstance(config, dict) or not isinstance(config.get("vision"), dict):
+                raise BadRequest("该模型的配置没有 vision 段，无法设置视觉运行位置")
+        else:
+            raise BadRequest(f"引擎 {entry.engine!r} 不支持修改视觉运行位置")
+        return value == "gpu"
+
     def save_model_params(
-        self, entry: Model, values: dict[str, Any], engine_params: Any = None
+        self,
+        entry: Model,
+        values: dict[str, Any],
+        engine_params: Any = None,
+        vision_device: Any = None,
     ) -> dict[str, Any]:
-        """Validate and persist sampling plus llama preset parameters."""
+        """Validate and persist sampling, llama preset and vision parameters."""
         cleaned = normalize_sampling(values, entry.engine)
         engine_values = self._engine_params_values(entry, engine_params)
+        vision_gpu = self._vision_device_value(entry, vision_device)
         saved = self.params.replace(entry.id, cleaned, entry.engine)
         result: dict[str, Any] = {
             "params": saved,
             "engine_params": None,
+            "vision_gpu": entry.vision_gpu,
             "restarting": False,
             "restart_pending": False,
         }
-        if not engine_values:
+        changed_vision = vision_gpu is not None and vision_gpu != entry.vision_gpu
+        if not engine_values and not changed_vision:
             return result
-        preset_path = Path(str(entry.config_path or ""))
-        update_llama_preset(preset_path, entry.engine_model, engine_values)
+        if entry.engine == "llama":
+            preset_path = Path(str(entry.config_path or ""))
+            if changed_vision:
+                engine_values = dict(engine_values or {})
+                engine_values["mmproj-offload"] = "on" if vision_gpu else "off"
+            update_llama_preset(preset_path, entry.engine_model, engine_values)
+        elif entry.engine == "kvmem":
+            config_path = Path(str(entry.config_path or ""))
+            config = read_json(config_path, {})
+            if not isinstance(config, dict) or not isinstance(config.get("vision"), dict):
+                raise BadRequest("该模型的配置没有 vision 段，无法设置视觉运行位置")
+            config["vision"]["gpu"] = bool(vision_gpu)
+            write_json_atomic(config_path, config)
         self.registry.reload()
         fresh = self.registry.resolve(entry.id)
-        result["engine_params"] = {
-            "context_length": fresh.context_length if fresh else None,
-            "cache_type_k": fresh.cache_type_k if fresh else None,
-            "cache_type_v": fresh.cache_type_v if fresh else None,
-        }
+        if entry.engine == "llama":
+            result["engine_params"] = {
+                "context_length": fresh.context_length if fresh else None,
+                "cache_type_k": fresh.cache_type_k if fresh else None,
+                "cache_type_v": fresh.cache_type_v if fresh else None,
+            }
+        result["vision_gpu"] = (
+            fresh.vision_gpu if fresh is not None else bool(vision_gpu)
+        )
         started, pending, note = self._schedule_engine_restart(entry.engine)
         result["restarting"] = started
         result["restart_pending"] = pending
@@ -6510,7 +6576,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(values, dict):
                 raise BadRequest("params must be an object")
             result = self.gateway.save_model_params(
-                entry, values, payload.get("engine_params")
+                entry, values, payload.get("engine_params"), payload.get("vision_device")
             )
             self._json(
                 200,
