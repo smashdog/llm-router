@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import requests
 
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 
 STATIC_TYPES = {
     ".css": "text/css; charset=utf-8",

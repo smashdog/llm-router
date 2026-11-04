@@ -725,7 +725,6 @@
             <p class="download-note" id="download-tools"></p>
             <div class="download-note" id="download-status"></div>
             <div class="download-errors" id="download-errors"></div>
-            <div id="download-job"></div>
             <div class="download-summary" id="download-summary"></div>
             <div class="download-results" id="download-results">
               <div class="download-empty">填写下载目录并搜索模型；勾选的来源会并发查询。</div>
@@ -945,9 +944,6 @@
     downloadSearchBusy: false,
     downloadSelection: null,
     downloadFilter: "all",
-    downloadJob: null,
-    downloadJobBusy: false,
-    downloadJobTimer: null,
     downloadPlan: null,
     activeDownloads: [],
     activeDownloadsLoading: false,
@@ -1550,10 +1546,6 @@
     renderDownloadTools();
     renderDownloadSources();
     applyActiveDownloads(view);
-    if (view.last_job_id && (!state.downloadJob || state.downloadJob.id !== view.last_job_id)) {
-      loadDownloadJob(view.last_job_id)
-        .catch((error) => toast("无法读取下载任务：" + error.message, "bad"));
-    }
   }
 
   async function loadDownloads() {
@@ -1960,8 +1952,6 @@
         body: JSON.stringify({ source: plan.source, repo_id: plan.repo_id, files }),
       });
       $("download-files-dialog").close();
-      state.downloadJob = job;
-      renderDownloadJob();
       if (job.status === "running") {
         state.activeDownloads = [
           job,
@@ -1969,10 +1959,8 @@
         ];
         renderDownloadBadge();
         renderDownloadPopover();
-        scheduleDownloadJob();
       }
-      toast(`已开始下载 ${job.repo_id}（${job.files_count} 个文件）`, "ok");
-      loadDownloads();
+      toast(`已开始下载 ${job.repo_id}（${job.files_count} 个文件），可在右上角“下载”查看进度`, "ok");
       loadActiveDownloads();
     } catch (error) {
       toast(error.message, "bad");
@@ -2003,7 +1991,7 @@
     }
   }
 
-  function downloadJobMarkup(job, options = {}) {
+  function downloadJobMarkup(job) {
     const status = downloadStatus(job.status);
     const meta = [
       `${job.files_count || 0} 个文件`,
@@ -2021,25 +2009,9 @@
       <p class="job-meta">${esc(meta.join(" · "))}</p>
       ${job.log_tail ? `<pre class="job-log">${esc(job.log_tail)}</pre>` : ""}
       <div class="job-actions">
-        <span class="hint">任务 ${esc(job.id)}${job.status === "running" && options.autoRefresh !== false ? " · 自动刷新中" : ""}</span>
-        ${options.cancel && job.status === "running" ? `<button class="btn danger" type="button" data-download-cancel="${esc(job.id)}">取消下载</button>` : ""}
+        <span class="hint">任务 ${esc(job.id)}</span>
       </div>
     </div>`;
-  }
-
-  function renderDownloadJob() {
-    const host = $("download-job");
-    const job = state.downloadJob;
-    if (!job) {
-      host.innerHTML = "";
-      return;
-    }
-    const oldLog = host.querySelector(".job-log");
-    const stick = !oldLog || oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 32;
-    const oldScroll = oldLog ? oldLog.scrollTop : 0;
-    host.innerHTML = downloadJobMarkup(job, { cancel: true });
-    const log = host.querySelector(".job-log");
-    if (log) log.scrollTop = stick ? log.scrollHeight : oldScroll;
   }
 
   function renderProgressJob() {
@@ -2069,7 +2041,7 @@
     const oldLog = host.querySelector(".job-log");
     const stick = !oldLog || oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 32;
     const oldScroll = oldLog ? oldLog.scrollTop : 0;
-    host.innerHTML = downloadJobMarkup(job, { cancel: false, autoRefresh: false });
+    host.innerHTML = downloadJobMarkup(job);
     const log = host.querySelector(".job-log");
     if (log) log.scrollTop = stick ? log.scrollHeight : oldScroll;
   }
@@ -2163,56 +2135,6 @@
     } finally {
       state.progressBusy = false;
       if (state.progressJobId === job.id) renderProgressJob();
-    }
-  }
-
-  async function loadDownloadJob(jobId) {
-    const job = await api(`/router/downloads/job?id=${encodeURIComponent(jobId)}`);
-    state.downloadJob = job;
-    renderDownloadJob();
-    if (job.status === "running") {
-      scheduleDownloadJob();
-    } else if (state.downloadJobTimer) {
-      clearTimeout(state.downloadJobTimer);
-      state.downloadJobTimer = null;
-    }
-  }
-
-  function scheduleDownloadJob() {
-    if (state.downloadJobTimer) clearTimeout(state.downloadJobTimer);
-    state.downloadJobTimer = setTimeout(() => {
-      state.downloadJobTimer = null;
-      const job = state.downloadJob;
-      if (!job || job.status !== "running") return;
-      loadDownloadJob(job.id).catch((error) => toast("下载状态读取失败：" + error.message, "bad"));
-    }, 1500);
-  }
-
-  async function cancelDownloadJob(jobId) {
-    if (state.downloadJobBusy) return;
-    const ok = await askConfirm(
-      "取消下载",
-      "将终止下载进程，已经下载完成的文件会保留。",
-      "取消下载",
-      true,
-    );
-    if (!ok) return;
-    state.downloadJobBusy = true;
-    try {
-      const job = await api("/router/downloads/cancel", {
-        method: "POST",
-        body: JSON.stringify({ id: jobId }),
-      });
-      state.downloadJob = job;
-      renderDownloadJob();
-      if (job.status === "running") scheduleDownloadJob();
-      else dropActiveDownload(jobId);
-      loadActiveDownloads();
-      toast("已请求取消下载", "ok");
-    } catch (error) {
-      toast(error.message, "bad");
-    } finally {
-      state.downloadJobBusy = false;
     }
   }
 
@@ -3165,11 +3087,6 @@
     updateDownloadPlanSummary();
   });
   $("download-files-start").addEventListener("click", startPlannedDownload);
-  $("download-job").addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-download-cancel]");
-    if (!button) return;
-    cancelDownloadJob(button.dataset.downloadCancel);
-  });
 
   $("btn-downloads").addEventListener("click", (event) => {
     event.stopPropagation();

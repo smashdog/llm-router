@@ -262,13 +262,6 @@ try:
     click("#download-files-start")
     wait("return !document.getElementById('download-files-dialog').open",
          message="dialog closed after start")
-    wait("return document.querySelector('#download-job .tag') && "
-         "document.querySelector('#download-job .tag').textContent === '进行中'",
-         message="job running")
-    wait("return document.querySelector('#download-job .job-log')", message="job log")
-    log_text = js("return document.querySelector('#download-job .job-log').textContent")
-    assert "tokenizer.json" in log_text, log_text
-    shot("download-job-desktop.png")
 
     # -- header download button: badge, popover and progress modal ------
     wait("return !document.getElementById('download-badge').hidden && "
@@ -307,25 +300,21 @@ try:
     assert progress["stopHidden"] is False, progress
     assert progress["status"] == "进行中", progress
     assert progress["popoverHidden"] is True, progress
+    assert js("return document.getElementById('download-job')") is None
     shot("download-progress-desktop.png")
-    click("#download-progress-close")
-    wait("return !document.getElementById('download-progress-dialog').open",
-         message="progress dialog closed")
 
-    click("#download-job button[data-download-cancel]")
+    click("#download-progress-cancel")
     wait("return document.getElementById('confirm-dialog').open",
          message="cancel confirm")
     click("#confirm-ok")
-    wait("return document.querySelector('#download-job .tag').textContent === '已取消'",
+    wait("return document.querySelector('#download-progress-job .tag').textContent === '已取消'",
          message="job cancelled")
     wait("return document.getElementById('download-badge').hidden",
          message="header badge hidden")
-    shot("download-job-cancelled-desktop.png")
-
-    rect(420, 1000)
-    time.sleep(0.3)
-    shot("download-job-mobile.png")
-    rect(1440, 1200)
+    shot("download-progress-cancelled-desktop.png")
+    click("#download-progress-close")
+    wait("return !document.getElementById('download-progress-dialog').open",
+         message="progress dialog closed")
 
     # -- two downloads at the same time ---------------------------------
     click(".download-card button[data-plan-source]")
