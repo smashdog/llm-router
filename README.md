@@ -50,7 +50,7 @@
 
 ## 安装与运行
 
-要求 Python 3.10+。`START-router.sh` 首次运行会自动创建 `.venv`，并按 `requirements.txt` 的内容哈希安装依赖（`requests` 与用于 SOCKS5 的 `PySocks`），依赖变化时自动重装：
+要求 Python 3.10+。`START-router.sh` 首次运行会自动创建 `.venv`，并按 `requirements.txt` 的内容哈希安装依赖（`requests`、`PySocks`、`socksio`；后两者分别让 requests 与 hf CLI 支持 SOCKS5 代理），依赖变化时自动重装：
 
 ```bash
 ./START-router.sh

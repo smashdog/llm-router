@@ -62,7 +62,7 @@ if [[ "$managed_venv" == "1" ]]; then
     if [[ ! -f "$stamp" || "$(cat "$stamp" 2>/dev/null || true)" != "$want" ]]; then
         need_install=1
     fi
-    if ! "$PY" -c "import requests, socks" >/dev/null 2>&1; then
+    if ! "$PY" -c "import requests, socks, socksio" >/dev/null 2>&1; then
         need_install=1
     fi
     if [[ "$need_install" == "1" ]]; then
@@ -101,6 +101,8 @@ else
     fi
     "$PY" -c "import huggingface_hub" >/dev/null 2>&1 || \
         echo "llm-router: warning: huggingface_hub is not installed; Hugging Face / HF-Mirror download will be unavailable" >&2
+    "$PY" -c "import socksio" >/dev/null 2>&1 || \
+        echo "llm-router: warning: socksio is not installed; SOCKS5 proxy for the hf command will be unavailable" >&2
     "$PY" -c "import modelscope" >/dev/null 2>&1 || \
         echo "llm-router: warning: modelscope is not installed; ModelScope download will be unavailable" >&2
 fi
