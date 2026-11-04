@@ -870,7 +870,6 @@
       return;
     }
     const status = state.status || {};
-    const active = status.active_model;
     const busy = state.busy || status.async_operation != null || status.switching;
     host.innerHTML = models.map((m) => {
       const value = modelState(m);
@@ -913,7 +912,6 @@
             <button class="btn sm" data-action="params" data-id="${esc(m.id)}">参数</button>
             ${m.deletable ? `<button class="btn sm danger" data-action="delete" data-id="${esc(m.id)}"
               ${busy ? "disabled" : ""}>删除配置</button>` : ""}
-            ${active === m.id ? '<span class="tag blue" style="margin-left:auto;align-self:center">活动模型</span>' : ""}
           </div>
         </article>`;
     }).join("");
