@@ -231,18 +231,8 @@ def resolve_path(base_dir: Path, value: Any) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# per-model sampling defaults
+# per-model sampling / generation parameters
 
-SAMPLING_FIELDS = (
-    "temperature",
-    "top_p",
-    "top_k",
-    "min_p",
-    "repetition_penalty",
-    "repeat_last_n",
-    "presence_penalty",
-    "frequency_penalty",
-)
 SAMPLING_GENERATION_PATHS = {"/v1/chat/completions", "/v1/completions"}
 
 # Sampling defaults for a model added from the console: the values the two
@@ -283,11 +273,138 @@ SMOKE_PROMPT = "Reply with the single word: OK"
 SMOKE_IMAGE_PROMPT = "What shape is in this image? Answer in one word."
 
 
+def _param_spec(
+    key: str,
+    label: str,
+    group: str,
+    kind: str = "number",
+    *,
+    low: float | int | None = None,
+    high: float | int | None = None,
+    step: float | int | None = None,
+    low_exclusive: bool = False,
+    choices: list[dict[str, Any]] | None = None,
+    note: str | None = None,
+    disabled: bool = False,
+) -> dict[str, Any]:
+    """One editable model parameter.  ``group`` drives the basic/more tabs."""
+    spec: dict[str, Any] = {"key": key, "label": label, "group": group, "type": kind}
+    if low is not None:
+        spec["min"] = low
+    if high is not None:
+        spec["max"] = high
+    if step is not None:
+        spec["step"] = step
+    if low_exclusive:
+        spec["exclusive_min"] = True
+    if choices:
+        spec["choices"] = choices
+    if note:
+        spec["note"] = note
+    if disabled:
+        spec["disabled"] = True
+    return spec
+
+
+def _basic_specs(engine: str) -> list[dict[str, Any]]:
+    kv = engine == "kvmem"
+    ninfer = engine == "ninfer"
+    return [
+        _param_spec("temperature", "温度", "basic", low=0.0, high=2.0, step=0.01),
+        _param_spec("top_p", "top_p", "basic", low=0.0, high=1.0, step=0.01, low_exclusive=True),
+        _param_spec(
+            "top_k", "top_k", "basic", kind="integer",
+            low=1 if kv else 0, high=64 if kv else 1000, step=1,
+        ),
+        _param_spec("min_p", "min_p", "basic", low=0.0, high=1.0, step=0.01),
+        _param_spec(
+            "repetition_penalty", "重复惩罚", "basic", low=0.5, high=2.0, step=0.01,
+            note="NInfer 只接受 1" if ninfer else None, disabled=ninfer,
+        ),
+        _param_spec(
+            "repeat_last_n", "重复窗口", "basic",
+            kind="integer", low=1 if kv else -1, high=131072, step=1,
+            note="映射为 penalty_last_n" if kv else None,
+            disabled=ninfer,
+        ),
+        _param_spec("presence_penalty", "存在惩罚", "basic", low=-2.0, high=2.0, step=0.01),
+        _param_spec("frequency_penalty", "频率惩罚", "basic", low=-2.0, high=2.0, step=0.01),
+    ]
+
+
+def _llama_more_specs() -> list[dict[str, Any]]:
+    """llama.cpp server sampling controls, minus per-request plumbing
+    (stream / stop / grammar / logit_bias / response_fields / ...)."""
+    return [
+        _param_spec("seed", "随机种子", "more", kind="integer", low=-1, high=2147483647, step=1,
+                    note="-1 表示随机"),
+        _param_spec("n_predict", "最大生成 token", "more", kind="integer", low=-1, high=1048576,
+                    step=1, note="请求中的 max_tokens 优先"),
+        _param_spec("typical_p", "典型采样", "more", low=0.0, high=1.0, step=0.01, low_exclusive=True),
+        _param_spec("dynatemp_range", "动态温度范围", "more", low=0.0, high=10.0, step=0.01),
+        _param_spec("dynatemp_exponent", "动态温度指数", "more", low=0.0, high=10.0, step=0.01,
+                    low_exclusive=True),
+        _param_spec("xtc_probability", "XTC 概率", "more", low=0.0, high=1.0, step=0.01),
+        _param_spec("xtc_threshold", "XTC 阈值", "more", low=0.0, high=1.0, step=0.01),
+        _param_spec("dry_multiplier", "DRY 倍数", "more", low=0.0, high=100.0, step=0.01),
+        _param_spec("dry_base", "DRY 基数", "more", low=1.0, high=100.0, step=0.01, low_exclusive=True),
+        _param_spec("dry_allowed_length", "DRY 允许长度", "more", kind="integer", low=1, high=131072,
+                    step=1),
+        _param_spec("dry_penalty_last_n", "DRY 窗口", "more", kind="integer", low=-1, high=131072,
+                    step=1, note="-1 表示上下文长度"),
+        _param_spec(
+            "mirostat", "Mirostat 模式", "more", kind="integer", low=0, high=2, step=1,
+            choices=[
+                {"value": 0, "label": "0 · 关闭"},
+                {"value": 1, "label": "1 · Mirostat"},
+                {"value": 2, "label": "2 · Mirostat 2.0"},
+            ],
+        ),
+        _param_spec("mirostat_tau", "Mirostat τ", "more", low=0.0, high=100.0, step=0.01,
+                    low_exclusive=True),
+        _param_spec("mirostat_eta", "Mirostat η", "more", low=0.0, high=10.0, step=0.001,
+                    low_exclusive=True),
+        _param_spec("n_keep", "保留 token 数", "more", kind="integer", low=-1, high=1048576, step=1),
+        _param_spec("min_keep", "最小候选数", "more", kind="integer", low=0, high=1000, step=1),
+        _param_spec("n_probs", "返回候选概率数", "more", kind="integer", low=0, high=1000, step=1),
+        _param_spec("ignore_eos", "忽略 EOS", "more", kind="boolean"),
+        _param_spec("t_max_predict_ms", "生成时限（毫秒）", "more", kind="integer", low=0,
+                    high=86400000, step=1, note="0 表示不限制"),
+        _param_spec("samplers", "采样器顺序", "more", kind="list",
+                    note="逗号分隔，例如 top_k,top_p,min_p,temperature"),
+    ]
+
+
+def sampling_schema(engine: str) -> list[dict[str, Any]]:
+    """Editable parameters for one engine kind, split into basic and more."""
+    engine = str(engine or "").strip().lower()
+    if engine not in ("llama", "kvmem", "ninfer"):
+        engine = "llama"
+    if engine == "kvmem":
+        more = [
+            _param_spec("seed", "随机种子", "more", kind="integer", low=1, high=2147483647,
+                        step=1, note="正整数"),
+        ]
+    elif engine == "ninfer":
+        more = [
+            _param_spec("seed", "随机种子", "more", kind="integer", low=0, high=2147483647, step=1),
+        ]
+    else:
+        more = _llama_more_specs()
+    return _basic_specs(engine) + more
+
+
+def param_specs_by_key(engine: str) -> dict[str, dict[str, Any]]:
+    return {spec["key"]: spec for spec in sampling_schema(engine)}
+
+
 def sampling_aliases(key: str) -> tuple[str, ...]:
     if key == "repetition_penalty":
         return ("repetition_penalty", "repeat_penalty")
     if key == "repeat_last_n":
         return ("repeat_last_n", "penalty_last_n")
+    if key == "n_predict":
+        return ("n_predict", "max_tokens")
     return (key,)
 
 
@@ -309,43 +426,60 @@ def _sampling_number(key: str, raw: Any, low: float, high: float, *, integer: bo
     return float(raw) if not integer else raw
 
 
+def _coerce_param(spec: dict[str, Any], raw: Any) -> Any:
+    key = spec["key"]
+    kind = spec["type"]
+    if kind == "boolean":
+        if isinstance(raw, bool):
+            return raw
+        if raw in (0, 1):
+            return bool(raw)
+        raise BadRequest(f"{key}: expected true or false")
+    if kind == "list":
+        if isinstance(raw, str):
+            items = [part.strip() for part in re.split(r"[,，]", raw) if part.strip()]
+        elif isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+            items = [item.strip() for item in raw if item.strip()]
+        else:
+            raise BadRequest(f"{key}: expected a list of strings")
+        if not items:
+            return None
+        if len(items) > 64:
+            raise BadRequest(f"{key}: too many entries")
+        return items
+    value = _sampling_number(
+        key, raw, spec.get("min", 0), spec.get("max", 0),
+        integer=(kind == "integer"),
+        low_exclusive=bool(spec.get("exclusive_min")),
+    )
+    choices = spec.get("choices")
+    if choices and value not in [choice["value"] for choice in choices]:
+        allowed = ", ".join(str(choice["value"]) for choice in choices)
+        raise BadRequest(f"{key}: expected one of {allowed}")
+    return value
+
+
 def normalize_sampling(values: dict[str, Any], engine: str) -> dict[str, Any]:
-    """Validate one model's sampling set.  None / '' clears a field; unknown fields are rejected."""
+    """Validate one model's parameter set.  None / '' clears a field; unknown fields are rejected."""
     if not isinstance(values, dict):
         raise BadRequest("params must be an object")
+    specs = param_specs_by_key(engine)
+    engine = str(engine or "").strip().lower()
     out: dict[str, Any] = {}
     for key, raw in values.items():
         if raw is None or (isinstance(raw, str) and not raw.strip()):
             continue
-        if key not in SAMPLING_FIELDS:
+        spec = specs.get(key)
+        if spec is None:
             raise BadRequest(f"unknown sampling parameter {key!r}")
-        if key == "temperature":
-            out[key] = _sampling_number(key, raw, 0.0, 2.0)
-        elif key == "top_p":
-            out[key] = _sampling_number(key, raw, 0.0, 1.0, low_exclusive=True)
-        elif key == "top_k":
-            if engine == "kvmem":
-                out[key] = _sampling_number(key, raw, 1, 64, integer=True)
-            else:
-                out[key] = _sampling_number(key, raw, 0, 1000, integer=True)
-        elif key == "min_p":
-            out[key] = _sampling_number(key, raw, 0.0, 1.0)
-        elif key == "repetition_penalty":
-            value = _sampling_number(key, raw, 0.5, 2.0)
-            if engine == "ninfer" and value != 1.0:
-                raise BadRequest("NInfer 只接受中立值 repetition_penalty=1")
-            out[key] = value
-        elif key == "repeat_last_n":
-            if engine == "ninfer":
-                raise BadRequest("NInfer 不支持 repeat_last_n（重复窗口）")
-            if engine == "kvmem":
-                out[key] = _sampling_number(key, raw, 1, 131072, integer=True)
-            else:
-                out[key] = _sampling_number(key, raw, -1, 131072, integer=True)
-        elif key == "presence_penalty":
-            out[key] = _sampling_number(key, raw, -2.0, 2.0)
-        elif key == "frequency_penalty":
-            out[key] = _sampling_number(key, raw, -2.0, 2.0)
+        if engine == "ninfer" and key == "repeat_last_n":
+            raise BadRequest("NInfer 不支持 repeat_last_n（重复窗口）")
+        value = _coerce_param(spec, raw)
+        if value is None:
+            continue
+        if engine == "ninfer" and key == "repetition_penalty" and value != 1.0:
+            raise BadRequest("NInfer 只接受中立值 repetition_penalty=1")
+        out[key] = value
     return out
 
 
@@ -3459,6 +3593,9 @@ class Gateway:
             jobs = [json.loads(json.dumps(job)) for job in list(self.model_jobs.values())[-10:]]
         return {
             "engines": self.manage_engines(),
+            "param_schema": {
+                kind: sampling_schema(kind) for kind in ("llama", "kvmem", "ninfer")
+            },
             "smoke_image": str(self.smoke_image_path),
             "engine_defaults": {
                 "kv": {"method": "q8_0/q8_0 (k8v8)", "fallback": "engine default"},

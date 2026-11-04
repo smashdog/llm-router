@@ -268,6 +268,24 @@
   .params-group-title span { color: var(--faint); font-weight: 400; margin-left: 6px; }
   .params-hint { margin-top: 12px !important; color: var(--faint) !important; font-size: 12px !important; }
   .params-error { margin-top: 10px !important; color: #ffc1ca !important; font-size: 12.5px !important; }
+  .param-tabs { display: flex; gap: 4px; margin: 16px 0 0; border-bottom: 1px solid var(--line-soft); }
+  .param-tab {
+    appearance: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+    padding: 8px 12px; background: none; color: var(--faint); font: inherit;
+    font-size: 12.5px; cursor: pointer;
+  }
+  .param-tab:hover { color: var(--muted); }
+  .param-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .param-tab .tab-count { margin-left: 5px; color: var(--faint); font-size: 10.5px; }
+  .param-tab .tab-count:not(:empty) {
+    padding: 1px 5px; border-radius: 999px; background: rgba(94,234,212,.1); color: var(--accent);
+  }
+  .params-panel[hidden] { display: none; }
+  #params-dialog { width: min(640px, calc(100vw - 32px)); }
+  #params-form > .dialog-body, #add-form > .dialog-body {
+    max-height: calc(100vh - 160px); overflow-y: auto;
+  }
+  .params-grid label .param-note { color: var(--faint); font-size: 10.5px; line-height: 1.35; }
   @media (max-width: 520px) { .params-grid, .params-grid.engine-grid { grid-template-columns: 1fr; } }
 
   dialog.add-wide { width: min(680px, calc(100vw - 32px)); }
@@ -464,35 +482,46 @@
     <div class="dialog-body">
       <h3 id="params-title">模型参数</h3>
       <p id="params-sub">为此模型设置默认采样参数。</p>
-      <div id="params-engine">
-        <p class="params-group-title">引擎参数 <span>llama.cpp · 保存后自动重启引擎生效</span></p>
-        <div class="params-grid engine-grid">
-          <label>上下文长度 <span class="name">ctx-size</span>
-            <input id="params-context" type="number" step="1" min="256" placeholder="留空使用 GGUF 上限" /></label>
-          <label>K 量化精度 <span class="name">cache-type-k</span>
-            <select id="params-cache-k"></select></label>
-          <label>V 量化精度 <span class="name">cache-type-v</span>
-            <select id="params-cache-v"></select></label>
+      <div class="param-tabs" role="tablist" aria-label="模型参数分类">
+        <button type="button" class="param-tab active" data-param-tab="basic" role="tab" aria-selected="true">基本参数</button>
+        <button type="button" class="param-tab" data-param-tab="more" role="tab" aria-selected="false">更多参数<span class="tab-count" id="params-more-count"></span></button>
+      </div>
+      <div class="params-panel" data-param-panel="basic">
+        <div id="params-engine">
+          <p class="params-group-title">引擎参数 <span>llama.cpp · 保存后自动重启引擎生效</span></p>
+          <div class="params-grid engine-grid">
+            <label>上下文长度 <span class="name">ctx-size</span>
+              <input id="params-context" type="number" step="1" min="256" placeholder="留空使用 GGUF 上限" /></label>
+            <label>K 量化精度 <span class="name">cache-type-k</span>
+              <select id="params-cache-k"></select></label>
+            <label>V 量化精度 <span class="name">cache-type-v</span>
+              <select id="params-cache-v"></select></label>
+          </div>
+        </div>
+        <p class="params-group-title">采样参数 <span>留空不注入，使用引擎默认</span></p>
+        <div class="params-grid">
+          <label>温度 <span class="name">temperature</span>
+            <input name="temperature" data-param-key="temperature" type="number" step="0.01" min="0" max="2" placeholder="留空不注入" /></label>
+          <label>top_p <span class="name">top_p</span>
+            <input name="top_p" data-param-key="top_p" type="number" step="0.01" min="0.01" max="1" placeholder="留空不注入" /></label>
+          <label>top_k <span class="name">top_k</span>
+            <input name="top_k" data-param-key="top_k" type="number" step="1" min="0" max="1000" placeholder="留空不注入" /></label>
+          <label>min_p <span class="name">min_p</span>
+            <input name="min_p" data-param-key="min_p" type="number" step="0.01" min="0" max="1" placeholder="留空不注入" /></label>
+          <label>重复惩罚 <span class="name">repetition_penalty</span>
+            <input name="repetition_penalty" data-param-key="repetition_penalty" type="number" step="0.01" min="0.5" max="2" placeholder="留空不注入" /></label>
+          <label>重复窗口 <span class="name">repeat_last_n</span>
+            <input name="repeat_last_n" data-param-key="repeat_last_n" type="number" step="1" min="-1" max="131072" placeholder="留空不注入" /></label>
+          <label>存在惩罚 <span class="name">presence_penalty</span>
+            <input name="presence_penalty" data-param-key="presence_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
+          <label>频率惩罚 <span class="name">frequency_penalty</span>
+            <input name="frequency_penalty" data-param-key="frequency_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
         </div>
       </div>
-      <p class="params-group-title">采样参数 <span>留空不注入，使用引擎默认</span></p>
-      <div class="params-grid">
-        <label>温度 <span class="name">temperature</span>
-          <input name="temperature" type="number" step="0.01" min="0" max="2" placeholder="留空不注入" /></label>
-        <label>top_p <span class="name">top_p</span>
-          <input name="top_p" type="number" step="0.01" min="0.01" max="1" placeholder="留空不注入" /></label>
-        <label>top_k <span class="name">top_k</span>
-          <input name="top_k" type="number" step="1" min="0" max="1000" placeholder="留空不注入" /></label>
-        <label>min_p <span class="name">min_p</span>
-          <input name="min_p" type="number" step="0.01" min="0" max="1" placeholder="留空不注入" /></label>
-        <label>重复惩罚 <span class="name">repetition_penalty</span>
-          <input name="repetition_penalty" type="number" step="0.01" min="0.5" max="2" placeholder="留空不注入" /></label>
-        <label>重复窗口 <span class="name">repeat_last_n</span>
-          <input name="repeat_last_n" type="number" step="1" min="-1" max="131072" placeholder="留空不注入" /></label>
-        <label>存在惩罚 <span class="name">presence_penalty</span>
-          <input name="presence_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
-        <label>频率惩罚 <span class="name">frequency_penalty</span>
-          <input name="frequency_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
+      <div class="params-panel" data-param-panel="more" hidden>
+        <p class="params-group-title">更多参数 <span>引擎支持的高级采样 / 生成参数 · 留空不注入</span></p>
+        <div class="params-grid" id="params-more"></div>
+        <p class="params-hint" id="params-more-hint"></p>
       </div>
       <p class="params-hint" id="params-hint"></p>
       <p class="params-error" id="params-error" hidden></p>
@@ -521,35 +550,46 @@
         <label class="check"><input type="radio" name="add-vision-device" value="cpu" checked /> CPU（默认）</label>
         <label class="check"><input type="radio" name="add-vision-device" value="gpu" /> GPU</label>
       </div>
-      <div id="add-engine-params">
-        <p class="params-group-title">引擎参数 <span>llama.cpp · 上下文留空使用 GGUF 上限</span></p>
-        <div class="params-grid engine-grid">
-          <label>上下文长度 <span class="name">ctx-size</span>
-            <input id="add-context" type="number" step="1" min="256" placeholder="留空使用 GGUF 上限" /></label>
-          <label>K 量化精度 <span class="name">cache-type-k</span>
-            <select id="add-cache-k"></select></label>
-          <label>V 量化精度 <span class="name">cache-type-v</span>
-            <select id="add-cache-v"></select></label>
+      <div class="param-tabs" role="tablist" aria-label="模型参数分类">
+        <button type="button" class="param-tab active" data-param-tab="basic" role="tab" aria-selected="true">基本参数</button>
+        <button type="button" class="param-tab" data-param-tab="more" role="tab" aria-selected="false">更多参数<span class="tab-count" id="add-more-count"></span></button>
+      </div>
+      <div class="params-panel" data-param-panel="basic">
+        <div id="add-engine-params">
+          <p class="params-group-title">引擎参数 <span>llama.cpp · 上下文留空使用 GGUF 上限</span></p>
+          <div class="params-grid engine-grid">
+            <label>上下文长度 <span class="name">ctx-size</span>
+              <input id="add-context" type="number" step="1" min="256" placeholder="留空使用 GGUF 上限" /></label>
+            <label>K 量化精度 <span class="name">cache-type-k</span>
+              <select id="add-cache-k"></select></label>
+            <label>V 量化精度 <span class="name">cache-type-v</span>
+              <select id="add-cache-v"></select></label>
+          </div>
+        </div>
+        <p class="params-hint" id="add-defaults"></p>
+        <div class="params-grid" id="add-params">
+          <label>温度 <span class="name">temperature</span>
+            <input name="temperature" data-param-key="temperature" type="number" step="0.01" min="0" max="2" placeholder="留空不注入" /></label>
+          <label>top_p <span class="name">top_p</span>
+            <input name="top_p" data-param-key="top_p" type="number" step="0.01" min="0.01" max="1" placeholder="留空不注入" /></label>
+          <label>top_k <span class="name">top_k</span>
+            <input name="top_k" data-param-key="top_k" type="number" step="1" min="0" max="1000" placeholder="留空不注入" /></label>
+          <label>min_p <span class="name">min_p</span>
+            <input name="min_p" data-param-key="min_p" type="number" step="0.01" min="0" max="1" placeholder="留空不注入" /></label>
+          <label>重复惩罚 <span class="name">repetition_penalty</span>
+            <input name="repetition_penalty" data-param-key="repetition_penalty" type="number" step="0.01" min="0.5" max="2" placeholder="留空不注入" /></label>
+          <label>重复窗口 <span class="name">repeat_last_n</span>
+            <input name="repeat_last_n" data-param-key="repeat_last_n" type="number" step="1" min="-1" max="131072" placeholder="留空不注入" /></label>
+          <label>存在惩罚 <span class="name">presence_penalty</span>
+            <input name="presence_penalty" data-param-key="presence_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
+          <label>频率惩罚 <span class="name">frequency_penalty</span>
+            <input name="frequency_penalty" data-param-key="frequency_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
         </div>
       </div>
-      <p class="params-hint" id="add-defaults"></p>
-      <div class="params-grid" id="add-params">
-        <label>温度 <span class="name">temperature</span>
-          <input name="temperature" type="number" step="0.01" min="0" max="2" placeholder="留空不注入" /></label>
-        <label>top_p <span class="name">top_p</span>
-          <input name="top_p" type="number" step="0.01" min="0.01" max="1" placeholder="留空不注入" /></label>
-        <label>top_k <span class="name">top_k</span>
-          <input name="top_k" type="number" step="1" min="0" max="1000" placeholder="留空不注入" /></label>
-        <label>min_p <span class="name">min_p</span>
-          <input name="min_p" type="number" step="0.01" min="0" max="1" placeholder="留空不注入" /></label>
-        <label>重复惩罚 <span class="name">repetition_penalty</span>
-          <input name="repetition_penalty" type="number" step="0.01" min="0.5" max="2" placeholder="留空不注入" /></label>
-        <label>重复窗口 <span class="name">repeat_last_n</span>
-          <input name="repeat_last_n" type="number" step="1" min="-1" max="131072" placeholder="留空不注入" /></label>
-        <label>存在惩罚 <span class="name">presence_penalty</span>
-          <input name="presence_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
-        <label>频率惩罚 <span class="name">frequency_penalty</span>
-          <input name="frequency_penalty" type="number" step="0.01" min="-2" max="2" placeholder="留空不注入" /></label>
+      <div class="params-panel" data-param-panel="more" hidden>
+        <p class="params-group-title">更多参数 <span>引擎支持的高级采样 / 生成参数 · 留空不注入</span></p>
+        <div class="params-grid" id="add-more"></div>
+        <p class="params-hint" id="add-more-hint"></p>
       </div>
       <label class="check"><input id="add-smoke" type="checkbox" checked /> 添加后运行冒烟测试（文本必测，有视觉时加测图片）</label>
       <p class="params-error" id="add-error" hidden></p>
@@ -634,6 +674,122 @@
     return String(value == null ? "" : value)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function moreParamSpecs(kind) {
+    const schema = (state.manage && state.manage.param_schema) || {};
+    const list = Array.isArray(schema[kind]) ? schema[kind] : [];
+    return list.filter((spec) => spec.group === "more");
+  }
+
+  function paramControl(spec) {
+    const name = esc(spec.key);
+    if (spec.choices) {
+      const options = ['<option value="">引擎默认</option>'].concat(
+        (spec.choices || []).map((choice) =>
+          `<option value="${esc(choice.value)}">${esc(choice.label)}</option>`),
+      );
+      return `<select data-param-key="${name}">${options.join("")}</select>`;
+    }
+    if (spec.type === "boolean") {
+      return `<select data-param-key="${name}"><option value="">引擎默认</option>` +
+        '<option value="true">开</option><option value="false">关</option></select>';
+    }
+    if (spec.type === "list") {
+      return `<input data-param-key="${name}" type="text" spellcheck="false" placeholder="引擎默认（逗号分隔）" />`;
+    }
+    const attrs = [];
+    if (spec.min != null) attrs.push(`min="${esc(spec.min)}"`);
+    if (spec.max != null) attrs.push(`max="${esc(spec.max)}"`);
+    const step = spec.step == null ? (spec.type === "integer" ? 1 : "any") : spec.step;
+    attrs.push(`step="${esc(step)}"`);
+    return `<input data-param-key="${name}" type="number" ${attrs.join(" ")} placeholder="引擎默认" />`;
+  }
+
+  function setParamInput(input, spec, value) {
+    if (value == null || value === "") {
+      input.value = "";
+    } else if (spec.type === "boolean") {
+      input.value = value ? "true" : "false";
+    } else if (spec.type === "list") {
+      input.value = Array.isArray(value) ? value.join(", ") : String(value);
+    } else {
+      input.value = String(value);
+    }
+  }
+
+  function renderMoreParams(host, countHost, hintHost, kind, values) {
+    if (!host) return;
+    const specs = moreParamSpecs(kind);
+    host.innerHTML = specs.length
+      ? specs.map((spec) => `
+        <label>${esc(spec.label)} <span class="name">${esc(spec.key)}</span>
+          ${paramControl(spec)}
+          ${spec.note ? `<span class="param-note">${esc(spec.note)}</span>` : ""}
+        </label>`).join("")
+      : '<p class="params-hint">该引擎没有额外的可配置参数。</p>';
+    for (const spec of specs) {
+      const input = host.querySelector(`[data-param-key="${spec.key}"]`);
+      if (input) setParamInput(input, spec, values ? values[spec.key] : null);
+    }
+    if (countHost) countHost.textContent = specs.length ? String(specs.length) : "";
+    if (hintHost) {
+      hintHost.textContent = specs.length
+        ? "留空表示不写入该字段，由引擎使用自己的默认值；请求中显式给出的同名字段优先。stream、stop、grammar、json_schema、logit_bias、lora 等请求级控制不在这里暴露。"
+        : "";
+    }
+  }
+
+  function readMoreParams(host, kind) {
+    const values = {};
+    if (!host) return values;
+    for (const spec of moreParamSpecs(kind)) {
+      const input = host.querySelector(`[data-param-key="${spec.key}"]`);
+      if (!input) continue;
+      const raw = String(input.value || "").trim();
+      if (raw === "") {
+        values[spec.key] = null;
+        continue;
+      }
+      if (spec.type === "boolean") {
+        values[spec.key] = raw === "true";
+        continue;
+      }
+      if (spec.type === "list") {
+        const items = raw.split(/[,，]/).map((item) => item.trim()).filter(Boolean);
+        values[spec.key] = items.length ? items : null;
+        continue;
+      }
+      if (spec.choices) {
+        const hit = (spec.choices || []).find((choice) => String(choice.value) === raw);
+        if (!hit) throw new Error(`${spec.label}（${spec.key}）不是有效选项。`);
+        values[spec.key] = hit.value;
+        continue;
+      }
+      const value = Number(raw);
+      if (!Number.isFinite(value) || (spec.type === "integer" && !Number.isInteger(value))) {
+        throw new Error(`${spec.label}（${spec.key}）不是有效数字。`);
+      }
+      values[spec.key] = value;
+    }
+    return values;
+  }
+
+  function showParamTab(dialog, tab) {
+    dialog.querySelectorAll("[data-param-tab]").forEach((button) => {
+      const active = button.dataset.paramTab === tab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    dialog.querySelectorAll("[data-param-panel]").forEach((panel) => {
+      panel.hidden = panel.dataset.paramPanel !== tab;
+    });
+  }
+
+  function bindParamTabs(dialog) {
+    dialog.querySelectorAll("[data-param-tab]").forEach((button) => {
+      button.addEventListener("click", () => showParamTab(dialog, button.dataset.paramTab));
+    });
   }
 
   function modelState(model) {
@@ -1199,6 +1355,11 @@
       const input = form.elements[key];
       if (input && params[key] != null) input.value = params[key];
     }
+    renderMoreParams(
+      $("params-more"), $("params-more-count"), $("params-more-hint"),
+      model.engine, params,
+    );
+    showParamTab(dialog, "basic");
     const kv = model.engine === "kvmem";
     const ninfer = model.engine === "ninfer";
     const editable = model.engine === "llama" && model.source === "preset";
@@ -1238,6 +1399,7 @@
     event.preventDefault();
     if (!paramsModel) return;
     const form = $("params-form");
+    const model = state.models.find((m) => m.id === paramsModel);
     const values = {};
     for (const key of PARAM_FIELDS) {
       const raw = form.elements[key].value.trim();
@@ -1248,7 +1410,13 @@
         return;
       }
     }
-    const model = state.models.find((m) => m.id === paramsModel);
+    try {
+      Object.assign(values, readMoreParams($("params-more"), model ? model.engine : ""));
+    } catch (error) {
+      $("params-error").textContent = error.message;
+      $("params-error").hidden = false;
+      return;
+    }
     const body = { model: paramsModel, params: values };
     if (model && model.engine === "llama" && model.source === "preset") {
       const contextRaw = $("params-context").value.trim();
@@ -1365,6 +1533,10 @@
     $("add-vision-device").hidden = ninfer;
     if (ninfer) $("add-vision").value = "";
     syncVisionDevice();
+    renderMoreParams(
+      $("add-more"), $("add-more-count"), $("add-more-hint"),
+      kind, null,
+    );
     $("add-defaults").textContent = !engine ? "" : ninfer
       ? "NInfer 单模型模式：每份配置只服务一个 .ninfer 模型，参数继承选定模板；上下文与 KV 精度由模板决定；暂不支持视觉；repetition_penalty 只能为 1，且没有 repeat_last_n。"
       : kv
@@ -1420,6 +1592,7 @@
       showAddError(error.message);
     }
     renderAddEngines();
+    showParamTab(dialog, "basic");
     if (typeof dialog.showModal === "function") dialog.showModal();
   }
 
@@ -1482,6 +1655,7 @@
     if (!engine) { showAddError("请选择模型类型。"); return; }
     const model = $("add-model").value.trim();
     if (!model) { showAddError("请填写模型路径。"); $("add-model").focus(); return; }
+    const engineInfo = (state.manage && state.manage.engines && state.manage.engines[engine]) || {};
     const params = {};
     for (const key of PARAM_FIELDS) {
       const raw = form.elements[key].value.trim();
@@ -1490,6 +1664,15 @@
       if (!Number.isFinite(value)) { showAddError(`${key} 不是有效数字。`); return; }
       params[key] = value;
     }
+    try {
+      const more = readMoreParams($("add-more"), engineInfo.kind || "");
+      for (const [key, value] of Object.entries(more)) {
+        if (value !== null) params[key] = value;
+      }
+    } catch (error) {
+      showAddError(error.message);
+      return;
+    }
     const body = {
       engine,
       model,
@@ -1497,7 +1680,6 @@
       vision_device: (document.querySelector('input[name="add-vision-device"]:checked') || {}).value || "cpu",
       smoke: $("add-smoke").checked,
     };
-    const engineInfo = (state.manage && state.manage.engines && state.manage.engines[engine]) || {};
     if (engineInfo.kind === "ninfer") {
       if (!/\.ninfer$/i.test(model)) {
         showAddError("NInfer 模型路径必须是 .ninfer 文件。");
@@ -1659,6 +1841,8 @@
   });
   $("params-form").addEventListener("submit", saveParams);
   $("params-cancel").addEventListener("click", () => $("params-dialog").close());
+  bindParamTabs($("params-dialog"));
+  bindParamTabs($("add-dialog"));
   $("auth-form").addEventListener("submit", saveAuth);
   $("auth-clear").addEventListener("click", clearAuth);
 
