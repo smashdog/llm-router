@@ -538,7 +538,7 @@
       <div class="mark" aria-hidden="true">LR</div>
       <div>
         <h1>LLM Router</h1>
-        <p>llama.cpp、KVMem 与 NInfer 的统一网关</p>
+        <p>llama.cpp、KVMem、NInfer 与 KVMem + llama.cpp 的统一网关</p>
       </div>
     </div>
     <div class="top-right">
@@ -594,6 +594,7 @@
         <button class="chip" data-engine="llama" type="button">llama.cpp</button>
         <button class="chip" data-engine="kvmem" type="button">KVMem</button>
         <button class="chip" data-engine="ninfer" type="button">NInfer</button>
+        <button class="chip" data-engine="kvmem_llama" type="button">KVMem + llama.cpp</button>
       </div>
       <span class="count" id="model-count"></span>
     </div>
@@ -611,7 +612,7 @@
       <div class="mark" aria-hidden="true">LR</div>
       <span class="tag amber">未配置引擎</span>
       <h2>还没有可用的推理引擎</h2>
-      <p>控制台只展示引擎和模型。请先在管理页填写 llama.cpp、KVMem 或 NInfer 的启动路径并创建引擎，模型列表随后会自动出现。</p>
+      <p>控制台只展示引擎和模型。请先在管理页填写 llama.cpp、KVMem、NInfer 或 KVMem + llama.cpp 的启动路径并创建引擎，模型列表随后会自动出现。</p>
       <button class="btn primary" id="btn-setup-engines" type="button">去管理页配置引擎</button>
     </section>
   </div>
@@ -633,7 +634,7 @@
       <div class="manage-content">
         <section class="manage-panel" data-panel="engines" aria-labelledby="engine-paths-title">
           <h2 id="engine-paths-title">引擎路径</h2>
-          <p class="panel-hint">配置 llama.cpp、KVMem 与 NInfer 的启动路径；保存前会轻量探测二进制是否可用，成功后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
+          <p class="panel-hint">配置 llama.cpp、KVMem、NInfer 与 KVMem + llama.cpp 的启动路径；保存前会轻量探测二进制是否可用，成功后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
           <div class="engine-paths" id="engine-paths">
             <div class="empty">正在读取引擎配置…</div>
           </div>
@@ -869,7 +870,7 @@
       </div>
       <div class="params-panel" data-param-panel="basic">
         <div id="add-engine-params">
-          <p class="params-group-title">引擎参数 <span>llama.cpp · 上下文留空使用 GGUF 上限</span></p>
+          <p class="params-group-title">引擎参数 <span id="add-engine-caption">llama.cpp · 上下文留空使用 GGUF 上限</span></p>
           <div class="params-grid engine-grid">
             <label>上下文长度 <span class="name">ctx-size</span>
               <input id="add-context" type="number" step="1" min="256" placeholder="留空使用 GGUF 上限" /></label>
@@ -877,6 +878,8 @@
               <select id="add-cache-k"></select></label>
             <label>V 量化精度 <span class="name">cache-type-v</span>
               <select id="add-cache-v"></select></label>
+            <label id="add-budget-field" hidden>KVMem 预算 <span class="name">kvmem-budget</span>
+              <input id="add-budget" type="number" step="32" min="128" placeholder="32768" /></label>
           </div>
         </div>
         <p class="params-hint" id="add-defaults"></p>
@@ -965,7 +968,12 @@
     "temperature", "top_p", "top_k", "min_p",
     "repetition_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty",
   ];
-  const ENGINE_LABELS = { llama: "llama.cpp", kvmem: "KVMem", ninfer: "NInfer" };
+  const ENGINE_LABELS = {
+    llama: "llama.cpp",
+    kvmem: "KVMem",
+    ninfer: "NInfer",
+    kvmem_llama: "KVMem + llama.cpp",
+  };
   const PARAM_SUMMARY = [
     ["temperature", "温度"], ["top_p", "top_p"], ["top_k", "top_k"], ["repetition_penalty", "重复"],
   ];
@@ -987,6 +995,12 @@
       { key: "cwd", label: "工作目录", hint: "cwd", placeholder: "/path/to/kvmem" },
       { key: "models_dir", label: "模型配置目录", hint: "models_dir", placeholder: "/path/to/kvmem/local_config" },
       { key: "template", label: "模板配置", hint: "template", placeholder: "/path/to/kvmem/local_config/ninfer.template.json" },
+    ],
+    kvmem_llama: [
+      { key: "binary", label: "llama-kvmem-server 可执行文件", hint: "binary", placeholder: "/path/to/kvmem-llamacpp090/build/bin/llama-kvmem-server" },
+      { key: "cwd", label: "工作目录", hint: "cwd", placeholder: "/path/to/kvmem-llamacpp090" },
+      { key: "models_dir", label: "模型配置目录", hint: "models_dir", placeholder: "/path/to/llm-router/models-kvmem-llama" },
+      { key: "template", label: "模板配置", hint: "template", placeholder: "/path/to/llm-router/models-kvmem-llama/kvmem-llama.template.json" },
     ],
   };
   let paramsModel = null;
@@ -2353,13 +2367,17 @@
       const meta = MODEL_STATES[value] || MODEL_STATES.unloaded;
       const facts = [];
       if (m.context_length) facts.push(`上下文 ${Number(m.context_length).toLocaleString()}`);
-      if (m.engine === "llama" && (m.cache_type_k || m.cache_type_v)) {
+      if ((m.engine === "llama" || m.engine === "kvmem_llama") && (m.cache_type_k || m.cache_type_v)) {
         facts.push(`KV ${m.cache_type_k || "—"}/${m.cache_type_v || "—"}`);
       }
       if (m.quantization) facts.push(m.quantization);
       if (m.multimodal) facts.push("视觉");
       if (m.reasoning) facts.push("思考");
-      if (m.source) facts.push(ENGINE_LABELS[m.source] || m.source);
+      if (m.source) {
+        const sourceLabel = ENGINE_LABELS[m.source] || m.source;
+        const engineLabel = ENGINE_LABELS[m.engine] || m.engine;
+        if (sourceLabel !== engineLabel) facts.push(sourceLabel);
+      }
       if (Array.isArray(m.aliases) && m.aliases.length) facts.push("别名 " + m.aliases.join(", "));
       const unavailable = m.available === false;
       const loading = value === "loading";
@@ -2468,9 +2486,13 @@
   }
 
   async function unloadModel(id) {
+    const model = state.models.find((m) => m.id === id) || {};
+    const single = model.engine === "ninfer" || model.engine === "kvmem_llama";
     const ok = await askConfirm(
       "卸载模型",
-      `将卸载 ${id}。引擎进程保持运行，空闲时不再占用模型内存。`,
+      single
+        ? `${id} 的引擎不支持单独卸载，将直接停止引擎进程并释放内存。`
+        : `将卸载 ${id}。引擎进程保持运行，空闲时不再占用模型内存。`,
       "卸载",
       true,
     );
@@ -2508,15 +2530,22 @@
     showParamTab(dialog, "basic");
     const kv = model.engine === "kvmem";
     const ninfer = model.engine === "ninfer";
+    const kvllama = model.engine === "kvmem_llama";
     const editable = model.engine === "llama" && model.source === "preset";
-    const visionEditable = !ninfer && (editable || (kv && model.source === "strata"));
+    const visionEditable = !ninfer && (
+      editable
+      || (kv && model.source === "strata")
+      || (kvllama && model.source === "kvmem_llama")
+    );
     form.elements.top_k.min = kv ? 1 : 0;
     form.elements.top_k.max = kv ? 64 : 1000;
     form.elements.repeat_last_n.min = kv ? 1 : -1;
     form.elements.repetition_penalty.disabled = ninfer;
-    form.elements.repeat_last_n.disabled = ninfer;
+    form.elements.repeat_last_n.disabled = ninfer || kvllama;
     if (ninfer) {
       form.elements.repetition_penalty.value = "";
+    }
+    if (ninfer || kvllama) {
       form.elements.repeat_last_n.value = "";
     }
     $("params-engine").hidden = !editable;
@@ -2541,7 +2570,9 @@
       $("params-vision-hint").textContent = visionEditable
         ? (kv
             ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
-            : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off。")
+            : kvllama
+              ? "写入模型配置的 vision.gpu；llama-kvmem-server 按 --mmproj-offload / --no-mmproj-offload 切换，CPU 与 GPU 共用同一份 mmproj。"
+              : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off。")
         : "当前模型没有可编辑的引擎配置，无法修改视觉运行位置。";
     }
     $("params-title").textContent = `模型参数 · ${model.name || model.display_name || model.id}`;
@@ -2549,11 +2580,13 @@
       `模型 ${model.id}（${ENGINE_LABELS[model.engine] || model.engine}）。留空的字段不注入，使用引擎默认值；请求中显式给出的参数优先。`;
     $("params-hint").textContent = ninfer
       ? "NInfer 限制：repetition_penalty 只能为 1（已禁用），不支持 repeat_last_n；上下文与 KV 精度由模型模板决定，不能在这里修改。"
-      : kv
-        ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文与 KV 精度固定为模型上限和 q8_0。"
-        : editable
-          ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。修改上下文或 KV 精度会自动重启引擎。"
-          : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。该模型由目录扫描发现，无法修改上下文与 KV 精度。";
+      : kvllama
+        ? "KVMem + llama.cpp 限制：top_k 为 0–1000；不支持 repeat_last_n；上下文、KV 精度与 KVMem 预算在新增模型时写入，不能在这里修改。"
+        : kv
+          ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文与 KV 精度固定为模型上限和 q8_0。"
+          : editable
+            ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。修改上下文或 KV 精度会自动重启引擎。"
+            : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。该模型由目录扫描发现，无法修改上下文与 KV 精度。";
     $("params-error").textContent = "";
     $("params-error").hidden = true;
     $("params-save").disabled = false;
@@ -2684,24 +2717,40 @@
     const kind = engine ? engine.kind : "";
     const kv = kind === "kvmem";
     const ninfer = kind === "ninfer";
+    const kvllama = kind === "kvmem_llama";
     form.elements.top_k.min = kv ? 1 : 0;
     form.elements.top_k.max = kv ? 64 : 1000;
     form.elements.repeat_last_n.min = kv ? 1 : -1;
     form.elements.repetition_penalty.disabled = ninfer;
-    form.elements.repeat_last_n.disabled = ninfer;
+    form.elements.repeat_last_n.disabled = ninfer || kvllama;
     if (ninfer) {
       form.elements.repetition_penalty.value = "";
+    }
+    if (ninfer || kvllama) {
       form.elements.repeat_last_n.value = "";
     }
     const llama = kind === "llama";
-    $("add-engine-params").hidden = !llama;
+    $("add-engine-params").hidden = !llama && !kvllama;
+    $("add-budget-field").hidden = !kvllama;
+    $("add-budget").value = kvllama ? "32768" : "";
     $("add-context").value = "";
-    if (llama) {
+    if (llama || kvllama) {
       fillCacheSelect($("add-cache-k"), engine.cache_types, "q8_0");
       fillCacheSelect($("add-cache-v"), engine.cache_types, "q8_0");
     }
-    $("add-model-hint").textContent = ninfer ? ".ninfer 文件，必填" : ".gguf 文件，必填";
-    $("add-model").placeholder = ninfer ? "/path/to/model.ninfer" : "/path/to/model.gguf";
+    $("add-engine-caption").textContent = kvllama
+      ? "llama-kvmem-server · 预算留空用 32768，上下文留空使用 GGUF 上限"
+      : "llama.cpp · 上下文留空使用 GGUF 上限";
+    $("add-model-hint").textContent = ninfer
+      ? ".ninfer 文件，必填"
+      : kvllama
+        ? "模型目录或 .gguf 文件，必填（目录自动挑选最大 GGUF 与 mmproj）"
+        : ".gguf 文件，必填";
+    $("add-model").placeholder = ninfer
+      ? "/path/to/model.ninfer"
+      : kvllama
+        ? "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf"
+        : "/path/to/model.gguf";
     $("add-vision-field").hidden = ninfer;
     $("add-vision-device").hidden = ninfer;
     if (ninfer) $("add-vision").value = "";
@@ -2712,9 +2761,11 @@
     );
     $("add-defaults").textContent = !engine ? "" : ninfer
       ? "NInfer 单模型模式：每份配置只服务一个 .ninfer 模型，参数继承选定模板；上下文与 KV 精度由模板决定；暂不支持视觉；repetition_penalty 只能为 1，且没有 repeat_last_n。"
-      : kv
-        ? "KV 精度固定 q8_0（--kv q8_0；引擎不支持时省略，使用默认）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数复制 ornith 模板，采样默认来自 ornith。"
-        : "上下文默认取 GGUF 上限，可填更小值；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
+      : kvllama
+        ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；预算默认 32768 tokens，必须与生成保留（默认 1024）一起落在上下文内；KV 精度默认 q8_0（K/V 相同写 --kv-dtype，不同且均为 q8_0/q5_0/q4_0 时写 -ctk/-ctv）；其余引擎参数继承模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
+        : kv
+          ? "KV 精度固定 q8_0（--kv q8_0；引擎不支持时省略，使用默认）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数复制 ornith 模板，采样默认来自 ornith。"
+          : "上下文默认取 GGUF 上限，可填更小值；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
   }
 
   function syncVisionDevice() {
@@ -2860,7 +2911,7 @@
       }
       body.vision = null;
     }
-    if (engineInfo.kind === "llama") {
+    if (engineInfo.kind === "llama" || engineInfo.kind === "kvmem_llama") {
       const contextRaw = $("add-context").value.trim();
       if (contextRaw !== "") {
         const context = Number(contextRaw);
@@ -2872,6 +2923,21 @@
       }
       body.cache_type_k = $("add-cache-k").value || "q8_0";
       body.cache_type_v = $("add-cache-v").value || "q8_0";
+    }
+    if (engineInfo.kind === "kvmem_llama") {
+      const budgetRaw = $("add-budget").value.trim();
+      if (budgetRaw !== "") {
+        const budget = Number(budgetRaw);
+        if (!Number.isInteger(budget) || budget < 128) {
+          showAddError("KVMem 预算必须是 ≥128 的整数（单位 token）。");
+          return;
+        }
+        if (body.context_length && budget + 1024 > body.context_length) {
+          showAddError("KVMem 预算 + 生成保留（1024）不能超过上下文长度。");
+          return;
+        }
+        body.kvmem_budget = budget;
+      }
     }
     if (Object.keys(params).length) body.params = params;
     submit.disabled = true;

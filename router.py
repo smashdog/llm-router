@@ -449,11 +449,19 @@ DEFAULT_SAMPLING = {
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
     },
+    # KVMem + llama.cpp picks its sampling defaults from the model and the
+    # thinking mode per request (e.g. Qwen3.8 Thinking/non-Thinking); writing
+    # router defaults would override that, so added models start empty.
+    "kvmem_llama": {},
 }
 # A llama.cpp preset that encodes the reference defaults (the [*] block plus
 # the LFM3-2B-omni section); KVMem's reference config is Ornith 1.5.
 LLAMA_REFERENCE_MODEL = "LFM3-2B-omni"
 KVMEM_REFERENCE_MODEL = "ornith-1.5-35b-a3b-vl-thinking"
+# llama-kvmem-server accepts one combined GPU KV type or independent K/V
+# quantized types (q8_0 / q5_0 / q4_0); f16/f32 only apply to both halves.
+KVMEM_LLAMA_CACHE_TYPES = ("f16", "f32", "q8_0", "q5_0", "q4_0")
+KVMEM_LLAMA_QUANTIZED_CACHE = ("q8_0", "q5_0", "q4_0")
 SMOKE_PROMPT = "Reply with the single word: OK"
 SMOKE_IMAGE_PROMPT = "What shape is in this image? Answer in one word."
 
@@ -494,6 +502,7 @@ def _param_spec(
 def _basic_specs(engine: str) -> list[dict[str, Any]]:
     kv = engine == "kvmem"
     ninfer = engine == "ninfer"
+    kvllama = engine == "kvmem_llama"
     return [
         _param_spec("temperature", "温度", "basic", low=0.0, high=2.0, step=0.01),
         _param_spec("top_p", "top_p", "basic", low=0.0, high=1.0, step=0.01, low_exclusive=True),
@@ -509,8 +518,12 @@ def _basic_specs(engine: str) -> list[dict[str, Any]]:
         _param_spec(
             "repeat_last_n", "重复窗口", "basic",
             kind="integer", low=1 if kv else -1, high=131072, step=1,
-            note="映射为 penalty_last_n" if kv else None,
-            disabled=ninfer,
+            note=(
+                "映射为 penalty_last_n" if kv
+                else "KVMem + llama.cpp 不支持重复窗口" if kvllama
+                else None
+            ),
+            disabled=ninfer or kvllama,
         ),
         _param_spec("presence_penalty", "存在惩罚", "basic", low=-2.0, high=2.0, step=0.01),
         _param_spec("frequency_penalty", "频率惩罚", "basic", low=-2.0, high=2.0, step=0.01),
@@ -563,12 +576,17 @@ def _llama_more_specs() -> list[dict[str, Any]]:
 def sampling_schema(engine: str) -> list[dict[str, Any]]:
     """Editable parameters for one engine kind, split into basic and more."""
     engine = str(engine or "").strip().lower()
-    if engine not in ("llama", "kvmem", "ninfer"):
+    if engine not in ("llama", "kvmem", "ninfer", "kvmem_llama"):
         engine = "llama"
     if engine == "kvmem":
         more = [
             _param_spec("seed", "随机种子", "more", kind="integer", low=1, high=2147483647,
                         step=1, note="正整数"),
+        ]
+    elif engine == "kvmem_llama":
+        more = [
+            _param_spec("seed", "随机种子", "more", kind="integer", low=0,
+                        high=4294967295, step=1, note="留空由引擎随机"),
         ]
     elif engine == "ninfer":
         more = [
@@ -659,6 +677,8 @@ def normalize_sampling(values: dict[str, Any], engine: str) -> dict[str, Any]:
             raise BadRequest(f"unknown sampling parameter {key!r}")
         if engine == "ninfer" and key == "repeat_last_n":
             raise BadRequest("NInfer 不支持 repeat_last_n（重复窗口）")
+        if engine == "kvmem_llama" and key == "repeat_last_n":
+            raise BadRequest("KVMem + llama.cpp 不支持 repeat_last_n（重复窗口）")
         value = _coerce_param(spec, raw)
         if value is None:
             continue
@@ -747,6 +767,8 @@ class SamplingStore:
             elif engine == "ninfer" and key in ("repetition_penalty", "repeat_last_n"):
                 # NInfer has no repeat-window sampler and only accepts the
                 # neutral repetition penalty; do not forward either field.
+                continue
+            elif engine == "kvmem_llama" and key == "repeat_last_n":
                 continue
             else:
                 target = key
@@ -902,6 +924,7 @@ class Model:
                 "llama": "llama.cpp",
                 "kvmem": "KVMem",
                 "ninfer": "NInfer",
+                "kvmem_llama": "KVMem + llama.cpp",
             }.get(self.engine, self.engine),
             # llama.cpp router UI reads model/name/status/architecture/meta/tags.
             "model": self.id,
@@ -933,7 +956,7 @@ class Model:
             "quantization": self.quantization,
             "source": self.source,
             "config_path": self.config_path,
-            "deletable": self.source in ("preset", "strata", "ninfer"),
+            "deletable": self.source in ("preset", "strata", "ninfer", "kvmem_llama"),
             "loaded": loaded,
             "available": self.available,
             "problem": self.problem,
@@ -1283,6 +1306,32 @@ def ninfer_reference_config(engine_cfg: dict[str, Any]) -> tuple[Path | None, di
         if not isinstance(cfg, dict):
             continue
         if (cfg.get("model") or cfg.get("artifact")) and isinstance(cfg.get("args"), list):
+            return path, cfg
+    return None, None
+
+
+def kvmem_llama_reference_config(
+    engine_cfg: dict[str, Any],
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """The per-model JSON whose args seed a newly added KVMem + llama.cpp model."""
+    models = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+    engine_cwd = Path(str(engine_cfg.get("cwd") or "."))
+    raw = str(models.get("template") or "").strip()
+    candidates: list[Path] = []
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = engine_cwd / path
+        candidates.append(path)
+    else:
+        config_dir = Path(str(models.get("dir") or ""))
+        try:
+            candidates = sorted(config_dir.glob("kvmem-llama-*.json"))
+        except OSError:
+            candidates = []
+    for path in candidates:
+        cfg = read_json(path)
+        if isinstance(cfg, dict) and isinstance(cfg.get("args"), list):
             return path, cfg
     return None, None
 
@@ -1679,6 +1728,135 @@ def discover_ninfer_models(engine_cfg: dict[str, Any]) -> list[Model]:
     return models
 
 
+def _config_arg_value(args: list[str], *flags: str) -> str | None:
+    for flag in flags:
+        if flag in args[:-1]:
+            return args[args.index(flag) + 1]
+        for token in args:
+            if token.startswith(flag + "="):
+                return token.split("=", 1)[1]
+    return None
+
+
+def discover_kvmem_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
+    """Models of the independent llama-kvmem-server (one process per model)."""
+    models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+    config_dir = Path(str(models_cfg.get("dir") or ""))
+    engine_cwd = Path(str(engine_cfg.get("cwd") or "."))
+    engine_command = engine_cfg.get("command")
+    engine_binary = str(engine_command[0]) if isinstance(engine_command, list) and engine_command else ""
+    template_raw = str(models_cfg.get("template") or "").strip()
+    template_path = None
+    if template_raw:
+        template = Path(template_raw)
+        if not template.is_absolute():
+            template = engine_cwd / template
+        template_path = os.path.abspath(str(template))
+    candidates = []
+    try:
+        for path in config_dir.glob("kvmem-llama-*.json"):
+            try:
+                candidates.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+    except OSError:
+        candidates = []
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    models: list[Model] = []
+    seen: set[str] = set()
+    for _, path in candidates:
+        if template_path and os.path.abspath(str(path)) == template_path:
+            continue
+        cfg = read_json(path)
+        if not isinstance(cfg, dict):
+            continue
+        raw_model = str(cfg.get("model") or cfg.get("artifact") or "").strip()
+        args = cfg.get("args")
+        if not raw_model or not isinstance(args, list):
+            continue
+        args = [str(item) for item in args]
+        model_id = str(cfg.get("model_name") or path.stem.removeprefix("kvmem-llama-"))
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        ctx = parse_int(cfg.get("context_length"))
+        if ctx is None:
+            ctx = parse_int(_config_arg_value(args, "-c", "--ctx-size"))
+        cache_k = str(cfg.get("cache_type_k") or "").strip() or None
+        cache_v = str(cfg.get("cache_type_v") or "").strip() or None
+        if cache_k is None or cache_v is None:
+            both = _config_arg_value(args, "--kv-dtype")
+            cache_k = cache_k or both
+            cache_v = cache_v or both
+        cache_k = cache_k or _config_arg_value(args, "-ctk", "--cache-type-k")
+        cache_v = cache_v or _config_arg_value(args, "-ctv", "--cache-type-v")
+        max_out = parse_int(cfg.get("default_max_tokens"))
+        if max_out is None:
+            max_out = parse_int(_config_arg_value(args, "-n", "--n-predict"))
+        if max_out is not None and max_out <= 0:
+            max_out = None
+        aliases_raw = cfg.get("aliases")
+        if isinstance(aliases_raw, str):
+            aliases = [x.strip() for x in aliases_raw.split(",") if x.strip()]
+        elif isinstance(aliases_raw, list):
+            aliases = [str(x).strip() for x in aliases_raw if str(x).strip()]
+        else:
+            aliases = []
+        cwd_raw = Path(str(cfg.get("cwd") or engine_cwd))
+        if not cwd_raw.is_absolute():
+            cwd_raw = engine_cwd / cwd_raw
+        exe_raw = str(cfg.get("exe") or engine_binary)
+        exe = Path(exe_raw)
+        if not exe.is_absolute():
+            exe = cwd_raw / exe
+        model_file = Path(raw_model)
+        if not model_file.is_absolute():
+            model_file = cwd_raw / model_file
+        vision_cfg = cfg.get("vision") if isinstance(cfg.get("vision"), dict) else {}
+        mmproj_raw = str(cfg.get("mmproj") or vision_cfg.get("mmproj") or "").strip()
+        mmproj = Path(mmproj_raw) if mmproj_raw else None
+        if mmproj is not None and not mmproj.is_absolute():
+            mmproj = cwd_raw / mmproj
+        gpu_flag = vision_cfg.get("gpu")
+        if isinstance(gpu_flag, bool):
+            vision_gpu = gpu_flag
+        elif "--no-mmproj-offload" in args:
+            vision_gpu = False
+        else:
+            vision_gpu = True
+        problem = None
+        if not exe.is_file() or not os.access(exe, os.X_OK):
+            problem = f"引擎可执行文件不存在或不可执行（{exe}）"
+        elif not model_file.is_file():
+            problem = f"模型文件不存在（{model_file}）"
+        elif mmproj is not None and not mmproj.is_file():
+            problem = f"视觉编码器不存在（{mmproj}）"
+        vision = mmproj is not None and mmproj.is_file()
+        models.append(
+            Model(
+                id=model_id,
+                engine="kvmem_llama",
+                engine_model=str(cfg.get("model_id") or model_id),
+                config_path=str(path),
+                display_name=str(cfg.get("display_name") or model_id),
+                aliases=aliases,
+                context_length=ctx,
+                cache_type_k=cache_k,
+                cache_type_v=cache_v,
+                max_output_tokens=max_out,
+                multimodal=vision,
+                vision_gpu=vision_gpu if vision else False,
+                video=vision,
+                notes=cfg.get("notes"),
+                quantization=cfg.get("quantization"),
+                source="kvmem_llama",
+                available=problem is None,
+                problem=problem,
+            )
+        )
+    return models
+
+
 class Registry:
     def __init__(self, config: dict[str, Any], base_dir: Path, log: logging.Logger):
         self.config = config
@@ -1702,6 +1880,8 @@ class Registry:
                     all_models.extend(discover_kvmem_models(engine_cfg))
                 elif kind == "ninfer_dir":
                     all_models.extend(discover_ninfer_models(engine_cfg))
+                elif kind == "kvmem_llama_dir":
+                    all_models.extend(discover_kvmem_llama_models(engine_cfg))
             except Exception:
                 self.log.exception("cannot scan models for engine %s", engine_id)
         counts: dict[str, int] = {}
@@ -1924,8 +2104,20 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "probe_timeout_s": 30,
         "log_path": "logs/ninfer-engine.log",
     },
+    "kvmem_llama": {
+        "label": "KVMem + llama.cpp",
+        "kind": "kvmem_llama",
+        "models_kind": "kvmem_llama_dir",
+        "fields": ("binary", "cwd", "models_dir", "template"),
+        "model_key": "template",
+        "host": "127.0.0.1",
+        "port": 18083,
+        "start_timeout_s": 900,
+        "probe_timeout_s": 30,
+        "log_path": "logs/kvmem-llama-engine.log",
+    },
 }
-ENGINE_SLOT_ORDER = ("llama", "kvmem", "ninfer")
+ENGINE_SLOT_ORDER = ("llama", "kvmem", "ninfer", "kvmem_llama")
 KV_PROBE_CODE = (
     "import serve.server\n"
     "print('LLM_ROUTER_KVPROBE_' + str(6 * 7))\n"
@@ -1962,6 +2154,21 @@ def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
             "models_dir": str(models_dir),
             "template": str(models_dir / "ninfer.template.json"),
         }
+    if engine_id == "kvmem_llama":
+        home = root / "kvmem-llamacpp090"
+        binary = home / "build" / "bin" / "llama-kvmem-server"
+        for sub in ("build", "build-hip", "build-cuda", "build-vulkan", "build-rocm"):
+            candidate = home / sub / "bin" / "llama-kvmem-server"
+            if candidate.is_file():
+                binary = candidate
+                break
+        models_dir = base_dir / "models-kvmem-llama"
+        return {
+            "binary": str(binary),
+            "cwd": str(home),
+            "models_dir": str(models_dir),
+            "template": str(models_dir / "kvmem-llama.template.json"),
+        }
     return {}
 
 
@@ -1991,9 +2198,9 @@ def _slot_command(engine_id: str, fields: dict[str, str]) -> list[str]:
             "--host", "{host}",
             "--port", "{port}",
         ]
-    if engine_id == "ninfer":
+    if engine_id in ("ninfer", "kvmem_llama"):
         # The model artifact and its serve options come from the per-model
-        # ninfer-*.json; the manager inserts them after the executable.
+        # JSON; the manager inserts them after the executable.
         return [
             fields["binary"],
             "--host", "{host}",
@@ -2052,8 +2259,8 @@ def build_engine_cfg(
     cfg.setdefault("log_path", spec["log_path"])
     if existing is None:
         cfg.setdefault("api_key", None)
-    if engine_id == "ninfer" and not cfg.get("env"):
-        # NInfer builds keep their shared libraries beside the executable.
+    if engine_id in ("ninfer", "kvmem_llama") and not cfg.get("env"):
+        # Both builds keep their shared libraries beside the executable.
         build_root = Path(fields["binary"]).parent.parent
         lib_dir = build_root / "lib"
         if lib_dir.is_dir():
@@ -2153,9 +2360,28 @@ def validate_engine_paths(
             pending.append(("llama_preset", preset))
         elif create and engine_id == "kvmem":
             pending.append(("kvmem_meta", preset))
+        elif create and engine_id == "kvmem_llama":
+            pending.append(("kvmem_llama_template", preset))
         else:
             raise BadRequest(f"{model_key}：文件不存在（{preset}）")
     return fields, pending
+
+
+def default_kvmem_llama_template() -> dict[str, Any]:
+    """Serving defaults for llama-kvmem-server; model paths are per model."""
+    return {
+        "args": [
+            "-c", "8192",
+            "-ngl", "999",
+            "--flash-attn", "on",
+            "--kvmem",
+            "--kvmem-budget", "32768",
+            "--kvmem-block-tokens", "32",
+            "--kvmem-gen-reserve", "1024",
+            "--kv-dtype", "q8_0",
+            "--no-ui",
+        ]
+    }
 
 
 def materialize_engine_paths(pending: list[tuple[str, Path]]) -> list[str]:
@@ -2170,6 +2396,16 @@ def materialize_engine_paths(pending: list[tuple[str, Path]]) -> list[str]:
                 notes.append(f"已创建模型目录 {path}")
                 continue
             path.parent.mkdir(parents=True, exist_ok=True)
+            if kind == "kvmem_llama_template":
+                try:
+                    handle = path.open("x", encoding="utf-8")
+                except FileExistsError:
+                    continue
+                with handle:
+                    json.dump(default_kvmem_llama_template(), handle, ensure_ascii=False, indent=2)
+                    handle.write("\n")
+                notes.append(f"已创建 KVMem + llama.cpp 模板 {path}")
+                continue
             try:
                 handle = path.open("x", encoding="utf-8")
             except FileExistsError:
@@ -2204,6 +2440,10 @@ def probe_engine_binary(
     binary = fields["binary"]
     if engine_id == "kvmem":
         command = [binary, "-c", KV_PROBE_CODE]
+    elif engine_id == "kvmem_llama":
+        # --version is unsupported; the model-free capability dump identifies
+        # the independent llama.cpp + KVMem server.
+        command = [binary, "--kvmem-capabilities"]
     else:
         command = [binary, "--version"]
     env = os.environ.copy()
@@ -2249,6 +2489,18 @@ def probe_engine_binary(
                 message += f"：{detail}"
             raise BadRequest(message)
         return
+    if engine_id == "kvmem_llama":
+        if proc.returncode != 0 or not re.search(
+            r'"backend"\s*:\s*"llamacpp"', output, re.I
+        ):
+            detail = _probe_tail(output)
+            message = "binary：不是可用的 llama-kvmem-server（--kvmem-capabilities 未返回 llamacpp 后端）"
+            if proc.returncode:
+                message += f"（退出码 {proc.returncode}）"
+            if detail:
+                message += f"：{detail}"
+            raise BadRequest(message)
+        return
     if proc.returncode != 0 or not re.search(r"version\s*:\s*\S+", output, re.I):
         detail = _probe_tail(output)
         message = "binary：不是可用的 llama-server"
@@ -2265,6 +2517,8 @@ def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
             return discover_llama_models(cfg)
         if engine_id == "ninfer":
             return discover_ninfer_models(cfg)
+        if engine_id == "kvmem_llama":
+            return discover_kvmem_llama_models(cfg)
         return discover_kvmem_models(cfg)
     except Exception as exc:
         raise BadRequest(f"无法扫描模型目录：{exc}") from exc
@@ -2410,7 +2664,7 @@ class EngineManager:
         except OSError:
             pass
 
-    def _ninfer_model_config(self, entry: Model) -> tuple[dict[str, Any], str, list[str]]:
+    def _single_model_config(self, entry: Model) -> tuple[dict[str, Any], str, list[str]]:
         if not entry.config_path:
             raise EngineFailure(f"{self.engine_id}: {entry.id} has no config path")
         cfg = read_json(Path(entry.config_path))
@@ -2423,6 +2677,27 @@ class EngineManager:
         args = [str(item) for item in args] if isinstance(args, list) else []
         return cfg, artifact, args
 
+    def _kvmem_llama_command(self, entry: Model, command: list[str]) -> list[str]:
+        model_cfg, artifact, args = self._single_model_config(entry)
+        binary = str(model_cfg.get("exe") or command[0])
+        for flag in ("-m", "--model", "-a", "--alias", "--host", "--port",
+                     "--mmproj", "--mmproj-offload", "--no-mmproj-offload",
+                     "-mmdev", "--mmproj-device"):
+            args = _config_arg_remove(args, flag)
+        vision = model_cfg.get("vision") if isinstance(model_cfg.get("vision"), dict) else {}
+        mmproj = str(model_cfg.get("mmproj") or vision.get("mmproj") or "").strip()
+        # The model path, alias, vision placement and host/port are owned by
+        # the router; everything else stays in the per-model JSON args.
+        out = [binary, "-m", artifact, "-a", entry.engine_model, *args]
+        if mmproj:
+            out += ["--mmproj", mmproj]
+            gpu = vision.get("gpu", model_cfg.get("mmproj_offload"))
+            if not isinstance(gpu, bool):
+                gpu = True  # llama.cpp/server default
+            out.append("--mmproj-offload" if gpu else "--no-mmproj-offload")
+        out += [str(token) for token in command[1:]]
+        return out
+
     def _build_command(self, entry: Model) -> list[str]:
         command = self.cfg.get("command")
         if not isinstance(command, list) or not command:
@@ -2430,11 +2705,13 @@ class EngineManager:
         if self.kind == "kvmem" and not entry.config_path:
             raise EngineFailure(f"{self.engine_id}: {entry.id} has no config path")
         if self.kind == "ninfer":
-            model_cfg, artifact, args = self._ninfer_model_config(entry)
+            model_cfg, artifact, args = self._single_model_config(entry)
             binary = str(model_cfg.get("exe") or command[0])
             # ninfer-serve takes the artifact path first, then its serve
             # options; host/port stay from the engine slot command.
             command = [binary, artifact, *args, *[str(token) for token in command[1:]]]
+        elif self.kind == "kvmem_llama":
+            command = self._kvmem_llama_command(entry, command)
         out = []
         for token in command:
             value = str(token)
@@ -2450,7 +2727,7 @@ class EngineManager:
         extra = self.cfg.get("env")
         if isinstance(extra, dict):
             env.update({str(k): str(v) for k, v in extra.items()})
-        if self.kind in ("kvmem", "ninfer") and entry.config_path:
+        if self.kind in ("kvmem", "ninfer", "kvmem_llama") and entry.config_path:
             cfg = read_json(Path(entry.config_path))
             if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict):
                 env.update({str(k): str(v) for k, v in cfg["env"].items()})
@@ -2496,13 +2773,19 @@ class EngineManager:
             self.pgid = self.proc.pid
         self.last_pid = self.proc.pid
         self.started_at = now()
-        self.current_model = entry.engine_model if self.kind in ("kvmem", "ninfer") else None
+        self.current_model = (
+            entry.engine_model
+            if self.kind in ("kvmem", "ninfer", "kvmem_llama")
+            else None
+        )
         self._write_state()
         try:
             if self.kind == "llama_router":
                 self._wait_llama_ready()
             elif self.kind == "ninfer":
                 self._wait_ninfer_ready(entry)
+            elif self.kind == "kvmem_llama":
+                self._wait_kvmem_llama_ready(entry)
             else:
                 self._wait_kvmem_ready(entry)
         except Exception:
@@ -2580,13 +2863,26 @@ class EngineManager:
         )
 
     def _wait_ninfer_ready(self, entry: Model) -> None:
+        self._wait_single_model_ready(entry, "NInfer", "engines.ninfer.api_key")
+
+    def _wait_kvmem_llama_ready(self, entry: Model) -> None:
+        self._wait_single_model_ready(
+            entry, "KVMem + llama.cpp", "engines.kvmem_llama.api_key"
+        )
+
+    def _wait_single_model_ready(
+        self, entry: Model, label: str, api_key_setting: str
+    ) -> None:
+        """llama.cpp-style single-model servers expose /health and /v1/models."""
         timeout = float(self.cfg.get("start_timeout_s") or self.timeouts.get("load_timeout_s") or 900)
         deadline = time.monotonic() + timeout
         last_note = 0.0
         last_error = ""
         while time.monotonic() < deadline:
             if not self.alive():
-                raise EngineFailure(f"NInfer engine exited during startup; log: {tail_file(self.log_path, 40)}")
+                raise EngineFailure(
+                    f"{label} engine exited during startup; log: {tail_file(self.log_path, 40)}"
+                )
             try:
                 status, body = self._json_request("GET", "/health", entry=entry, timeout=4)
                 if status == 200:
@@ -2601,7 +2897,8 @@ class EngineManager:
                             last_error = "models=" + ", ".join(str(m.get("id")) for m in data[:5])
                 elif status in (401, 403):
                     raise EngineFailure(
-                        f"NInfer rejected the configured API key (HTTP {status}); check engines.ninfer.api_key"
+                        f"{label} rejected the configured API key (HTTP {status}); "
+                        f"check {api_key_setting}"
                     )
                 elif isinstance(body, dict):
                     err = body.get("error")
@@ -2612,7 +2909,8 @@ class EngineManager:
             if time.monotonic() - last_note > 15:
                 last_note = time.monotonic()
                 self.log.info(
-                    "waiting for NInfer model %s on %s:%s%s",
+                    "waiting for %s model %s on %s:%s%s",
+                    label,
                     entry.id,
                     self.host,
                     self.port,
@@ -2620,7 +2918,7 @@ class EngineManager:
                 )
             time.sleep(1.0)
         raise EngineFailure(
-            f"NInfer model {entry.id} did not become ready within {int(timeout)}s; "
+            f"{label} model {entry.id} did not become ready within {int(timeout)}s; "
             f"log: {tail_file(self.log_path, 40)}"
         )
 
@@ -2686,13 +2984,17 @@ class EngineManager:
             # An engine that just started reports itself healthy before its models
             # are loaded; always confirm the router's per-model state.
             self._load_llama_model(entry)
-        elif self.kind == "ninfer":
-            # NInfer runs one artifact per process; switching models means a
-            # restart, which the gateway already does when it switches engines.
+        elif self.kind in ("ninfer", "kvmem_llama"):
+            # These engines run one artifact per process; switching models
+            # means a restart, which the gateway already does when it switches
+            # engines.
             if self.current_model == entry.engine_model:
                 self.current_entry = entry
                 return
-            self.log.info("restarting NInfer engine for %s (was %s)", entry.id, self.current_model or "—")
+            self.log.info(
+                "restarting %s engine for %s (was %s)",
+                self.engine_id, entry.id, self.current_model or "—",
+            )
             self.stop()
             self.start(entry)
         elif self.current_model == entry.engine_model:
@@ -2806,8 +3108,8 @@ class EngineManager:
             self.current_entry = None
             self._clear_state()
             return
-        if self.kind == "ninfer":
-            # NInfer has no unload endpoint in single-model mode; stopping the
+        if self.kind in ("ninfer", "kvmem_llama"):
+            # Single-model engines have no unload endpoint; stopping the
             # engine is the unload, and the next request starts it again.
             self.stop()
             return
@@ -2858,10 +3160,11 @@ class EngineManager:
         pgid = self.pgid or pid
         self.log.info("stopping engine %s (pid=%s, pgid=%s)", self.engine_id, pid, pgid)
         if proc.poll() is None:
-            if self.kind == "ninfer":
+            if self.kind in ("ninfer", "kvmem_llama"):
                 # The first SIGINT only asks NInfer to confirm ("press Ctrl+C
                 # again"), so a plain SIGINT would burn the full stop timeout.
-                # SIGTERM is its immediate graceful shutdown path.
+                # llama-kvmem-server has no unload path either. SIGTERM stops
+                # both directly.
                 kill_group(pgid, signal.SIGTERM)
                 timeout = min(float(self.timeouts.get("stop_timeout_s") or 90), 15.0)
                 try:
@@ -3542,7 +3845,12 @@ class Gateway:
 
     @staticmethod
     def _short_kind(kind: str | None) -> str:
-        return {"llama_dir": "llama", "kvmem_dir": "kvmem", "ninfer_dir": "ninfer"}.get(str(kind), "")
+        return {
+            "llama_dir": "llama",
+            "kvmem_dir": "kvmem",
+            "ninfer_dir": "ninfer",
+            "kvmem_llama_dir": "kvmem_llama",
+        }.get(str(kind), "")
 
     def _engine_config_label(self) -> str:
         try:
@@ -3619,7 +3927,7 @@ class Gateway:
         self, engine_id: str, paths: Any, create: bool = False
     ) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama、kvmem 或 ninfer")
+            raise BadRequest("engine 必须是 llama、kvmem、ninfer 或 kvmem_llama")
         engines_cfg = self.config.get("engines")
         if engines_cfg is None:
             engines_cfg = {}
@@ -3716,7 +4024,7 @@ class Gateway:
 
     def restart_engine_paths(self, engine_id: str) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama、kvmem 或 ninfer")
+            raise BadRequest("engine 必须是 llama、kvmem、ninfer 或 kvmem_llama")
         engines_cfg = self.config.get("engines")
         if not isinstance(engines_cfg, dict) or not isinstance(
             engines_cfg.get(engine_id), dict
@@ -4719,6 +5027,24 @@ class Gateway:
                     },
                     "default_params": self.default_sampling(engine_id),
                 }
+            elif kind == "kvmem_llama_dir":
+                template_path, template = kvmem_llama_reference_config(engine_cfg)
+                out[engine_id] = {
+                    "engine": engine_id,
+                    "kind": "kvmem_llama",
+                    "label": "KVMem + llama.cpp",
+                    "models_dir": models_cfg.get("dir"),
+                    "template": str(template_path) if template_path else None,
+                    "cache_types": ["q8_0", "f16", "f32", "q5_0", "q4_0"],
+                    "defaults": {
+                        "args": list((template or {}).get("args") or []),
+                        "vision_gpu": False,
+                        "kvmem_budget": 32768,
+                        "kvmem_block_tokens": 32,
+                        "kvmem_gen_reserve": 1024,
+                    },
+                    "default_params": self.default_sampling(engine_id),
+                }
         return out
 
     def model_manage_view(self) -> dict[str, Any]:
@@ -4727,7 +5053,8 @@ class Gateway:
         return {
             "engines": self.manage_engines(),
             "param_schema": {
-                kind: sampling_schema(kind) for kind in ("llama", "kvmem", "ninfer")
+                kind: sampling_schema(kind)
+                for kind in ("llama", "kvmem", "ninfer", "kvmem_llama")
             },
             "smoke_image": str(self.smoke_image_path),
             "engine_defaults": {
@@ -4762,7 +5089,7 @@ class Gateway:
         if not engine_id or engine_id not in self.config.get("engines", {}):
             raise BadRequest("engine must name a configured engine")
         kind = self._engine_kind(engine_id)
-        if kind not in ("llama_dir", "kvmem_dir", "ninfer_dir"):
+        if kind not in ("llama_dir", "kvmem_dir", "ninfer_dir", "kvmem_llama_dir"):
             raise BadRequest(f"engine {engine_id!r} cannot add models")
         model = payload.get("model")
         if not isinstance(model, str) or not model.strip():
@@ -4804,6 +5131,21 @@ class Gateway:
                 raise BadRequest("NInfer 模型暂不支持在控制台配置视觉 mmproj")
             if context_length is not None or cache_type_k is not None or cache_type_v is not None:
                 raise BadRequest("NInfer 的上下文与 KV 参数由模板配置决定，不能单独设置")
+        kvmem_budget = payload.get("kvmem_budget")
+        if kvmem_budget is not None:
+            if isinstance(kvmem_budget, bool) or not isinstance(kvmem_budget, int):
+                raise BadRequest("kvmem_budget must be an integer")
+            if kvmem_budget < 128:
+                raise BadRequest("kvmem_budget must be at least 128")
+            if kind != "kvmem_llama_dir":
+                raise BadRequest("只有 KVMem + llama.cpp 支持 kvmem_budget")
+        if kind == "kvmem_llama_dir":
+            for label, value in (("cache_type_k", cache_type_k), ("cache_type_v", cache_type_v)):
+                value = (value or "").strip()
+                if value and value not in KVMEM_LLAMA_CACHE_TYPES:
+                    raise BadRequest(
+                        f"{label} {value!r} 不受支持；可选：{', '.join(KVMEM_LLAMA_CACHE_TYPES)}"
+                    )
         steps = [
             {"key": "paths", "label": "检查模型路径", "status": "pending", "detail": ""},
             {"key": "metadata", "label": "读取 GGUF 元数据", "status": "pending", "detail": ""},
@@ -4815,6 +5157,8 @@ class Gateway:
         if kind == "ninfer_dir":
             steps[1]["label"] = "检查 .ninfer 模型"
             steps[2]["label"] = "复制模板参数"
+        elif kind == "kvmem_llama_dir":
+            steps[2]["label"] = "选择 KV 精度与 KVMem 预算"
         if vision_path:
             steps.append(
                 {"key": "vision_smoke", "label": "视觉冒烟测试", "status": "pending", "detail": ""}
@@ -4829,6 +5173,7 @@ class Gateway:
             "context_length": context_length,
             "cache_type_k": (cache_type_k or "").strip() or None,
             "cache_type_v": (cache_type_v or "").strip() or None,
+            "kvmem_budget": kvmem_budget,
             "name": (name or "").strip() or None,
             "params": params,
             "smoke": smoke,
@@ -5122,6 +5467,350 @@ class Gateway:
                 job["status"] = job.get("status") if job.get("status") != "running" else "failed"
                 job["finished_at"] = job.get("finished_at") or iso_now()
 
+    @staticmethod
+    def _pick_gguf_files(directory: Path) -> tuple[Path | None, Path | None]:
+        """Largest non-mmproj GGUF plus the best mmproj in a model directory."""
+        try:
+            files = [
+                path for path in directory.iterdir()
+                if path.is_file() and path.suffix.lower() == ".gguf"
+            ]
+        except OSError:
+            return None, None
+
+        def weight(path: Path) -> int:
+            try:
+                return path.stat().st_size
+            except OSError:
+                return 0
+
+        primary = [path for path in files if "mmproj" not in path.name.lower()]
+        mmprojs = [path for path in files if "mmproj" in path.name.lower()]
+        model = max(primary, key=weight) if primary else None
+        mmproj = None
+        if mmprojs:
+            preferred = [path for path in mmprojs if "f16" in path.name.lower()]
+            mmproj = max(preferred or mmprojs, key=weight)
+        return model, mmproj
+
+    @staticmethod
+    def _kvmem_llama_cache_args(cache_k: str, cache_v: str) -> list[str]:
+        if cache_k == cache_v:
+            return ["--kv-dtype", cache_k]
+        if (
+            cache_k in KVMEM_LLAMA_QUANTIZED_CACHE
+            and cache_v in KVMEM_LLAMA_QUANTIZED_CACHE
+        ):
+            return ["-ctk", cache_k, "-ctv", cache_v]
+        raise BadRequest(
+            f"K/V 精度组合不受支持：K={cache_k}，V={cache_v}；"
+            "K 与 V 必须相同（--kv-dtype），或两者都用 q8_0 / q5_0 / q4_0"
+        )
+
+    def _vision_smoke(self, entry: Model, job: dict[str, Any], text_tokens: int) -> None:
+        self._job_step(job, "vision_smoke", "running", "发送图片请求…")
+        if not self.smoke_image_path.is_file():
+            self._job_step(
+                job, "vision_smoke", "warn",
+                f"默认测试图不存在：{self.smoke_image_path}",
+            )
+            return
+        try:
+            image = base64.b64encode(self.smoke_image_path.read_bytes()).decode("ascii")
+        except OSError as exc:
+            raise BadRequest(f"无法读取默认测试图：{exc}") from exc
+        suffix = self.smoke_image_path.suffix.lower()
+        mime = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": SMOKE_IMAGE_PROMPT},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{image}"},
+                    },
+                ],
+            }
+        ]
+        try:
+            text, vision_tokens = self._smoke_completion(entry, messages, job)
+        except EngineFailure as exc:
+            self._job_step(job, "vision_smoke", "warn", f"视觉测试失败：{exc}")
+            return
+        if text_tokens and vision_tokens and vision_tokens <= text_tokens:
+            self._job_step(
+                job, "vision_smoke", "warn",
+                f"图片请求正常但 prompt tokens 未增加（{vision_tokens} ≤ {text_tokens}），"
+                "图像可能未被编码",
+            )
+        else:
+            self._job_step(
+                job, "vision_smoke", "ok",
+                f"图片正常（prompt {vision_tokens} tokens）：{text[:80]}",
+            )
+
+    def _model_add_kvmem_llama_worker(
+        self,
+        job: dict[str, Any],
+        engine_id: str,
+        model: Path,
+        vision: Path | None,
+        smoke: bool,
+        vision_gpu: bool,
+    ) -> None:
+        """Add a model to the independent llama-kvmem-server.
+
+        Like NInfer this engine serves one model per process, so each model
+        gets a kvmem-llama-*.json with its own artifact, KVMem budget, KV
+        precision and vision projector; switching models restarts the engine.
+        """
+        engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
+        config_file: Path | None = None
+        name: str | None = None
+        try:
+            self._job_step(job, "paths", "running")
+            source_is_dir = model.is_dir()
+            auto_vision = None
+            if source_is_dir:
+                picked_model, auto_vision = self._pick_gguf_files(model)
+                if picked_model is None:
+                    raise BadRequest(f"目录中没有 .gguf 模型文件：{model}")
+                model = picked_model
+            elif not model.is_file():
+                raise BadRequest(f"模型路径不存在：{model}")
+            if model.suffix.lower() != ".gguf":
+                raise BadRequest("模型路径不是 .gguf 文件")
+            if vision is None and auto_vision is not None:
+                vision = auto_vision
+            if vision is not None:
+                if not vision.is_file():
+                    raise BadRequest(f"视觉路径不存在：{vision}")
+                if vision.suffix.lower() != ".gguf":
+                    raise BadRequest("视觉路径不是 .gguf 文件")
+                with self.model_jobs_lock:
+                    if not any(
+                        step.get("key") == "vision_smoke"
+                        for step in job.get("steps") or []
+                    ):
+                        # The mmproj was auto-picked from the model directory,
+                        # so start_model_add() could not add this step.
+                        job.setdefault("steps", []).append({
+                            "key": "vision_smoke",
+                            "label": "视觉冒烟测试",
+                            "status": "pending",
+                            "detail": "",
+                        })
+            path_note = (
+                f"目录 {model.parent} → {model.name}" if source_is_dir else str(model)
+            )
+            self._job_step(
+                job, "paths", "ok",
+                path_note + (f"；视觉 {vision.name}" if vision is not None else "；无视觉"),
+            )
+
+            self._job_step(job, "metadata", "running")
+            info = gguf_model_info(model)
+            if info is None:
+                raise BadRequest("无法读取 GGUF 头：文件不是有效的 GGUF 模型")
+            gguf_context = int(info.get("context_length") or 0)
+            if gguf_context <= 0:
+                raise BadRequest("GGUF 中没有 context_length；无法确定上下文上限")
+            requested_context = job.get("context_length")
+            if requested_context is None:
+                context = gguf_context
+                context_note = f"上下文 {context:,}（GGUF 上限）"
+            else:
+                context = int(requested_context)
+                if context > gguf_context:
+                    raise BadRequest(
+                        f"上下文长度 {context:,} 超过 GGUF 上限 {gguf_context:,}"
+                    )
+                context_note = f"上下文 {context:,}（GGUF 上限 {gguf_context:,}）"
+            base_name = job.get("name") or (
+                model.parent.name if source_is_dir else model.stem
+            )
+            name = slugify_model_id(base_name)
+            if self.registry.resolve(name) is not None:
+                raise BadRequest(f"模型 ID {name} 已存在")
+            vision_flags = None
+            if vision is not None:
+                vision_flags = gguf_bool_metadata(
+                    vision, {"clip.has_vision_encoder", "clip.has_audio_encoder"}
+                )
+                if vision_flags is None:
+                    raise BadRequest("无法读取视觉文件头")
+                if not vision_flags.get("clip.has_vision_encoder"):
+                    raise BadRequest("视觉文件没有 clip.has_vision_encoder（不是视觉 mmproj）")
+            job["name"] = name
+            self._job_step(
+                job, "metadata", "ok",
+                f"架构 {info.get('architecture') or '未知'}；{context_note}；ID {name}"
+                + ("；视觉 mmproj 有效" if vision is not None else ""),
+            )
+
+            self._job_step(job, "kv", "running")
+            template_path, template = kvmem_llama_reference_config(engine_cfg)
+            if template is None:
+                template = default_kvmem_llama_template()
+            template_args = [str(item) for item in (template.get("args") or [])]
+            cache_k = (job.get("cache_type_k") or "q8_0").strip()
+            cache_v = (job.get("cache_type_v") or "q8_0").strip()
+            for label, value in (("cache_type_k", cache_k), ("cache_type_v", cache_v)):
+                if value not in KVMEM_LLAMA_CACHE_TYPES:
+                    raise BadRequest(
+                        f"{label} {value!r} 不受支持；可选：{', '.join(KVMEM_LLAMA_CACHE_TYPES)}"
+                    )
+            cache_args = self._kvmem_llama_cache_args(cache_k, cache_v)
+            block = parse_int(_config_arg_value(template_args, "--kvmem-block-tokens")) or 32
+            block = max(1, block)
+            reserve = parse_int(_config_arg_value(template_args, "--kvmem-gen-reserve")) or 1024
+            reserve = max(block, reserve)
+            explicit_budget = job.get("kvmem_budget")
+            budget = parse_int(explicit_budget)
+            if budget is None:
+                budget = parse_int(_config_arg_value(template_args, "--kvmem-budget")) or 32768
+            budget = max(128, budget)
+            if budget + reserve > context:
+                if explicit_budget is not None:
+                    raise BadRequest(
+                        f"KVMem 预算 {budget:,} + 生成保留 {reserve:,} 超过上下文 {context:,}"
+                    )
+                reserve = max(block, min(reserve, (context // 4) // block * block))
+                budget = max(128, min(budget, ((context - reserve) // block) * block))
+            if budget + reserve > context:
+                raise BadRequest(
+                    f"上下文 {context:,} 太小，无法容纳 KVMem 预算与生成保留"
+                    f"（需要至少 {block + reserve:,}）"
+                )
+            self._job_step(
+                job, "kv", "ok",
+                f"KV {cache_k}/{cache_v}；预算 {budget:,} tokens"
+                f"（block {block}，生成保留 {reserve:,}）",
+            )
+
+            self._job_step(job, "config", "running")
+            params = job.get("params") or self.default_sampling(engine_id)
+            self.params.replace(name, params, "kvmem_llama")
+            models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+            config_dir = Path(str(models_cfg.get("dir") or ""))
+            config_file = config_dir / f"kvmem-llama-{slugify_model_id(name).lower()}.json"
+            if config_file.exists():
+                raise BadRequest(f"配置已存在：{config_file}")
+            new_cfg = json.loads(json.dumps(template))
+            new_cfg["model_name"] = name
+            new_cfg["model_id"] = name
+            new_cfg["display_name"] = str(info.get("name") or model.stem)
+            new_cfg["aliases"] = []
+            new_cfg["model"] = str(model)
+            new_cfg.pop("artifact", None)
+            new_cfg["notes"] = (
+                f"KVMem + llama.cpp 单模型；参数"
+                + (f"复制自 {template_path.name}" if template_path else "使用内置默认")
+            )
+            args = template_args
+            for flag in (
+                "-m", "--model", "-a", "--alias", "--host", "--port",
+                "--api-key", "--api-key-file", "--mmproj", "--mmproj-offload",
+                "--no-mmproj-offload", "-mmdev", "--mmproj-device",
+                "-c", "--ctx-size", "-ctk", "--cache-type-k",
+                "-ctv", "--cache-type-v", "--kv-dtype", "--no-kvmem",
+            ):
+                args = _config_arg_remove(args, flag)
+            if "--kvmem" not in args:
+                args = ["--kvmem", *args]
+            args = _config_arg_replace(args, "-c", context)
+            args = _config_arg_replace(args, "--kvmem-budget", budget)
+            args = _config_arg_replace(args, "--kvmem-block-tokens", block)
+            args = _config_arg_replace(args, "--kvmem-gen-reserve", reserve)
+            args += cache_args
+            if "--no-ui" not in args:
+                args.append("--no-ui")
+            new_cfg["args"] = args
+            if vision is not None:
+                new_cfg["vision"] = {
+                    "mmproj": str(vision),
+                    "model": str(model),
+                    "gpu": bool(vision_gpu),
+                }
+            else:
+                new_cfg.pop("vision", None)
+                new_cfg.pop("mmproj", None)
+            if not new_cfg.get("exe"):
+                command = engine_cfg.get("command")
+                if isinstance(command, list) and command:
+                    new_cfg["exe"] = str(command[0])
+            if not new_cfg.get("cwd"):
+                new_cfg["cwd"] = str(engine_cfg.get("cwd") or "")
+            write_json_atomic(config_file, new_cfg)
+            job["config_path"] = str(config_file)
+            self._job_step(
+                job, "config", "ok",
+                f"已写入 {config_file}"
+                + (
+                    f"；视觉走 {'GPU' if vision_gpu else 'CPU'}"
+                    if vision is not None else "；无视觉"
+                ),
+            )
+
+            self._job_step(job, "start", "running", "正在停止当前引擎…")
+            self.ensure_no_async()
+            with self.cond:
+                engine_alive = bool(self.engine is not None and self.engine.alive())
+            if engine_alive:
+                self.stop_engine()
+            self.registry.reload()
+            entry = self.registry.resolve(name)
+            if entry is None:
+                raise EngineFailure("写入配置后注册表仍未发现该模型")
+            if not entry.available:
+                raise EngineFailure(f"引擎配置不可用：{entry.problem}")
+            self._job_step(job, "start", "running", "正在启动引擎并加载模型…")
+            self.preload(name)
+            self._job_step(
+                job, "start", "ok",
+                f"{entry.engine} 已加载 {entry.id}（引擎模型 {entry.engine_model}）",
+            )
+
+            if smoke:
+                self._job_step(job, "smoke", "running", "发送文本请求…")
+                text, text_tokens = self._smoke_completion(
+                    entry, [{"role": "user", "content": SMOKE_PROMPT}], job
+                )
+                self._job_step(
+                    job, "smoke", "ok",
+                    f"文本正常（prompt {text_tokens} tokens）：{text[:80]}",
+                )
+                if vision is not None:
+                    self._vision_smoke(entry, job, text_tokens)
+            else:
+                self._job_step(job, "smoke", "ok", "跳过（未勾选冒烟测试）")
+                if vision is not None:
+                    self._job_step(job, "vision_smoke", "ok", "跳过（未勾选冒烟测试）")
+
+            self._job_finish(job, "ok")
+            self.log.info("KVMem + llama.cpp model add %s (%s) finished", job["id"], name)
+        except Exception as exc:
+            message = exc.message if isinstance(exc, GatewayError) else str(exc)
+            self.log.exception("KVMem + llama.cpp model add %s failed", job["id"])
+            with self.model_jobs_lock:
+                for step in job.get("steps") or []:
+                    if step.get("status") == "running":
+                        step["status"] = "fail"
+                        if message:
+                            step["detail"] = message[:300]
+                if not any(step.get("status") == "fail" for step in job.get("steps") or []):
+                    for step in job.get("steps") or []:
+                        if step.get("status") == "pending":
+                            step["status"] = "fail"
+                            break
+            self._rollback_model_add(job, "kvmem_llama", name, None, config_file)
+            self._job_finish(job, "failed", message)
+        finally:
+            with self.model_jobs_lock:
+                job["status"] = job.get("status") if job.get("status") != "running" else "failed"
+                job["finished_at"] = job.get("finished_at") or iso_now()
+
     def _model_add_worker(
         self,
         job: dict[str, Any],
@@ -5134,6 +5823,11 @@ class Gateway:
     ) -> None:
         if kind == "ninfer_dir":
             self._model_add_ninfer_worker(job, engine_id, model, smoke)
+            return
+        if kind == "kvmem_llama_dir":
+            self._model_add_kvmem_llama_worker(
+                job, engine_id, model, vision, smoke, vision_gpu
+            )
             return
         engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
         short = self._short_kind(kind)
@@ -5505,7 +6199,7 @@ class Gateway:
         entry = self.registry.resolve(name)
         if entry is None:
             raise ModelNotFound(f"model {name!r} is not in the registry")
-        if entry.source not in ("preset", "strata", "ninfer"):
+        if entry.source not in ("preset", "strata", "ninfer", "kvmem_llama"):
             raise BadRequest("该模型由目录扫描发现，没有可删除的配置文件")
         removed: list[str] = []
         if entry.source == "preset":
@@ -5513,7 +6207,7 @@ class Gateway:
             if not preset_path.is_file() or not remove_llama_preset(preset_path, entry.engine_model):
                 raise BadRequest(f"models.ini 中找不到 [{entry.engine_model}] 段")
             removed.append(str(preset_path))
-        elif entry.source == "ninfer":
+        elif entry.source in ("ninfer", "kvmem_llama"):
             config_file = Path(str(entry.config_path or ""))
             if not config_file.is_file():
                 raise BadRequest(f"配置文件不存在：{config_file}")
@@ -5588,6 +6282,10 @@ class Gateway:
             raise BadRequest("KVMem 模型固定使用模型上下文与 q8 量化，不支持修改上下文或 K/V 精度")
         if entry.engine == "ninfer":
             raise BadRequest("NInfer 的上下文与 KV 参数由模型配置决定，不支持在控制台修改")
+        if entry.engine == "kvmem_llama":
+            raise BadRequest(
+                "KVMem + llama.cpp 的上下文与 KV 精度在新增模型时写入，暂不支持在控制台修改"
+            )
         if entry.engine != "llama":
             raise BadRequest(f"引擎 {entry.engine!r} 不支持修改上下文或 K/V 精度")
         preset_path = Path(str(entry.config_path or ""))
@@ -5663,10 +6361,10 @@ class Gateway:
             preset_path = Path(str(entry.config_path or ""))
             if entry.source != "preset" or not preset_path.is_file():
                 raise BadRequest("该模型由目录扫描发现，没有可编辑的 models.ini 预设段")
-        elif entry.engine == "kvmem":
+        elif entry.engine in ("kvmem", "kvmem_llama"):
             config_path = Path(str(entry.config_path or ""))
             if not config_path.is_file():
-                raise BadRequest("找不到该模型的 KVMem 配置文件")
+                raise BadRequest("找不到该模型的配置文件")
             config = read_json(config_path, {})
             if not isinstance(config, dict) or not isinstance(config.get("vision"), dict):
                 raise BadRequest("该模型的配置没有 vision 段，无法设置视觉运行位置")
@@ -5702,7 +6400,7 @@ class Gateway:
                 engine_values = dict(engine_values or {})
                 engine_values["mmproj-offload"] = "on" if vision_gpu else "off"
             update_llama_preset(preset_path, entry.engine_model, engine_values)
-        elif entry.engine == "kvmem":
+        elif entry.engine in ("kvmem", "kvmem_llama"):
             config_path = Path(str(entry.config_path or ""))
             config = read_json(config_path, {})
             if not isinstance(config, dict) or not isinstance(config.get("vision"), dict):
