@@ -7667,6 +7667,11 @@ class Handler(BaseHTTPRequestHandler):
             props["modalities"] = modalities
         if not isinstance(props.get("ui_settings"), dict):
             props.setdefault("webui_settings", {})
+        # Backends run with --no-ui because the gateway serves the bundled
+        # llama.cpp UI itself.  Their server-wide `ui` flag is false, but this
+        # UI treats `ui == false` as "hide this model"; force it back on so
+        # loaded models stay selectable.
+        props["ui"] = True
         return props
 
     # -- routing -----------------------------------------------------------

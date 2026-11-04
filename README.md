@@ -18,8 +18,14 @@
 - **默认策略**：上下文默认取 GGUF 中的上限（可改小，不能超过上限）；llama.cpp 的 K/V 量化默认均为 `q8_0`（k8v8），可分别选择 `f16`、`bf16`、`q4_0`、`q4_1`、`q5_0`、`q5_1`、`iq4_nl`、`f32` 等引擎支持的类型；KVMem 固定 `--kv q8_0`；NInfer 的上下文、KVMem 参数和 KV 量化全部继承模板；KVMem + llama.cpp 默认 `--kvmem`、预算 32768 tokens、block 32、生成保留 1024、KV 精度 `q8_0`（K/V 相同时写 `--kv-dtype`，不同且均为 `q8_0`/`q5_0`/`q4_0` 时分别写 `-ctk`/`-ctv`），预算与生成保留必须落在上下文内；显式给出的预算/预留放不下时直接报错，沿用模板的默认值则按上下文自动收缩，block 不大于生成预留。KVMem 引擎页未填的字段不写入模型配置，由模板或引擎默认决定，保存后自动重启引擎。视觉 mmproj 默认走 CPU，可切换 GPU（NInfer 暂不支持视觉）；其余采样参数以引擎参考模型（llama.cpp 为 LFM3-Omni-2B，KVMem 为 Ornith，NInfer 与 KVMem + llama.cpp 为模板）为默认。
 - **代理**：管理页“代理”支持 HTTP 与 SOCKS5，填写类型、主机、端口和可选的用户名/密码；点“测试连接”会先做 TCP 探测，再经代理并行访问 `hf-mirror.com` 与 `modelscope.cn` 验证连通。面板下方直接列出 Hugging Face、HF-Mirror、ModelScope 三个下载源，勾选表示该来源的搜索与下载走代理，未勾选则直连；代理未启用时不可勾选。密码只写入 `config.json`（设置密码后文件权限收紧为 600），读取接口从不回传密码；禁用代理会同时关闭所有下载源的单源代理开关。HTTP 代理使用 `http://`，SOCKS5 使用 `socks5h://`（域名在代理解析）。
 - **模型下载**：管理页“模型下载”顶部设置下载目录，保存进 `config.json`，下次打开自动带出。搜索框下方勾选要查询的来源（默认三个全选），只并行调用勾选来源对应的命令行：Hugging Face（`hf` 直连）、HF-Mirror（`HF_ENDPOINT=https://hf-mirror.com` 的 `hf`）与 ModelScope（`modelscope`），聚合为类似 Hugging Face 的卡片，展示仓库、pipeline、库、参数量、更新时间、下载量、点赞、标签等命令行可获得的字段；单个源失败不影响其它源。来源是否走代理在“代理”页分别设置，Hugging Face、HF-Mirror 与 ModelScope 各自独立开关（共用同一代理地址）。点“选择文件”查看仓库文件列表并勾选，下载保存为 `<下载目录>/<仓库ID>/<文件>`；计划阶段标出本地已存在的文件，勾选已存在文件会拒绝开始；支持同时下载多个模型；开始后任务统一显示在控制台右上角的“下载”按钮中，红色角标标注进行中数量，浮层列出所有正在下载的模型，点击任一任务可查看状态、脱敏日志并停止（终止整个进程组），下载页不再重复显示任务进度。Hugging Face 直连源会清除进程继承的代理变量，避免误走系统代理。
-- **聊天 UI**（`/ui`）：内置多模型聊天界面，支持文本、图片、音频和视频输入，API Key 仅保存在浏览器本地。
+- **聊天 UI**（`/ui`）：内置 llama.cpp 上游 full-ui 构建（当前对应 `9e2a04a439ed`，`webui/llama-ui/ui-build.json` 记录源码入口哈希），保留网关专用的 API Key 说明，使用相对资源路径，可随 `ui_path` 部署到任意子路径。后端引擎统一以 `--no-ui` 启动，网关在 `/props` 中固定返回 `ui: true`，因此加载后的模型不会从模型选择器消失；支持文本、图片、音频和视频输入，API Key 仅保存在浏览器本地。
 - **鉴权**：可选服务端 API Key，保护 `/v1` 与聊天 UI 的 `/props`；控制台与 `/models` 不鉴权，适合可信内网使用。
+
+## 内置聊天 UI
+
+`webui/llama-ui` 是 llama.cpp `tools/ui` 的完整（full-ui）静态构建，源码版本记录在 `ui-build.json` 的 `llama_commit` 与 `entry_files` 中。本地修改只有一处：`src/lib/constants/settings.constants.ts` 里 API Key 的帮助文字改为网关说明（仅保存在浏览器、服务端密钥在控制台 `/` 修改）。构建输出保持相对资源路径，不写死 `base href`，因此 `ui_path` 可以改成任意子路径。
+
+更新步骤：在 llama.cpp 的 `tools/ui` 执行 `npm ci && npm run build`，把 `dist/` 复制到 `webui/llama-ui`，重新应用上述帮助文字，并用新源码的入口哈希更新 `ui-build.json`。网关会在 `/props` 中固定返回 `ui: true`，不要依赖引擎的 `--no-ui` 值。
 
 ## 接口
 
