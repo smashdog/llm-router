@@ -1249,10 +1249,18 @@ def discover_kvmem_models(engine_cfg: dict[str, Any]) -> list[Model]:
 
 
 def discover_ninfer_models(engine_cfg: dict[str, Any]) -> list[Model]:
-    config_dir = Path(str((engine_cfg.get("models") or {}).get("dir") or ""))
+    models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+    config_dir = Path(str(models_cfg.get("dir") or ""))
     engine_cwd = Path(str(engine_cfg.get("cwd") or "."))
     engine_command = engine_cfg.get("command")
     engine_binary = str(engine_command[0]) if isinstance(engine_command, list) and engine_command else ""
+    template_raw = str(models_cfg.get("template") or "").strip()
+    template_path = None
+    if template_raw:
+        template = Path(template_raw)
+        if not template.is_absolute():
+            template = engine_cwd / template
+        template_path = os.path.abspath(str(template))
     candidates = []
     try:
         for path in config_dir.glob("ninfer-*.json"):
@@ -1266,6 +1274,8 @@ def discover_ninfer_models(engine_cfg: dict[str, Any]) -> list[Model]:
     models: list[Model] = []
     seen: set[str] = set()
     for _, path in candidates:
+        if template_path and os.path.abspath(str(path)) == template_path:
+            continue
         cfg = read_json(path)
         if not isinstance(cfg, dict):
             continue
