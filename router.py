@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import hmac
 import json
 import logging
@@ -1404,6 +1405,210 @@ class StatusHub:
 
 
 # ---------------------------------------------------------------------------
+# fixed engine slots and path configuration
+
+ENGINE_SLOTS: dict[str, dict[str, Any]] = {
+    "llama": {
+        "label": "llama.cpp",
+        "kind": "llama_router",
+        "models_kind": "llama_dir",
+        "fields": ("binary", "cwd", "models_dir", "preset"),
+        "model_key": "preset",
+        "host": "127.0.0.1",
+        "port": 18080,
+        "start_timeout_s": 120,
+        "log_path": "logs/llama-engine.log",
+    },
+    "kvmem": {
+        "label": "KVMem",
+        "kind": "kvmem",
+        "models_kind": "kvmem_dir",
+        "fields": ("binary", "cwd", "models_dir", "meta"),
+        "model_key": "meta",
+        "host": "127.0.0.1",
+        "port": 18081,
+        "start_timeout_s": 900,
+        "log_path": "logs/kvmem-engine.log",
+    },
+}
+ENGINE_SLOT_ORDER = ("llama", "kvmem")
+
+
+def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
+    """Conventional sibling-directory layout, used to prefill a new engine."""
+    root = base_dir.parent
+    if engine_id == "llama":
+        cwd = root / "llama.cpp"
+        return {
+            "binary": str(cwd / "build" / "bin" / "llama-server"),
+            "cwd": str(cwd),
+            "models_dir": str(base_dir / "models"),
+            "preset": str(base_dir / "models.ini"),
+        }
+    if engine_id == "kvmem":
+        home = root / "kvmem"
+        models_dir = home / "local_config"
+        return {
+            "binary": str(home / ".venv" / "bin" / "python"),
+            "cwd": str(home / "backends" / "polystrata"),
+            "models_dir": str(models_dir),
+            "meta": str(models_dir / "models.json"),
+        }
+    return {}
+
+
+def engine_path_fields(engine_id: str, engine_cfg: dict[str, Any]) -> dict[str, str]:
+    spec = ENGINE_SLOTS.get(engine_id) or {}
+    models = engine_cfg.get("models")
+    models = models if isinstance(models, dict) else {}
+    command = engine_cfg.get("command")
+    command = command if isinstance(command, list) else []
+    fields = {
+        "binary": str(command[0]) if command else "",
+        "cwd": str(engine_cfg.get("cwd") or ""),
+        "models_dir": str(models.get("dir") or ""),
+    }
+    model_key = str(spec.get("model_key") or "")
+    if model_key:
+        fields[model_key] = str(models.get(model_key) or "")
+    return fields
+
+
+def _slot_command(engine_id: str, fields: dict[str, str]) -> list[str]:
+    if engine_id == "llama":
+        return [
+            fields["binary"],
+            "--models-preset", fields["preset"],
+            "--models-dir", fields["models_dir"],
+            "--host", "{host}",
+            "--port", "{port}",
+        ]
+    return [
+        fields["binary"],
+        "-m", "serve.server",
+        "--engine", "strata",
+        "--config", "{config}",
+        "--host", "{host}",
+        "--port", "{port}",
+        "--switch-on-request",
+    ]
+
+
+def _rewrite_slot_command(
+    command: list[str], fields: dict[str, str], old: dict[str, str]
+) -> list[str]:
+    """Keep custom flags but move every known path to the new value."""
+    replacements = []
+    for key in ("binary", "models_dir", "preset", "meta", "cwd"):
+        before = str(old.get(key) or "")
+        after = str(fields.get(key) or "")
+        if before and after and before != after:
+            replacements.append((before, after))
+    replacements.sort(key=lambda item: len(item[0]), reverse=True)
+    out = []
+    for token in command:
+        value = str(token)
+        for before, after in replacements:
+            value = value.replace(before, after)
+        out.append(value)
+    binary = fields.get("binary") or (out[0] if out else "")
+    if out and binary and out[0] != binary:
+        out[0] = binary
+    return out
+
+
+def build_engine_cfg(
+    engine_id: str, fields: dict[str, str], existing: dict[str, Any] | None
+) -> dict[str, Any]:
+    spec = ENGINE_SLOTS[engine_id]
+    cfg = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+    old = engine_path_fields(engine_id, cfg) if cfg else {}
+    cfg["kind"] = str(cfg.get("kind") or spec["kind"])
+    cfg["host"] = str(cfg.get("host") or spec["host"])
+    cfg["port"] = int(cfg.get("port") or spec["port"])
+    cfg["cwd"] = fields["cwd"]
+    command = cfg.get("command")
+    if isinstance(command, list) and command:
+        cfg["command"] = _rewrite_slot_command(command, fields, old)
+    else:
+        cfg["command"] = _slot_command(engine_id, fields)
+    cfg.setdefault("start_timeout_s", spec["start_timeout_s"])
+    cfg.setdefault("log_path", spec["log_path"])
+    if existing is None:
+        cfg.setdefault("api_key", None)
+    models = cfg.get("models")
+    models = models if isinstance(models, dict) else {}
+    models["kind"] = str(models.get("kind") or spec["models_kind"])
+    models["dir"] = fields["models_dir"]
+    model_key = str(spec["model_key"])
+    models[model_key] = fields.get(model_key, "")
+    cfg["models"] = models
+    return cfg
+
+
+def resolve_engine_path(base_dir: Path, value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    # Keep symlinks intact: a venv's bin/python must stay inside the venv.
+    return Path(os.path.abspath(str(path)))
+
+
+def validate_engine_paths(
+    engine_id: str, paths: dict[str, Any], base_dir: Path
+) -> dict[str, str]:
+    spec = ENGINE_SLOTS[engine_id]
+    if not isinstance(paths, dict):
+        raise BadRequest("paths 必须是对象")
+    allowed = set(spec["fields"])
+    unknown = sorted(str(key) for key in paths if key not in allowed)
+    if unknown:
+        raise BadRequest(f"不支持的路径字段：{', '.join(unknown)}")
+    fields: dict[str, str] = {}
+    for key in spec["fields"]:
+        raw = paths.get(key, "")
+        if raw is None:
+            raw = ""
+        if not isinstance(raw, str):
+            raise BadRequest(f"{key} 必须是字符串")
+        text = raw.strip()
+        if not text:
+            if key == "meta":
+                fields[key] = ""
+                continue
+            raise BadRequest(f"{key} 不能为空")
+        fields[key] = str(resolve_engine_path(base_dir, text))
+    for key, message in (
+        ("binary", "文件不存在"),
+        ("cwd", "目录不存在"),
+        ("models_dir", "目录不存在"),
+    ):
+        path = Path(fields[key])
+        ok = path.is_file() if key == "binary" else path.is_dir()
+        if not ok:
+            raise BadRequest(f"{key}：{message}（{path}）")
+    binary = Path(fields["binary"])
+    if not os.access(binary, os.X_OK):
+        raise BadRequest(f"binary：文件不可执行（{binary}）")
+    model_key = str(spec["model_key"])
+    preset_value = fields.get(model_key) or ""
+    if preset_value:
+        path = Path(preset_value)
+        if not path.is_file():
+            raise BadRequest(f"{model_key}：文件不存在（{path}）")
+    return fields
+
+
+def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
+    try:
+        if engine_id == "llama":
+            return discover_llama_models(cfg)
+        return discover_kvmem_models(cfg)
+    except Exception as exc:
+        raise BadRequest(f"无法扫描模型目录：{exc}") from exc
+
+
+# ---------------------------------------------------------------------------
 # engine supervisor
 
 
@@ -1433,6 +1638,7 @@ class EngineManager:
         self.current_model: str | None = None
         self.current_entry: Model | None = None
         self.started_at: float | None = None
+        self.started_paths: dict[str, str] | None = None
         self.last_pid: int | None = None
 
     def _resolve_path(self, value: str) -> Path:
@@ -1579,6 +1785,7 @@ class EngineManager:
                 "stop the old service or choose another port"
             )
         cmd = self._build_command(entry)
+        started_paths = engine_path_fields(self.engine_id, self.cfg)
         cwd = Path(str(self.cfg.get("cwd") or self.base_dir))
         if not cwd.is_dir():
             raise EngineFailure(f"{self.engine_id}: working directory is missing ({cwd})")
@@ -1624,6 +1831,7 @@ class EngineManager:
             raise
         self.current_model = entry.engine_model
         self.current_entry = entry
+        self.started_paths = started_paths
         self._write_state()
         self.log.info("engine %s is ready (%s)", self.engine_id, entry.id)
 
@@ -1984,6 +2192,7 @@ class Gateway:
         self.base_dir = base_dir
         self.log = log
         self.config_path = config_path or (base_dir / "config.json")
+        self._config_lock = threading.Lock()
         self._auth_lock = threading.Lock()
         self.timeouts = config.get("timeouts", {})
         self.cond = threading.Condition(threading.RLock())
@@ -2119,7 +2328,8 @@ class Gateway:
                 raise GatewayError(f"cannot write API key file: {exc}")
             self.auth_key = value
             try:
-                write_json_atomic(self.config_path, self.config)
+                with self._config_lock:
+                    write_json_atomic(self.config_path, self.config)
             except OSError as exc:
                 self.log.exception("cannot persist auth configuration to %s", self.config_path)
                 raise GatewayError(
@@ -2570,6 +2780,191 @@ class Gateway:
     @staticmethod
     def _short_kind(kind: str | None) -> str:
         return {"llama_dir": "llama", "kvmem_dir": "kvmem"}.get(str(kind), "")
+
+    def _engine_config_label(self) -> str:
+        try:
+            return str(self.config_path.relative_to(self.base_dir))
+        except ValueError:
+            return str(self.config_path)
+
+    def _backup_config(self) -> Path:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        folder = self.base_dir / "backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"config-{stamp}.json"
+        index = 1
+        while target.exists():
+            target = folder / f"config-{stamp}-{index}.json"
+            index += 1
+        target.write_bytes(self.config_path.read_bytes())
+        return target
+
+    def engine_paths_view(self) -> dict[str, Any]:
+        engines_cfg = self.config.get("engines")
+        engines_cfg = engines_cfg if isinstance(engines_cfg, dict) else {}
+        counts = self.registry.counts()
+        items = []
+        for engine_id in ENGINE_SLOT_ORDER:
+            spec = ENGINE_SLOTS[engine_id]
+            engine_cfg = engines_cfg.get(engine_id)
+            configured = isinstance(engine_cfg, dict)
+            manager = self.engines.get(engine_id)
+            running = bool(manager is not None and manager.alive())
+            current = engine_path_fields(engine_id, engine_cfg) if configured else {}
+            defaults = engine_slot_defaults(self.base_dir, engine_id)
+            fields = (
+                {key: str(current.get(key) or "") for key in spec["fields"]}
+                if configured
+                else {key: str(defaults.get(key) or "") for key in spec["fields"]}
+            )
+            needs_restart = False
+            if running and manager is not None:
+                needs_restart = (
+                    manager.started_paths is None
+                    or manager.started_paths != engine_path_fields(engine_id, manager.cfg)
+                )
+            model_count = int(counts.get(engine_id, 0))
+            warning = None
+            if configured and model_count == 0:
+                warning = "目录中未发现模型；可继续在控制台新增模型，或检查扫描路径。"
+            items.append(
+                {
+                    "engine": engine_id,
+                    "label": spec["label"],
+                    "kind": engine_id,
+                    "configured": configured,
+                    "running": running,
+                    "needs_restart": needs_restart,
+                    "fields": fields,
+                    "defaults": defaults,
+                    "models": model_count,
+                    "warning": warning,
+                    "address": f"{spec['host']}:{spec['port']}",
+                }
+            )
+        return {
+            "object": "list",
+            "config_file": self._engine_config_label(),
+            "engines": items,
+        }
+
+    def save_engine_paths(
+        self, engine_id: str, paths: Any, create: bool = False
+    ) -> dict[str, Any]:
+        if engine_id not in ENGINE_SLOTS:
+            raise BadRequest("engine 必须是 llama 或 kvmem")
+        engines_cfg = self.config.get("engines")
+        if engines_cfg is None:
+            engines_cfg = {}
+            self.config["engines"] = engines_cfg
+        if not isinstance(engines_cfg, dict):
+            raise GatewayError("config.engines 必须是对象")
+        existing = engines_cfg.get(engine_id)
+        if existing is not None and not isinstance(existing, dict):
+            raise BadRequest(f"engines.{engine_id} 必须是对象")
+        if existing is None and not create:
+            raise BadRequest("引擎尚未配置；请确认创建引擎")
+        if existing is not None and create:
+            raise BadRequest("引擎已配置，不能重复创建")
+        if existing is not None:
+            models_cfg = existing.get("models")
+            kind = models_cfg.get("kind") if isinstance(models_cfg, dict) else None
+            if kind and str(kind) != ENGINE_SLOTS[engine_id]["models_kind"]:
+                raise BadRequest(
+                    f"engines.{engine_id}.models.kind={kind!r} 与固定槽位不匹配"
+                )
+        fields = validate_engine_paths(engine_id, paths, self.base_dir)
+        candidate = build_engine_cfg(engine_id, fields, existing)
+        scanned = scan_engine_models(engine_id, candidate)
+        with self._config_lock:
+            backup_path = None
+            if self.config_path.is_file():
+                try:
+                    backup_path = self._backup_config()
+                except OSError as exc:
+                    self.log.exception("cannot back up %s", self.config_path)
+                    raise GatewayError(f"无法备份 {self.config_path.name}：{exc}") from exc
+            new_config = copy.deepcopy(self.config)
+            new_engines = new_config.get("engines")
+            if not isinstance(new_engines, dict):
+                new_engines = {}
+                new_config["engines"] = new_engines
+            new_engines[engine_id] = copy.deepcopy(candidate)
+            try:
+                write_json_atomic(self.config_path, new_config)
+            except OSError as exc:
+                self.log.exception("cannot write %s", self.config_path)
+                raise GatewayError(f"无法写入 {self.config_path.name}：{exc}") from exc
+            live_engines = self.config.get("engines")
+            if not isinstance(live_engines, dict):
+                live_engines = {}
+                self.config["engines"] = live_engines
+            current = live_engines.get(engine_id)
+            if isinstance(current, dict):
+                current.clear()
+                current.update(copy.deepcopy(candidate))
+                cfg = current
+            else:
+                live_engines[engine_id] = copy.deepcopy(candidate)
+                cfg = live_engines[engine_id]
+            manager = self.engines.get(engine_id)
+            if manager is None:
+                self.engines[engine_id] = EngineManager(
+                    engine_id,
+                    cfg,
+                    self.base_dir,
+                    self.timeouts,
+                    self.state_path,
+                    self.log,
+                )
+            else:
+                manager.cfg = cfg
+        self.registry.reload()
+        self.log.info(
+            "%s engine paths %s; %d models discovered",
+            "created" if existing is None else "updated",
+            engine_id,
+            len(scanned),
+        )
+        view = self.engine_paths_view()
+        view.update(
+            {
+                "status": "ok",
+                "created": existing is None,
+                "backup": str(backup_path) if backup_path else None,
+            }
+        )
+        if not scanned:
+            view["note"] = (
+                f"{ENGINE_SLOTS[engine_id]['label']} 引擎已配置，但目录中没有发现模型。"
+            )
+        return view
+
+    def restart_engine_paths(self, engine_id: str) -> dict[str, Any]:
+        if engine_id not in ENGINE_SLOTS:
+            raise BadRequest("engine 必须是 llama 或 kvmem")
+        engines_cfg = self.config.get("engines")
+        if not isinstance(engines_cfg, dict) or not isinstance(
+            engines_cfg.get(engine_id), dict
+        ):
+            raise BadRequest("引擎尚未配置")
+        manager = self.engines.get(engine_id)
+        if manager is None or not manager.alive():
+            return {
+                "status": "ok",
+                "restarting": False,
+                "restart_pending": False,
+                "note": "引擎未运行；新路径将在下次加载模型时生效",
+                "view": self.engine_paths_view(),
+            }
+        started, pending, note = self._schedule_engine_restart(engine_id)
+        return {
+            "status": "ok",
+            "restarting": started,
+            "restart_pending": pending,
+            "note": note,
+            "view": self.engine_paths_view(),
+        }
 
     def default_sampling(self, engine_id: str) -> dict[str, Any]:
         kind = self._short_kind(self._engine_kind(engine_id))
@@ -4292,6 +4687,34 @@ class Handler(BaseHTTPRequestHandler):
                 raise BadRequest('send {"model": "..."}')
             result = self.gateway.delete_model(name.strip())
             self._json(200, {"status": "ok", **result})
+            return
+        if normalized == "/router/engines/paths":
+            if method in ("GET", "HEAD"):
+                self._json(200, self.gateway.engine_paths_view())
+                return
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            engine = payload.get("engine")
+            if not isinstance(engine, str) or not engine.strip():
+                raise BadRequest('send {"engine": "llama", "paths": {...}}')
+            paths = payload.get("paths")
+            if not isinstance(paths, dict):
+                raise BadRequest("paths must be an object")
+            result = self.gateway.save_engine_paths(
+                engine.strip(), paths, payload.get("create") is True
+            )
+            self._json(200, result)
+            return
+        if normalized == "/router/engines/restart":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            engine = payload.get("engine")
+            if not isinstance(engine, str) or not engine.strip():
+                raise BadRequest('send {"engine": "llama"}')
+            result = self.gateway.restart_engine_paths(engine.strip())
+            self._json(202 if result.get("restarting") else 200, result)
             return
         if normalized == "/router/reload":
             if method != "POST":

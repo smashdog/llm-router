@@ -107,6 +107,37 @@
   .head-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; align-self: center; }
   .manage-panel .auth-panel { background: rgba(255,255,255,.02); }
 
+  .engine-paths { display: flex; flex-direction: column; gap: 14px; }
+  .engine-path {
+    padding: 16px; border-radius: 12px; border: 1px solid var(--line);
+    background: rgba(255,255,255,.02);
+  }
+  .engine-path-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .engine-path-head h3 { margin: 0; font-size: 14.5px; }
+  .engine-path-head .count { margin-left: auto; }
+  .engine-path-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+  .engine-path-fields label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+  .engine-path-fields label .name { color: var(--faint); font-size: 10.5px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .engine-path-fields input {
+    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0c121a; color: var(--text); font: inherit; font-size: 12.5px; outline: none;
+  }
+  .engine-path-fields input:focus { border-color: rgba(94,234,212,.45); }
+  .engine-path-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 13px; }
+  .engine-path-actions .hint { margin-right: auto; color: var(--faint); font-size: 11.5px; }
+  .engine-path .params-error { margin-top: 10px !important; }
+  .engine-path .path-warning { margin: 10px 0 0; color: #ffe5a3; font-size: 12px; }
+  @media (max-width: 620px) { .engine-path-fields { grid-template-columns: 1fr; } }
+
+  .setup-card {
+    margin-top: 18px; padding: 38px 26px; border-radius: 16px;
+    border: 1px dashed var(--line); background: var(--panel); text-align: center;
+  }
+  .setup-card .mark { margin: 0 auto 14px; }
+  .setup-card h2 { margin: 0 0 6px; font-size: 18px; }
+  .setup-card p { margin: 0 auto 18px; max-width: 560px; color: var(--muted); font-size: 13px; }
+  .setup-card .tag { margin-bottom: 12px; }
+
   [hidden] { display: none !important; }
   .auth-panel {
     padding: 16px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line);
@@ -309,6 +340,7 @@
   </header>
 
   <main id="console-view">
+  <div id="console-content" hidden>
   <section class="block" aria-labelledby="engines-title">
     <div class="section-head">
       <h2 id="engines-title">引擎</h2>
@@ -349,6 +381,17 @@
     <span>LLM Router</span>
     <span>推理接口 /v1 与聊天 UI 的 /props 需要服务端 API Key（可在管理页配置）；控制台与 /models 无鉴权，仅限可信内网使用，请勿直接暴露到公网。</span>
   </footer>
+  </div>
+
+  <div id="console-empty" hidden>
+    <section class="setup-card">
+      <div class="mark" aria-hidden="true">LR</div>
+      <span class="tag amber">未配置引擎</span>
+      <h2>还没有可用的推理引擎</h2>
+      <p>控制台只展示引擎和模型。请先在管理页填写 llama.cpp 或 KVMem 的启动路径并创建引擎，模型列表随后会自动出现。</p>
+      <button class="btn primary" id="btn-setup-engines" type="button">去管理页配置引擎</button>
+    </section>
+  </div>
   </main>
 
   <main id="manage-view" hidden>
@@ -359,10 +402,18 @@
     <div class="manage-layout">
       <aside class="manage-menu" aria-label="管理菜单">
         <p class="menu-label">设置</p>
-        <button class="menu-item on" type="button" data-panel="auth">API 密钥管理</button>
+        <button class="menu-item on" type="button" data-panel="engines">引擎路径</button>
+        <button class="menu-item" type="button" data-panel="auth">API 密钥管理</button>
       </aside>
       <div class="manage-content">
-        <section class="manage-panel" data-panel="auth" aria-labelledby="auth-title">
+        <section class="manage-panel" data-panel="engines" aria-labelledby="engine-paths-title">
+          <h2 id="engine-paths-title">引擎路径</h2>
+          <p class="panel-hint">配置 llama.cpp 与 KVMem 的启动路径；保存后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
+          <div class="engine-paths" id="engine-paths">
+            <div class="empty">正在读取引擎配置…</div>
+          </div>
+        </section>
+        <section class="manage-panel" data-panel="auth" aria-labelledby="auth-title" hidden>
           <h2 id="auth-title">API 密钥管理</h2>
           <p class="panel-hint">保护 /v1 推理接口和聊天 UI 的 /props 探测；聊天设置里填写的密钥只保存在浏览器，不会修改这里。</p>
           <div class="auth-panel">
@@ -524,6 +575,9 @@
     busy: false,
     timer: null,
     manage: null,
+    paths: null,
+    pathsLoading: false,
+    pathsBusy: false,
     addJob: null,
     addTimer: null,
   };
@@ -541,6 +595,20 @@
   const PARAM_SUMMARY = [
     ["temperature", "温度"], ["top_p", "top_p"], ["top_k", "top_k"], ["repetition_penalty", "重复"],
   ];
+  const PATH_FIELDS = {
+    llama: [
+      { key: "binary", label: "llama-server 可执行文件", hint: "binary", placeholder: "/path/to/llama.cpp/build/bin/llama-server" },
+      { key: "cwd", label: "工作目录", hint: "cwd", placeholder: "/path/to/llama.cpp" },
+      { key: "models_dir", label: "模型目录", hint: "models_dir", placeholder: "/path/to/llm-router/models" },
+      { key: "preset", label: "models.ini 预设", hint: "preset", placeholder: "/path/to/llm-router/models.ini" },
+    ],
+    kvmem: [
+      { key: "binary", label: "Python 解释器", hint: "binary", placeholder: "/path/to/kvmem/.venv/bin/python" },
+      { key: "cwd", label: "工作目录", hint: "cwd", placeholder: "/path/to/kvmem/backends/polystrata" },
+      { key: "models_dir", label: "模型配置目录", hint: "models_dir", placeholder: "/path/to/kvmem/local_config" },
+      { key: "meta", label: "models.json（选填）", hint: "meta", placeholder: "/path/to/kvmem/local_config/models.json" },
+    ],
+  };
   let paramsModel = null;
 
   function samplingSummary(params) {
@@ -639,6 +707,8 @@
     document.querySelectorAll(".manage-content [data-panel]").forEach((node) => {
       node.hidden = node.dataset.panel !== panel;
     });
+    if (panel === "auth") loadAuth();
+    if (panel === "engines") loadEnginePaths();
   }
 
   function setView(view) {
@@ -651,7 +721,10 @@
     button.setAttribute("aria-pressed", manage ? "true" : "false");
     document.title = manage ? "管理 · LLM Router" : "LLM Router 控制台";
     window.scrollTo(0, 0);
-    if (manage) loadAuth();
+    if (manage) {
+      const current = document.querySelector(".manage-menu .menu-item.on");
+      selectManagePanel(current ? current.dataset.panel : "engines");
+    }
   }
 
   function setAuthError(message) {
@@ -754,6 +827,161 @@
     }
   }
 
+  function enginePathCard(engine) {
+    return document.querySelector(`.engine-path[data-engine="${engine}"]`);
+  }
+
+  function setPathError(card, message) {
+    const box = card.querySelector('[data-role="error"]');
+    if (!box) return;
+    box.textContent = message || "";
+    box.hidden = !message;
+  }
+
+  function setPathBusy(card, busy) {
+    card.querySelectorAll("button, input").forEach((node) => { node.disabled = busy; });
+  }
+
+  async function loadEnginePaths() {
+    if (state.pathsLoading || state.pathsBusy) return;
+    state.pathsLoading = true;
+    try {
+      state.paths = await api("/router/engines/paths");
+      renderEnginePaths();
+    } catch (error) {
+      $("engine-paths").innerHTML =
+        `<div class="empty">无法读取引擎配置：${esc(error.message)}</div>`;
+    } finally {
+      state.pathsLoading = false;
+    }
+  }
+
+  function renderEnginePaths() {
+    const host = $("engine-paths");
+    const data = state.paths;
+    if (!data) {
+      host.innerHTML = '<div class="empty">正在读取引擎配置…</div>';
+      return;
+    }
+    const engines = Array.isArray(data.engines) ? data.engines : [];
+    if (!engines.length) {
+      host.innerHTML = '<div class="empty">没有可配置的引擎槽位</div>';
+      return;
+    }
+    host.innerHTML = engines.map((item) => {
+      const schema = PATH_FIELDS[item.engine] || [];
+      const configured = !!item.configured;
+      const fields = item.fields || {};
+      const tags = [
+        `<span class="tag ${configured ? "green" : "amber"}">${configured ? "已配置" : "未配置"}</span>`,
+      ];
+      if (item.running) tags.push('<span class="tag green">运行中</span>');
+      else if (configured) tags.push('<span class="tag">已停止</span>');
+      if (item.needs_restart) tags.push('<span class="tag amber">需重启</span>');
+      const rows = schema.map((field) => `
+        <label>${esc(field.label)} <span class="name">${esc(field.hint)}</span>
+          <input type="text" spellcheck="false" data-path-field="${esc(field.key)}"
+            placeholder="${esc(field.placeholder)}" value="${esc(fields[field.key] || "")}" />
+        </label>`).join("");
+      const note = configured
+        ? `${esc(data.config_file || "config.json")} 已记录 · 内部地址 ${esc(item.address || "—")}`
+        : "保存后会写入 config.json，并创建对应的引擎槽位。";
+      return `
+        <article class="engine-path" data-engine="${esc(item.engine)}">
+          <div class="engine-path-head">
+            <h3>${esc(item.label)}</h3>
+            ${tags.join("")}
+            <span class="count">${item.models || 0} 个模型</span>
+          </div>
+          <div class="engine-path-fields">${rows}</div>
+          ${item.warning ? `<p class="path-warning">${esc(item.warning)}</p>` : ""}
+          <div class="engine-path-actions">
+            <span class="hint">${note}</span>
+            <button class="btn primary" type="button" data-path-action="${configured ? "save" : "create"}">${configured ? "保存路径" : "创建引擎"}</button>
+            ${item.running ? '<button class="btn" type="button" data-path-action="restart">重启引擎</button>' : ""}
+          </div>
+          <p class="params-error" data-role="error" hidden></p>
+        </article>`;
+    }).join("");
+  }
+
+  async function saveEnginePaths(engine, create) {
+    const card = enginePathCard(engine);
+    if (!card || state.pathsBusy) return;
+    const paths = {};
+    card.querySelectorAll("input[data-path-field]").forEach((input) => {
+      paths[input.dataset.pathField] = input.value.trim();
+    });
+    const schema = PATH_FIELDS[engine] || [];
+    const missing = schema.find((field) => field.key !== "meta" && !paths[field.key]);
+    if (missing) {
+      setPathError(card, `请填写 ${missing.label}。`);
+      return;
+    }
+    setPathError(card, "");
+    state.pathsBusy = true;
+    setPathBusy(card, true);
+    let payload;
+    try {
+      payload = await api("/router/engines/paths", {
+        method: "POST",
+        body: JSON.stringify({ engine, create: !!create, paths }),
+      });
+    } catch (error) {
+      setPathError(card, error.message);
+      return;
+    } finally {
+      state.pathsBusy = false;
+      setPathBusy(card, false);
+    }
+    state.paths = payload;
+    state.manage = null;
+    renderEnginePaths();
+    const item = (payload.engines || []).find((entry) => entry.engine === engine);
+    toast(`${item ? item.label : engine} ${create ? "引擎已创建" : "路径已保存"}`, "ok");
+    if (payload.note) toast(payload.note, "");
+    await refresh();
+  }
+
+  async function restartEnginePaths(engine) {
+    const card = enginePathCard(engine);
+    if (!card || state.pathsBusy) return;
+    const ok = await askConfirm(
+      "重启引擎",
+      "将先等待进行中的生成结束，然后停止引擎并按当前 config.json 重新启动；若该引擎上有活动模型，会自动重新加载。",
+      "重启",
+      false,
+    );
+    if (!ok) return;
+    state.pathsBusy = true;
+    setPathBusy(card, true);
+    let payload;
+    try {
+      payload = await api("/router/engines/restart", {
+        method: "POST",
+        body: JSON.stringify({ engine }),
+      });
+    } catch (error) {
+      setPathError(card, error.message);
+      return;
+    } finally {
+      state.pathsBusy = false;
+      setPathBusy(card, false);
+    }
+    if (payload.view) {
+      state.paths = payload.view;
+      renderEnginePaths();
+    }
+    toast(payload.note || (payload.restarting ? "已开始重启引擎" : "引擎未运行"), payload.restarting ? "ok" : "");
+    await refresh();
+    if (payload.restarting) {
+      setTimeout(refresh, 1200);
+      setTimeout(refresh, 3600);
+      setTimeout(() => { loadEnginePaths(); }, 1600);
+      setTimeout(() => { loadEnginePaths(); }, 4200);
+    }
+  }
+
   function renderEngines() {
     const status = state.status;
     const host = $("engines");
@@ -847,7 +1075,20 @@
     }).join("");
   }
 
+  function renderConsoleState() {
+    const status = state.status;
+    if (!status) {
+      $("console-content").hidden = true;
+      $("console-empty").hidden = true;
+      return;
+    }
+    const configured = Object.keys(status.engines || {}).length > 0;
+    $("console-content").hidden = !configured;
+    $("console-empty").hidden = configured;
+  }
+
   function render() {
+    renderConsoleState();
     renderEngines();
     renderModels();
     renderAuth();
@@ -1323,8 +1564,25 @@
   $("btn-manage").addEventListener("click", () => {
     setView($("manage-view").hidden ? "manage" : "console");
   });
+  $("btn-setup-engines").addEventListener("click", () => {
+    setView("manage");
+    selectManagePanel("engines");
+  });
   document.querySelectorAll(".manage-menu .menu-item").forEach((item) => {
     item.addEventListener("click", () => selectManagePanel(item.dataset.panel));
+  });
+  $("engine-paths").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-path-action]");
+    if (!button || button.disabled) return;
+    const card = button.closest(".engine-path");
+    if (!card) return;
+    const engine = card.dataset.engine;
+    const action = button.dataset.pathAction;
+    if (action === "restart") {
+      restartEnginePaths(engine).catch((error) => toast(error.message, "bad"));
+    } else {
+      saveEnginePaths(engine, action === "create").catch((error) => toast(error.message, "bad"));
+    }
   });
   $("btn-reload").addEventListener("click", reloadRegistry);
   $("btn-stop").addEventListener("click", stopEngine);
