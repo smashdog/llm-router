@@ -611,8 +611,8 @@ def sampling_aliases(key: str) -> tuple[str, ...]:
     return (key,)
 
 
-def _sampling_number(key: str, raw: Any, low: float, high: float, *, integer: bool = False,
-                     low_exclusive: bool = False) -> float | int:
+def _sampling_number(key: str, raw: Any, low: float, high: float | None, *,
+                     integer: bool = False, low_exclusive: bool = False) -> float | int:
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         raise BadRequest(f"{key}: expected a number")
     if raw != raw or raw in (float("inf"), float("-inf")):
@@ -621,8 +621,16 @@ def _sampling_number(key: str, raw: Any, low: float, high: float, *, integer: bo
         if raw != int(raw):
             raise BadRequest(f"{key}: expected an integer")
         raw = int(raw)
-    ok = (raw > low and raw <= high) if low_exclusive else (low <= raw <= high)
+    if high is None:
+        ok = raw > low if low_exclusive else raw >= low
+    else:
+        ok = (raw > low and raw <= high) if low_exclusive else (low <= raw <= high)
     if not ok:
+        if high is None:
+            raise BadRequest(
+                f"{key}: expected {low} < value" if low_exclusive
+                else f"{key}: expected value >= {low}"
+            )
         if low_exclusive:
             raise BadRequest(f"{key}: expected {low} < value <= {high}")
         raise BadRequest(f"{key}: expected {low}..{high}")
@@ -686,6 +694,537 @@ def normalize_sampling(values: dict[str, Any], engine: str) -> dict[str, Any]:
             raise BadRequest("NInfer 只接受中立值 repetition_penalty=1")
         out[key] = value
     return out
+
+
+# ---------------------------------------------------------------------------
+# llama-kvmem-server per-model engine options
+#
+# sampling_schema() covers the request-level sampler.  These are the
+# process-level KVMem/runtime knobs the router writes into each
+# kvmem-llama-*.json (see llama-kvmem-server --help).
+
+KVMEM_LLAMA_ENGINE_GROUPS = (
+    ("core", "预算与保留"),
+    ("retrieval", "检索与选择"),
+    ("memory", "内存与存储"),
+    ("runtime", "运行与并发"),
+    ("spec", "推测解码（MTP）"),
+    ("thinking", "思考"),
+    ("vision", "视觉"),
+)
+KVMEM_LLAMA_GROUP_LABELS = dict(KVMEM_LLAMA_ENGINE_GROUPS)
+
+
+def _kv_engine_spec(
+    key: str,
+    flags: tuple[str, ...] | str,
+    label: str,
+    group: str,
+    kind: str = "integer",
+    *,
+    default: Any = None,
+    low: float | int | None = None,
+    high: float | int | None = None,
+    step: float | int | None = None,
+    low_exclusive: bool = False,
+    choices: list[dict[str, Any]] | None = None,
+    note: str | None = None,
+    off_flag: str | None = None,
+) -> dict[str, Any]:
+    flag_list = (flags,) if isinstance(flags, str) else tuple(flags)
+    spec: dict[str, Any] = {
+        "key": key,
+        "flag": flag_list[0],
+        "flags": list(flag_list),
+        "label": label,
+        "group": group,
+        "group_label": KVMEM_LLAMA_GROUP_LABELS[group],
+        "type": kind,
+        "default": default,
+    }
+    if low is not None:
+        spec["min"] = low
+    if high is not None:
+        spec["max"] = high
+    if step is not None:
+        spec["step"] = step
+    if low_exclusive:
+        spec["exclusive_min"] = True
+    if choices:
+        spec["choices"] = choices
+    if note:
+        spec["note"] = note
+    if off_flag:
+        spec["off_flag"] = off_flag
+    return spec
+
+
+KVMEM_LLAMA_ENGINE_SPECS: list[dict[str, Any]] = [
+    # -- budget ------------------------------------------------------------
+    _kv_engine_spec(
+        "kvmem_budget", "--kvmem-budget", "KV 预算 B", "core",
+        default=32768, low=128, step=1,
+        note="历史选择预算；与生成预留一起必须落在上下文内",
+    ),
+    _kv_engine_spec(
+        "kvmem_block_tokens", "--kvmem-block-tokens", "检索块 block", "core",
+        default=32, low=1, step=1,
+        note="检索/统计单位；recent 与 sink 按整块向下取整",
+    ),
+    _kv_engine_spec(
+        "kvmem_gen_reserve", "--kvmem-gen-reserve", "生成预留 R", "core",
+        default=1024, low=1, step=1,
+        note="可复用追加空间，不是单次输出上限",
+    ),
+    _kv_engine_spec(
+        "kvmem_recent_tokens", "--kvmem-recent-tokens", "最近保留", "core",
+        default=64, low=0, step=1,
+        note="始终保留的最新后缀；按 block 向下取整",
+    ),
+    _kv_engine_spec(
+        "kvmem_sink_tokens", "--kvmem-sink-tokens", "开头保留 sink", "core",
+        default=0, low=0, step=1,
+        note="0 表示保留一个 block；正数向下取整且至少一块",
+    ),
+    # -- retrieval ---------------------------------------------------------
+    _kv_engine_spec(
+        "kvmem_method", "--kvmem-method", "选择方法", "retrieval", "enum",
+        default="retrieval",
+        choices=[
+            {"value": "retrieval", "label": "retrieval · 检索"},
+            {"value": "recency", "label": "recency · 最近"},
+        ],
+    ),
+    _kv_engine_spec(
+        "kvmem_query_scorer", "--kvmem-query-scorer", "Query 打分", "retrieval", "enum",
+        default="page-softmax",
+        choices=[
+            {"value": "page-softmax", "label": "page-softmax"},
+            {"value": "meanq-cosine", "label": "meanq-cosine"},
+        ],
+    ),
+    _kv_engine_spec(
+        "kvmem_score_agg", "--kvmem-score-agg", "分数聚合", "retrieval", "enum",
+        choices=[
+            {"value": "mean", "label": "mean"},
+            {"value": "max", "label": "max"},
+        ],
+        note="留空由引擎按打分器选择：page-softmax 用 mean，meanq-cosine 用 max",
+    ),
+    _kv_engine_spec(
+        "kvmem_query_last", "--kvmem-query-last", "回退 query 长度", "retrieval",
+        default=64, low=0, step=1,
+        note="找不到用户消息边界时使用的回退长度",
+    ),
+    _kv_engine_spec(
+        "kvmem_query_max_tokens", "--kvmem-query-max-tokens", "Query 上限", "retrieval",
+        default=512, low=1, step=1,
+        note="检索 query 截取的最大 token 数",
+    ),
+    _kv_engine_spec(
+        "kvmem_query_replay_max_tokens", "--kvmem-query-replay-max-tokens",
+        "Query 重放上限", "retrieval", default=2048, low=1, step=1,
+    ),
+    _kv_engine_spec(
+        "kvmem_query_replay", "--kvmem-query-replay", "Query 重放模式", "retrieval", "enum",
+        default="auto",
+        choices=[
+            {"value": "auto", "label": "auto"},
+            {"value": "legacy", "label": "legacy"},
+        ],
+    ),
+    _kv_engine_spec(
+        "kvmem_query_policy", "--kvmem-query-policy", "Query 策略", "retrieval", "enum",
+        default="user",
+        choices=[{"value": "user", "label": "user（兼容选项）"}],
+    ),
+    _kv_engine_spec(
+        "kvmem_graph_alpha", "--kvmem-graph-alpha", "图传播 alpha", "retrieval", "number",
+        low=0.0, high=1.0, step=0.01,
+        note="留空时 page-softmax 用 0.2，meanq-cosine 用 0",
+    ),
+    _kv_engine_spec(
+        "kvmem_lrfu", "--kvmem-lrfu", "历史加权 LRFU", "retrieval", "boolean",
+        off_flag="--no-kvmem-lrfu",
+        note="留空时仅 meanq-cosine 默认开启",
+    ),
+    _kv_engine_spec(
+        "kvmem_lrfu_lambda", "--kvmem-lrfu-lambda", "LRFU 衰减 λ", "retrieval", "number",
+        default=0.5, low=0.0, high=1.0, step=0.01,
+    ),
+    _kv_engine_spec(
+        "kvmem_lrfu_top_frac", "--kvmem-lrfu-top-frac", "LRFU 命中比例", "retrieval",
+        "number", default=0.9, low=0.0, high=1.0, step=0.01, low_exclusive=True,
+    ),
+    _kv_engine_spec(
+        "kvmem_harvest_v", "--kvmem-harvest-v", "预填充 V 捕获", "retrieval", "boolean",
+        note="prefill 阶段 D2H 捕获 V，默认关闭",
+    ),
+    # -- memory ------------------------------------------------------------
+    _kv_engine_spec(
+        "kvmem_gpu_ratio", "--kvmem-gpu-ratio", "GPU 显存比例", "memory", "number",
+        default=0.50, low=0.0, high=1.0, step=0.01, low_exclusive=True,
+        note="按显存比例限制 slot 池",
+    ),
+    _kv_engine_spec(
+        "kvmem_cpu_gb", "--kvmem-cpu-gb", "CPU spill（GiB）", "memory", "number",
+        default=0, low=0.0, step=0.5,
+        note="0 关闭；旧 CPU arena",
+    ),
+    _kv_engine_spec(
+        "kvmem_host_mib", "--kvmem-host-mib", "Host KV 预算（MiB）", "memory",
+        default=16384, low=1, step=1,
+        note="共享原生 K/V 的 RAM 硬预算",
+    ),
+    _kv_engine_spec(
+        "kvmem_disk_mib", "--kvmem-disk-mib", "SSD 额度（MiB）", "memory", "number",
+        default=0, low=0.0, step=256,
+        note="0 关闭；大于 0 时必须同时设置 SSD 目录",
+    ),
+    _kv_engine_spec(
+        "kvmem_disk_path", "--kvmem-disk-path", "SSD 目录", "memory", "string",
+        note="进程内原生 K/V 下沉目录；额度为 0 时不要设置",
+    ),
+    _kv_engine_spec(
+        "kvmem_sessions", "--kvmem-sessions", "非活动会话数", "memory",
+        default=4, low=1, high=16, step=1,
+        note="只计非活动 Host 历史，活动请求另占资源；范围 1..16",
+    ),
+    # -- runtime -----------------------------------------------------------
+    _kv_engine_spec(
+        "parallel", ("-np", "--parallel"), "并发 lane", "runtime",
+        default=1, low=1, high=8, step=1,
+        note="上下文与 KV 预算按 lane 计算",
+    ),
+    _kv_engine_spec(
+        "batch_size", ("-b", "--batch-size"), "逻辑 batch", "runtime",
+        default=512, low=1, step=1,
+    ),
+    _kv_engine_spec(
+        "ubatch_size", ("-ub", "--ubatch-size"), "物理 batch", "runtime",
+        low=1, step=1, note="留空继承逻辑 batch",
+    ),
+    _kv_engine_spec(
+        "ngl", ("-ngl", "--n-gpu-layers", "--gpu-layers"), "GPU 层数", "runtime",
+        low=0, high=100000, step=1, note="模板默认 999",
+    ),
+    _kv_engine_spec(
+        "threads", ("-t", "--threads"), "CPU 生成线程", "runtime",
+        low=-1, step=1, note="≤0 使用硬件并发数",
+    ),
+    _kv_engine_spec(
+        "flash_attn", ("-fa", "--flash-attn"), "Flash Attention", "runtime", "enum",
+        choices=[
+            {"value": "on", "label": "on"},
+            {"value": "off", "label": "off"},
+            {"value": "auto", "label": "auto"},
+        ],
+    ),
+    _kv_engine_spec(
+        "timeout", ("--timeout", "-to"), "HTTP 超时（秒）", "runtime",
+        default=1800, low=1, step=1,
+    ),
+    _kv_engine_spec(
+        "verbosity", ("-lv", "--verbosity", "--log-verbosity"), "日志级别", "runtime",
+        default=3, low=0, high=5, step=1,
+        note="0 静默，1 error，2 warn，3 info，4 trace，5 debug",
+    ),
+    _kv_engine_spec(
+        "load_mode", ("-lm", "--load-mode"), "加载模式", "runtime", "enum",
+        default="auto",
+        choices=[
+            {"value": "auto", "label": "auto"},
+            {"value": "none", "label": "none"},
+            {"value": "mmap", "label": "mmap"},
+            {"value": "mlock", "label": "mlock"},
+            {"value": "mmap+mlock", "label": "mmap+mlock"},
+            {"value": "dio", "label": "dio"},
+        ],
+    ),
+    _kv_engine_spec(
+        "metrics", "--metrics", "Prometheus 指标", "runtime", "boolean",
+        note="开启原生 /metrics",
+    ),
+    _kv_engine_spec(
+        "kvmem_trace", "--kvmem-trace", "KVMem 诊断日志", "runtime", "boolean",
+        off_flag="--no-kvmem-trace",
+        note="原始 KVMEM_* 诊断；关闭会覆盖 KVMEM_TRACE 环境变量",
+    ),
+    # -- speculative decoding ---------------------------------------------
+    _kv_engine_spec(
+        "spec_type", "--spec-type", "推测解码类型", "spec", "enum",
+        default="none",
+        choices=[
+            {"value": "none", "label": "none"},
+            {"value": "draft-mtp", "label": "draft-mtp · MTP"},
+            {"value": "draft-dflash", "label": "draft-dflash · DFlash2"},
+        ],
+    ),
+    _kv_engine_spec(
+        "spec_kv_dtype", "--spec-kv-dtype", "草稿 KV 精度", "spec", "enum",
+        default="f16",
+        choices=[{"value": value, "label": value} for value in KVMEM_LLAMA_CACHE_TYPES],
+    ),
+    _kv_engine_spec(
+        "spec_draft_n_max", "--spec-draft-n-max", "草稿长度", "spec",
+        default=3, low=1, high=5, step=1,
+        note="KVMem replay 模式要求 1..5",
+    ),
+    _kv_engine_spec(
+        "spec_draft_p_min", "--spec-draft-p-min", "最小草稿概率", "spec", "number",
+        default=0, low=0.0, high=1.0, step=0.01,
+    ),
+    _kv_engine_spec(
+        "spec_draft_model", "--spec-draft-model", "DFlash2 草稿模型", "spec", "string",
+        note="DFlash2 草稿 GGUF；MTP 时也可作为可选 sidecar",
+    ),
+    _kv_engine_spec(
+        "kvmem_mtp_state", "--kvmem-mtp-state", "MTP 状态策略", "spec", "enum",
+        choices=[
+            {"value": "snapshots", "label": "snapshots"},
+            {"value": "auto", "label": "auto"},
+            {"value": "replay", "label": "replay"},
+        ],
+        note="只在启用 MTP 时生效；留空时 replay",
+    ),
+    # -- thinking ----------------------------------------------------------
+    _kv_engine_spec(
+        "enable_thinking", "--enable-thinking", "默认开启思考", "thinking", "boolean",
+        off_flag="--no-think",
+        note="关闭会写 --no-think；请求可以覆盖",
+    ),
+    _kv_engine_spec(
+        "reasoning_budget", "--reasoning-budget", "思考预算", "thinking",
+        default=-1, low=-1, step=1,
+        note="-1 不限，0 立即结束，正数限制思考 token",
+    ),
+    _kv_engine_spec(
+        "reasoning_effort", "--reasoning-effort", "reasoning effort", "thinking", "string",
+        note="传给聊天模板；none 关闭思考",
+    ),
+    _kv_engine_spec(
+        "reasoning_budget_message", "--reasoning-budget-message", "预算提示语", "thinking",
+        "string", note="强制结束思考前注入的提示",
+    ),
+    # -- vision ------------------------------------------------------------
+    _kv_engine_spec(
+        "image_min_tokens", "--image-min-tokens", "图片最小 token", "vision",
+        low=0, step=1, note="原生图片编码的最小 token 数",
+    ),
+    _kv_engine_spec(
+        "image_max_tokens", "--image-max-tokens", "图片最大 token", "vision",
+        low=0, step=1, note="原生图片编码的最大 token 数",
+    ),
+    _kv_engine_spec(
+        "video_fps", "--video-fps", "视频采样 fps", "vision", "number",
+        default=2.0, low=0.0, step=0.1,
+        note="≤0 使用视频原始 fps",
+    ),
+]
+KVMEM_LLAMA_ENGINE_BY_KEY = {spec["key"]: spec for spec in KVMEM_LLAMA_ENGINE_SPECS}
+
+
+def kvmem_llama_engine_schema() -> list[dict[str, Any]]:
+    return [dict(spec) for spec in KVMEM_LLAMA_ENGINE_SPECS]
+
+
+def _config_switch_present(args: list[str], flag: str) -> bool:
+    return any(
+        str(item) == flag or str(item).startswith(flag + "=")
+        for item in args
+    )
+
+
+def _config_switch_remove(args: list[str], flag: str) -> list[str]:
+    return [
+        str(item) for item in args
+        if not (str(item) == flag or str(item).startswith(flag + "="))
+    ]
+
+
+def _config_arg_set(args: list[str], flag: str, value: Any) -> list[str]:
+    """Set a value flag in place, accepting both ``--flag value`` and ``--flag=value``."""
+    out = [str(item) for item in args]
+    for index, item in enumerate(out):
+        if item == flag:
+            if index + 1 < len(out):
+                out[index + 1] = str(value)
+            else:
+                out.append(str(value))
+            return out
+        if item.startswith(flag + "="):
+            out[index] = f"{flag}={value}"
+            return out
+    out.extend([flag, str(value)])
+    return out
+
+
+def kvmem_llama_engine_values(args: list[str]) -> dict[str, Any]:
+    """Read the whitelisted engine options currently present in a model's args."""
+    tokens = [str(item) for item in args]
+    out: dict[str, Any] = {}
+    for spec in KVMEM_LLAMA_ENGINE_SPECS:
+        key = spec["key"]
+        if spec["type"] == "boolean":
+            if any(_config_switch_present(tokens, flag) for flag in spec["flags"]):
+                out[key] = True
+            elif spec.get("off_flag") and _config_switch_present(tokens, spec["off_flag"]):
+                out[key] = False
+            continue
+        raw = _config_arg_value(tokens, *spec["flags"])
+        if raw is None:
+            continue
+        if spec["type"] == "integer":
+            value = parse_int(raw)
+            if value is None:
+                continue
+        elif spec["type"] == "number":
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+        else:
+            value = raw
+        out[key] = value
+    return out
+
+
+def normalize_kvmem_llama_engine(values: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate process-level KVMem options; None explicitly clears a flag."""
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise BadRequest("engine_params must be an object")
+    out: dict[str, Any] = {}
+    for key, raw in values.items():
+        spec = KVMEM_LLAMA_ENGINE_BY_KEY.get(key)
+        if spec is None:
+            raise BadRequest(f"unknown engine parameter {key!r}")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            out[key] = None
+            continue
+        kind = spec["type"]
+        if kind == "boolean":
+            if isinstance(raw, bool):
+                value = raw
+            elif raw in (0, 1):
+                value = bool(raw)
+            else:
+                raise BadRequest(f"{key}: expected true or false")
+        elif kind in ("enum", "string"):
+            if not isinstance(raw, str):
+                raise BadRequest(f"{key}: expected a string")
+            value = raw.strip()
+            if len(value) > 4096:
+                raise BadRequest(f"{key}: too long")
+            choices = spec.get("choices")
+            if choices and value not in [choice["value"] for choice in choices]:
+                allowed = ", ".join(str(choice["value"]) for choice in choices)
+                raise BadRequest(f"{key}: expected one of {allowed}")
+        else:
+            value = _sampling_number(
+                key, raw, spec.get("min", 0), spec.get("max"),
+                integer=(kind == "integer"),
+                low_exclusive=bool(spec.get("exclusive_min")),
+            )
+        out[key] = value
+    image_min = out.get("image_min_tokens")
+    image_max = out.get("image_max_tokens")
+    if isinstance(image_min, int) and isinstance(image_max, int) and image_max < image_min:
+        raise BadRequest("image_max_tokens 不能小于 image_min_tokens")
+    return out
+
+
+def kvmem_llama_apply_engine_values(
+    args: list[str], values: dict[str, Any]
+) -> list[str]:
+    """Write validated options back to the per-model CLI args."""
+    out = [str(item) for item in args]
+    for key, value in values.items():
+        spec = KVMEM_LLAMA_ENGINE_BY_KEY.get(key)
+        if spec is None:
+            continue
+        flags = spec["flags"]
+        off_flag = spec.get("off_flag")
+        if spec["type"] == "boolean":
+            if value is True:
+                for flag in flags:
+                    out = _config_switch_remove(out, flag)
+                if off_flag:
+                    out = _config_switch_remove(out, off_flag)
+                out.append(spec["flag"])
+            elif value is False:
+                for flag in flags:
+                    out = _config_switch_remove(out, flag)
+                if off_flag:
+                    out = _config_switch_remove(out, off_flag)
+                    out.append(off_flag)
+            else:
+                for flag in flags:
+                    out = _config_switch_remove(out, flag)
+                if off_flag:
+                    out = _config_switch_remove(out, off_flag)
+            continue
+        if value is None:
+            for flag in flags:
+                out = _config_arg_remove(out, flag)
+            continue
+        for flag in flags[1:]:
+            out = _config_arg_remove(out, flag)
+        out = _config_arg_set(out, spec["flag"], value)
+    return out
+
+
+def kvmem_llama_fit_tuning(
+    args: list[str],
+    context: int,
+    *,
+    explicit_budget: bool = False,
+    explicit_reserve: bool = False,
+) -> list[str]:
+    """Make B + R fit the context, or reject an explicit impossible request."""
+    block = max(1, parse_int(_config_arg_value(args, "--kvmem-block-tokens")) or 32)
+    budget = max(128, parse_int(_config_arg_value(args, "--kvmem-budget")) or 32768)
+    reserve = parse_int(_config_arg_value(args, "--kvmem-gen-reserve"))
+    reserve = max(block, reserve if reserve is not None else 1024)
+    if explicit_reserve and reserve < block:
+        raise BadRequest(f"生成预留 {reserve:,} 不能小于 block {block:,}")
+    if budget + reserve > context:
+        if explicit_budget or explicit_reserve:
+            raise BadRequest(
+                f"KVMem 预算 {budget:,} + 生成预留 {reserve:,} 超过上下文 {context:,}"
+            )
+        reserve = max(block, min(reserve, (context // 4) // block * block))
+        budget = max(128, min(budget, ((context - reserve) // block) * block))
+    if budget + reserve > context:
+        raise BadRequest(
+            f"上下文 {context:,} 太小，无法容纳 KVMem 预算与生成预留"
+            f"（block {block:,}，预留 {reserve:,}）"
+        )
+    out = _config_arg_set(args, "--kvmem-budget", budget)
+    out = _config_arg_set(out, "--kvmem-gen-reserve", reserve)
+    return out
+
+
+def kvmem_llama_validate_disk(args: list[str]) -> None:
+    """SSD quota and directory must be enabled together; no CPU-arena mix."""
+    mib_raw = _config_arg_value(args, "--kvmem-disk-mib")
+    path = (_config_arg_value(args, "--kvmem-disk-path") or "").strip()
+    try:
+        mib = float(mib_raw) if mib_raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        mib = 0.0
+    if mib > 0 and not path:
+        raise BadRequest("--kvmem-disk-mib 大于 0 时必须设置 --kvmem-disk-path")
+    if path and mib <= 0:
+        raise BadRequest("设置 --kvmem-disk-path 时必须同时把 --kvmem-disk-mib 设为大于 0")
+    cpu_raw = _config_arg_value(args, "--kvmem-cpu-gb")
+    try:
+        cpu_gb = float(cpu_raw) if cpu_raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        cpu_gb = 0.0
+    if cpu_gb > 0 and mib > 0:
+        raise BadRequest("旧 --kvmem-cpu-gb 与 SSD 分层不能同时启用")
 
 
 class SamplingStore:
@@ -5056,6 +5595,7 @@ class Gateway:
                 kind: sampling_schema(kind)
                 for kind in ("llama", "kvmem", "ninfer", "kvmem_llama")
             },
+            "kvmem_engine_schema": kvmem_llama_engine_schema(),
             "smoke_image": str(self.smoke_image_path),
             "engine_defaults": {
                 "kv": {"method": "q8_0/q8_0 (k8v8)", "fallback": "engine default"},
@@ -5139,6 +5679,20 @@ class Gateway:
                 raise BadRequest("kvmem_budget must be at least 128")
             if kind != "kvmem_llama_dir":
                 raise BadRequest("只有 KVMem + llama.cpp 支持 kvmem_budget")
+        raw_engine_params = payload.get("engine_params")
+        if raw_engine_params is not None and not isinstance(raw_engine_params, dict):
+            raise BadRequest("engine_params must be an object")
+        if kind == "kvmem_llama_dir":
+            engine_values = normalize_kvmem_llama_engine(raw_engine_params)
+            if kvmem_budget is not None:
+                existing = engine_values.get("kvmem_budget")
+                if isinstance(existing, int) and existing != kvmem_budget:
+                    raise BadRequest("kvmem_budget 与 engine_params.kvmem_budget 不一致")
+                engine_values["kvmem_budget"] = kvmem_budget
+        else:
+            if raw_engine_params:
+                raise BadRequest("只有 KVMem + llama.cpp 接受 engine_params")
+            engine_values = {}
         if kind == "kvmem_llama_dir":
             for label, value in (("cache_type_k", cache_type_k), ("cache_type_v", cache_type_v)):
                 value = (value or "").strip()
@@ -5157,12 +5711,12 @@ class Gateway:
         if kind == "ninfer_dir":
             steps[1]["label"] = "检查 .ninfer 模型"
             steps[2]["label"] = "复制模板参数"
-        elif kind == "kvmem_llama_dir":
-            steps[2]["label"] = "选择 KV 精度与 KVMem 预算"
         if vision_path:
             steps.append(
                 {"key": "vision_smoke", "label": "视觉冒烟测试", "status": "pending", "detail": ""}
             )
+        if kind == "kvmem_llama_dir":
+            steps[2]["label"] = "选择 KV 精度与 KVMem 参数"
         job = {
             "id": uuid.uuid4().hex[:12],
             "kind": "add",
@@ -5174,6 +5728,7 @@ class Gateway:
             "cache_type_k": (cache_type_k or "").strip() or None,
             "cache_type_v": (cache_type_v or "").strip() or None,
             "kvmem_budget": kvmem_budget,
+            "engine_params": engine_values,
             "name": (name or "").strip() or None,
             "params": params,
             "smoke": smoke,
@@ -5662,31 +6217,46 @@ class Gateway:
                         f"{label} {value!r} 不受支持；可选：{', '.join(KVMEM_LLAMA_CACHE_TYPES)}"
                     )
             cache_args = self._kvmem_llama_cache_args(cache_k, cache_v)
-            block = parse_int(_config_arg_value(template_args, "--kvmem-block-tokens")) or 32
-            block = max(1, block)
-            reserve = parse_int(_config_arg_value(template_args, "--kvmem-gen-reserve")) or 1024
-            reserve = max(block, reserve)
-            explicit_budget = job.get("kvmem_budget")
-            budget = parse_int(explicit_budget)
-            if budget is None:
-                budget = parse_int(_config_arg_value(template_args, "--kvmem-budget")) or 32768
-            budget = max(128, budget)
-            if budget + reserve > context:
-                if explicit_budget is not None:
-                    raise BadRequest(
-                        f"KVMem 预算 {budget:,} + 生成保留 {reserve:,} 超过上下文 {context:,}"
-                    )
-                reserve = max(block, min(reserve, (context // 4) // block * block))
-                budget = max(128, min(budget, ((context - reserve) // block) * block))
-            if budget + reserve > context:
-                raise BadRequest(
-                    f"上下文 {context:,} 太小，无法容纳 KVMem 预算与生成保留"
-                    f"（需要至少 {block + reserve:,}）"
-                )
+            requested_engine = {
+                key: value
+                for key, value in (job.get("engine_params") or {}).items()
+                if value is not None
+            }
+            args = template_args
+            for flag in (
+                "-m", "--model", "-a", "--alias", "--host", "--port",
+                "--api-key", "--api-key-file", "--mmproj", "-mmdev",
+                "--mmproj-device", "-c", "--ctx-size", "-ctk",
+                "--cache-type-k", "-ctv", "--cache-type-v", "--kv-dtype",
+            ):
+                args = _config_arg_remove(args, flag)
+            for flag in ("--kvmem", "--no-kvmem", "--mmproj-offload", "--no-mmproj-offload"):
+                args = _config_switch_remove(args, flag)
+            args = ["--kvmem", *args]
+            args = kvmem_llama_apply_engine_values(args, requested_engine)
+            args = _config_arg_set(args, "-c", context)
+            explicit_budget = (
+                requested_engine.get("kvmem_budget") is not None
+                or job.get("kvmem_budget") is not None
+            )
+            explicit_reserve = requested_engine.get("kvmem_gen_reserve") is not None
+            args = kvmem_llama_fit_tuning(
+                args,
+                context,
+                explicit_budget=explicit_budget,
+                explicit_reserve=explicit_reserve,
+            )
+            kvmem_llama_validate_disk(args)
+            block = max(1, parse_int(_config_arg_value(args, "--kvmem-block-tokens")) or 32)
+            reserve = max(
+                block,
+                parse_int(_config_arg_value(args, "--kvmem-gen-reserve")) or 1024,
+            )
+            budget = parse_int(_config_arg_value(args, "--kvmem-budget")) or 32768
             self._job_step(
                 job, "kv", "ok",
                 f"KV {cache_k}/{cache_v}；预算 {budget:,} tokens"
-                f"（block {block}，生成保留 {reserve:,}）",
+                f"（block {block}，生成预留 {reserve:,}）",
             )
 
             self._job_step(job, "config", "running")
@@ -5708,21 +6278,6 @@ class Gateway:
                 f"KVMem + llama.cpp 单模型；参数"
                 + (f"复制自 {template_path.name}" if template_path else "使用内置默认")
             )
-            args = template_args
-            for flag in (
-                "-m", "--model", "-a", "--alias", "--host", "--port",
-                "--api-key", "--api-key-file", "--mmproj", "--mmproj-offload",
-                "--no-mmproj-offload", "-mmdev", "--mmproj-device",
-                "-c", "--ctx-size", "-ctk", "--cache-type-k",
-                "-ctv", "--cache-type-v", "--kv-dtype", "--no-kvmem",
-            ):
-                args = _config_arg_remove(args, flag)
-            if "--kvmem" not in args:
-                args = ["--kvmem", *args]
-            args = _config_arg_replace(args, "-c", context)
-            args = _config_arg_replace(args, "--kvmem-budget", budget)
-            args = _config_arg_replace(args, "--kvmem-block-tokens", block)
-            args = _config_arg_replace(args, "--kvmem-gen-reserve", reserve)
             args += cache_args
             if "--no-ui" not in args:
                 args.append("--no-ui")
@@ -6273,7 +6828,7 @@ class Gateway:
             files = []
         return files[0] if files else None
 
-    def _engine_params_values(self, entry: Model, raw: Any) -> dict[str, str] | None:
+    def _engine_params_values(self, entry: Model, raw: Any) -> dict[str, Any] | None:
         if raw is None:
             return None
         if not isinstance(raw, dict) or not raw:
@@ -6283,9 +6838,7 @@ class Gateway:
         if entry.engine == "ninfer":
             raise BadRequest("NInfer 的上下文与 KV 参数由模型配置决定，不支持在控制台修改")
         if entry.engine == "kvmem_llama":
-            raise BadRequest(
-                "KVMem + llama.cpp 的上下文与 KV 精度在新增模型时写入，暂不支持在控制台修改"
-            )
+            return normalize_kvmem_llama_engine(raw)
         if entry.engine != "llama":
             raise BadRequest(f"引擎 {entry.engine!r} 不支持修改上下文或 K/V 精度")
         preset_path = Path(str(entry.config_path or ""))
@@ -6403,10 +6956,40 @@ class Gateway:
         elif entry.engine in ("kvmem", "kvmem_llama"):
             config_path = Path(str(entry.config_path or ""))
             config = read_json(config_path, {})
-            if not isinstance(config, dict) or not isinstance(config.get("vision"), dict):
-                raise BadRequest("该模型的配置没有 vision 段，无法设置视觉运行位置")
-            config["vision"]["gpu"] = bool(vision_gpu)
+            if not isinstance(config, dict):
+                raise BadRequest("找不到该模型的配置文件")
+            if changed_vision:
+                if not isinstance(config.get("vision"), dict):
+                    raise BadRequest("该模型的配置没有 vision 段，无法设置视觉运行位置")
+                config["vision"]["gpu"] = bool(vision_gpu)
+            fresh_values: dict[str, Any] | None = None
+            if entry.engine == "kvmem_llama" and engine_values is not None:
+                args = config.get("args")
+                if not isinstance(args, list):
+                    raise BadRequest("模型配置没有 args 列表")
+                args = [str(item) for item in args]
+                explicit_budget = engine_values.get("kvmem_budget") is not None
+                explicit_reserve = engine_values.get("kvmem_gen_reserve") is not None
+                args = kvmem_llama_apply_engine_values(args, engine_values)
+                context = (
+                    parse_int(_config_arg_value(args, "-c", "--ctx-size"))
+                    or parse_int(config.get("context_length"))
+                    or entry.context_length
+                )
+                if not context:
+                    raise BadRequest("无法从模型配置读取上下文长度")
+                args = kvmem_llama_fit_tuning(
+                    args,
+                    int(context),
+                    explicit_budget=explicit_budget,
+                    explicit_reserve=explicit_reserve,
+                )
+                kvmem_llama_validate_disk(args)
+                config["args"] = args
+                fresh_values = kvmem_llama_engine_values(args)
             write_json_atomic(config_path, config)
+            if fresh_values is not None:
+                result["engine_params"] = fresh_values
         self.registry.reload()
         fresh = self.registry.resolve(entry.id)
         if entry.engine == "llama":
@@ -6415,6 +6998,8 @@ class Gateway:
                 "cache_type_k": fresh.cache_type_k if fresh else None,
                 "cache_type_v": fresh.cache_type_v if fresh else None,
             }
+        elif entry.engine == "kvmem_llama":
+            result["engine_params"] = self._kvmem_llama_engine_values(fresh or entry)
         result["vision_gpu"] = (
             fresh.vision_gpu if fresh is not None else bool(vision_gpu)
         )
@@ -6548,6 +7133,17 @@ class Gateway:
                 return "loading"
         return "unloaded"
 
+    def _kvmem_llama_engine_values(self, entry: Model) -> dict[str, Any]:
+        """Whitelisted process options from one kvmem-llama-*.json."""
+        if entry.engine != "kvmem_llama":
+            return {}
+        config_path = Path(str(entry.config_path or ""))
+        config = read_json(config_path, {})
+        args = config.get("args") if isinstance(config, dict) else None
+        if not isinstance(args, list):
+            return {}
+        return kvmem_llama_engine_values([str(item) for item in args])
+
     def model_list(self) -> dict[str, Any]:
         with self.cond:
             active = self.active
@@ -6563,6 +7159,8 @@ class Gateway:
                 model, active, target, switching, phase, pending_load, live
             )
             item = model.openai(status, status == "loaded", self.params.get(model.id))
+            if model.engine == "kvmem_llama":
+                item["engine_params"] = self._kvmem_llama_engine_values(model)
             if status == "failed" and last_error and target is not None and target.id == model.id:
                 item["error"] = last_error
             data.append(item)
@@ -6572,18 +7170,22 @@ class Gateway:
         for item in self.model_list().get("data") or []:
             if item.get("id") == model.id:
                 return item
-        return model.openai("unloaded", False, self.params.get(model.id))
+        item = model.openai("unloaded", False, self.params.get(model.id))
+        if model.engine == "kvmem_llama":
+            item["engine_params"] = self._kvmem_llama_engine_values(model)
+        return item
 
     def params_view(self) -> dict[str, Any]:
         data = []
         for entry in self.registry.list():
-            data.append(
-                {
-                    "model": entry.id,
-                    "engine": entry.engine,
-                    "params": self.params.get(entry.id),
-                }
-            )
+            row: dict[str, Any] = {
+                "model": entry.id,
+                "engine": entry.engine,
+                "params": self.params.get(entry.id),
+            }
+            if entry.engine == "kvmem_llama":
+                row["engine_params"] = self._kvmem_llama_engine_values(entry)
+            data.append(row)
         return {"object": "list", "data": data}
 
 

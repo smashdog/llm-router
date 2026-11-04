@@ -400,6 +400,9 @@ try:
     assert item["context_length"] == 262144, item
     assert item["cache_type_k"] == "q8_0" and item["cache_type_v"] == "q8_0", item
     assert item["multimodal"] is True and item["vision_gpu"] is False, item
+    assert item["engine_params"]["kvmem_budget"] == 32768, item
+    assert item["engine_params"]["kvmem_block_tokens"] == 32, item
+    assert item["engine_params"]["kvmem_gen_reserve"] == 1024, item
     checks += 1
 
     model_cfg_path = config_dir / "kvmem-llama-qwen3.8-27b-ud.json"
@@ -425,6 +428,115 @@ try:
     assert first["no_offload"] is True and first["offload"] is False, first
     assert "--kv-dtype" in first["argv"] and "q8_0" in first["argv"], first
     assert status()["active_model"] == model_id, status()
+    checks += 1
+
+    # 2b. Advanced KVMem engine params: write, read back, restart and clear.
+    advanced = {
+        "kvmem_block_tokens": 64,
+        "kvmem_gen_reserve": 2048,
+        "kvmem_recent_tokens": 512,
+        "kvmem_sink_tokens": 256,
+        "kvmem_method": "recency",
+        "kvmem_query_scorer": "meanq-cosine",
+        "kvmem_score_agg": "max",
+        "kvmem_query_last": 128,
+        "kvmem_query_max_tokens": 256,
+        "kvmem_query_replay_max_tokens": 1024,
+        "kvmem_query_replay": "legacy",
+        "kvmem_graph_alpha": 0.1,
+        "kvmem_lrfu": True,
+        "kvmem_lrfu_lambda": 0.25,
+        "kvmem_lrfu_top_frac": 0.75,
+        "kvmem_gpu_ratio": 0.4,
+        "kvmem_host_mib": 4096,
+        "kvmem_sessions": 2,
+        "parallel": 2,
+        "flash_attn": "auto",
+        "timeout": 600,
+        "verbosity": 2,
+        "spec_type": "draft-mtp",
+        "spec_draft_n_max": 5,
+        "kvmem_mtp_state": "snapshots",
+        "enable_thinking": True,
+        "reasoning_budget": 2048,
+        "image_max_tokens": 4096,
+        "video_fps": 1.5,
+    }
+    saved = requests.post(url + "/router/params", json={
+        "model": model_id, "params": {}, "engine_params": advanced,
+    }, timeout=20)
+    assert saved.status_code == 200, saved.text
+    saved_body = saved.json()
+    assert saved_body["engine_params"]["kvmem_method"] == "recency", saved_body
+    assert saved_body["engine_params"]["parallel"] == 2, saved_body
+    wait_idle()
+    advanced_args = [str(value) for value in read_json(model_cfg_path)["args"]]
+    numeric = {
+        "--kvmem-block-tokens": "64",
+        "--kvmem-gen-reserve": "2048",
+        "--kvmem-recent-tokens": "512",
+        "--kvmem-sink-tokens": "256",
+        "--kvmem-method": "recency",
+        "--kvmem-query-scorer": "meanq-cosine",
+        "--kvmem-score-agg": "max",
+        "--kvmem-query-last": "128",
+        "--kvmem-query-max-tokens": "256",
+        "--kvmem-query-replay-max-tokens": "1024",
+        "--kvmem-query-replay": "legacy",
+        "--kvmem-graph-alpha": "0.1",
+        "--kvmem-lrfu-lambda": "0.25",
+        "--kvmem-lrfu-top-frac": "0.75",
+        "--kvmem-gpu-ratio": "0.4",
+        "--kvmem-host-mib": "4096",
+        "--kvmem-sessions": "2",
+        "-np": "2",
+        "-fa": "auto",
+        "--timeout": "600",
+        "-lv": "2",
+        "--spec-type": "draft-mtp",
+        "--spec-draft-n-max": "5",
+        "--kvmem-mtp-state": "snapshots",
+        "--reasoning-budget": "2048",
+        "--image-max-tokens": "4096",
+        "--video-fps": "1.5",
+    }
+    for flag, value in numeric.items():
+        assert flag in advanced_args and advanced_args[advanced_args.index(flag) + 1] == value, (flag, advanced_args)
+    assert "--kvmem-lrfu" in advanced_args and "--no-kvmem-lrfu" not in advanced_args, advanced_args
+    assert "--enable-thinking" in advanced_args and "--no-think" not in advanced_args, advanced_args
+    last_start = starts()[-1]
+    assert "-np" in last_start["argv"] and "2" in last_start["argv"], last_start
+    assert "--enable-thinking" in last_start["argv"], last_start
+
+    cleared = requests.post(url + "/router/params", json={
+        "model": model_id,
+        "params": {},
+        "engine_params": {
+            "kvmem_sessions": None,
+            "kvmem_lrfu": None,
+            "enable_thinking": None,
+            "parallel": None,
+        },
+    }, timeout=20)
+    assert cleared.status_code == 200, cleared.text
+    cleared_values = cleared.json()["engine_params"]
+    assert "kvmem_sessions" not in cleared_values and "kvmem_lrfu" not in cleared_values, cleared_values
+    wait_idle()
+    cleared_args = [str(value) for value in read_json(model_cfg_path)["args"]]
+    assert "--kvmem-sessions" not in cleared_args, cleared_args
+    assert "--kvmem-lrfu" not in cleared_args and "--no-kvmem-lrfu" not in cleared_args, cleared_args
+    assert "--enable-thinking" not in cleared_args and "--no-think" not in cleared_args, cleared_args
+    assert "-np" not in cleared_args, cleared_args
+    for bad, needle in (
+        ({"parallel": 9}, "expected 1..8"),
+        ({"kvmem_disk_mib": 1024}, "kvmem-disk-path"),
+        ({"image_min_tokens": 4096, "image_max_tokens": 2048}, "不能小于"),
+        ({"bogus": 1}, "unknown engine parameter"),
+    ):
+        rejected = requests.post(url + "/router/params", json={
+            "model": model_id, "params": {}, "engine_params": bad,
+        }, timeout=15)
+        assert rejected.status_code == 400 and needle in rejected.text, (bad, rejected.text)
     checks += 1
 
     # 3. Vision CPU -> GPU rewrites the config and the next start's flags.
@@ -480,12 +592,35 @@ try:
     )
     # q5_0/q5_0 is valid and shares --kv-dtype; clean it up below instead.
     assert bad_combo["status"] == "ok", bad_combo
+    unknown = requests.post(url + "/router/models/add", json={
+        "engine": "kvmem_llama", "model": str(vision_model_dir),
+        "name": "unknown-engine-param", "smoke": False,
+        "cache_type_k": "q8_0", "cache_type_v": "q8_0",
+        "engine_params": {"bogus": 1},
+    }, timeout=15)
+    assert unknown.status_code == 400 and "unknown engine parameter" in unknown.text, unknown.text
+    bad_disk = add_model(
+        engine="kvmem_llama", model=str(vision_model_dir),
+        name="disk-no-path", cache_type_k="q8_0", cache_type_v="q8_0",
+        engine_params={"kvmem_disk_mib": 512}, smoke=False,
+    )
+    assert bad_disk["status"] == "failed", bad_disk
+    assert "kvmem-disk-path" in bad_disk["error"], bad_disk
+    bad_image = requests.post(url + "/router/models/add", json={
+        "engine": "kvmem_llama", "model": str(vision_model_dir),
+        "name": "image-range", "smoke": False,
+        "cache_type_k": "q8_0", "cache_type_v": "q8_0",
+        "engine_params": {"image_min_tokens": 8192, "image_max_tokens": 4096},
+    }, timeout=15)
+    assert bad_image.status_code == 400 and "不能小于" in bad_image.text, bad_image.text
     deleted = requests.post(url + "/router/models/delete", json={"model": "q5-v"}, timeout=30)
     assert deleted.status_code == 200, deleted.text
     after = set(models())
     assert before == after, (before, after)
     assert not list(config_dir.glob("kvmem-llama-budget-too-big.json"))
     assert not list(config_dir.glob("kvmem-llama-bad-cache.json"))
+    assert not list(config_dir.glob("kvmem-llama-disk-no-path.json"))
+    assert not list(config_dir.glob("kvmem-llama-image-range.json"))
     checks += 1
 
     # 5. The console renders the fourth engine and its dialogs.
@@ -563,21 +698,49 @@ try:
     )
     wait_js("return document.querySelector('#params-dialog').open;", message="params dialog")
     surface = js(
+        "const tab=document.querySelector('#params-kvmem-tab');"
+        "const host=document.querySelector('#params-kvmem');"
         "return {"
         "hint: document.querySelector('#params-hint').textContent,"
         "repeat: document.querySelector('[name=repeat_last_n]').disabled,"
         "visionHidden: document.querySelector('#params-vision').hidden,"
         "visionDisabled: document.querySelector('#params-vision-device').classList.contains('disabled'),"
         "engineHidden: document.querySelector('#params-engine').hidden,"
+        "budgetHidden: document.querySelector('#params-budget-field').hidden,"
+        "budget: document.querySelector('#params-budget').value,"
+        "contextHidden: document.querySelector('#params-context-field').hidden,"
+        "cacheHidden: document.querySelector('#params-cache-k-field').hidden,"
+        "kvmemTabHidden: !tab || tab.hidden,"
+        "kvmemCount: document.querySelector('#params-kvmem-count').textContent,"
+        "kvmemFields: host.querySelectorAll('[data-param-key]').length,"
+        "method: host.querySelector('[data-param-key=kvmem_method]').value,"
+        "recent: host.querySelector('[data-param-key=kvmem_recent_tokens]').value,"
+        "sessions: host.querySelector('[data-param-key=kvmem_sessions]').value,"
+        "hostMib: host.querySelector('[data-param-key=kvmem_host_mib]').value,"
         "gpu: document.querySelector('input[name=params-vision-device][value=gpu]').checked,"
         "};"
     )
     assert "KVMem + llama.cpp" in surface["hint"], surface
     assert surface["repeat"] is True, surface
     assert surface["visionHidden"] is False and surface["visionDisabled"] is False, surface
-    assert surface["engineHidden"] is True, surface
+    assert surface["engineHidden"] is False, surface
+    assert surface["budgetHidden"] is False and surface["budget"] == "32768", surface
+    assert surface["contextHidden"] is True and surface["cacheHidden"] is True, surface
+    assert surface["kvmemTabHidden"] is False, surface
+    assert int(surface["kvmemCount"] or 0) >= 40, surface
+    assert surface["kvmemFields"] == int(surface["kvmemCount"]), surface
+    assert surface["method"] == "recency", surface
+    assert surface["recent"] == "512", surface
+    assert surface["sessions"] == "", surface
+    assert surface["hostMib"] == "4096", surface
     assert surface["gpu"] is False, surface
     shot("params-kvmem-llama.png")
+    js("document.querySelector('#params-kvmem-tab').click();")
+    wait_js(
+        "return !document.querySelector('[data-param-panel=kvmem]').hidden;",
+        message="kvmem params tab",
+    )
+    shot("params-kvmem-engine.png")
     js("document.querySelector('#params-cancel').click();")
 
     js("document.querySelector('#btn-add-model').click();")
@@ -592,6 +755,11 @@ try:
         "cacheV: document.querySelector('#add-cache-v').value,"
         "repeat: document.querySelector('[name=repeat_last_n]').disabled,"
         "visionHidden: document.querySelector('#add-vision-field').hidden,"
+        "kvmemTabHidden: document.querySelector('#add-kvmem-tab').hidden,"
+        "kvmemCount: document.querySelector('#add-kvmem-count').textContent,"
+        "kvmemFields: document.querySelectorAll('#add-kvmem [data-param-key]').length,"
+        "kvmemBlank: [...document.querySelectorAll('#add-kvmem [data-param-key]')]"
+        ".every((el)=>el.value===''),"
         "hint: document.querySelector('#add-model-hint').textContent,"
         "caption: document.querySelector('#add-engine-caption').textContent,"
         "defaults: document.querySelector('#add-defaults').textContent,"
@@ -604,12 +772,19 @@ try:
     assert form["cacheV"] == "q8_0", form
     assert form["repeat"] is True, form
     assert form["visionHidden"] is False, form
+    assert form["kvmemTabHidden"] is False, form
+    assert int(form["kvmemCount"] or 0) >= 40, form
+    assert form["kvmemFields"] == int(form["kvmemCount"]), form
+    assert form["kvmemBlank"] is True, form
     assert "目录" in form["hint"], form
     assert "32,768" in form["defaults"] or "32768" in form["defaults"], form
     shot("add-kvmem-llama.png")
 
-    # Add the text-only directory through the console form.
+    # Add the text-only directory through the console form with one advanced
+    # KVMem option so the UI -> job -> config path is covered end to end.
     js(
+        "const host=document.querySelector('#add-kvmem');"
+        "host.querySelector('[data-param-key=kvmem_recent_tokens]').value='384';"
         "const input=document.querySelector('#add-model');"
         "input.value=" + json.dumps(str(text_model_dir)) + ";"
         "input.dispatchEvent(new Event('input',{bubbles:true}));"
@@ -627,6 +802,8 @@ try:
     ui_cfg = read_json(config_dir / "kvmem-llama-qwen3.8-27b-ud-2.json")
     ui_args = [str(value) for value in ui_cfg["args"]]
     assert ui_args[ui_args.index("--kvmem-budget") + 1] == "32768", ui_args
+    assert ui_args[ui_args.index("--kvmem-recent-tokens") + 1] == "384", ui_args
+    assert added["engine_params"]["kvmem_recent_tokens"] == 384, added
     wait_js(
         "return [...document.querySelectorAll('#models .model .id')]"
         ".some((el)=>el.textContent.trim()==='Qwen3.8-27B-UD-2');",

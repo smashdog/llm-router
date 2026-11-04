@@ -12,6 +12,7 @@ config.json.bak*
 model-params.json
 models.ini
 models/
+models-kvmem-llama/
 
 # python
 .venv/
