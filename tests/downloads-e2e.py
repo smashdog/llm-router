@@ -363,6 +363,23 @@ def main() -> int:
         assert sources["huggingface"]["use_proxy"] is False, view
         checks += 1
 
+        # The proxy panel can select source usage in the same save request.
+        view = request("POST", "/router/proxy", {
+            "enabled": True, "type": "http", "host": "127.0.0.1", "port": 9,
+            "sources": {"huggingface": False, "hf-mirror": True, "modelscope": False},
+        })
+        flags = {item["id"]: item["use_proxy"] for item in view["sources"]}
+        assert flags == {
+            "huggingface": False, "hf-mirror": True, "modelscope": False,
+        }, view
+        checks += 1
+        error = request("POST", "/router/proxy", {
+            "enabled": True, "type": "http", "host": "127.0.0.1", "port": 9,
+            "sources": {"unknown": True},
+        }, expect=400)
+        assert "下载源" in error["error"]["message"], error
+        checks += 1
+
         # -- search aggregation --------------------------------------------
         search = request("GET", "/router/downloads/search?q=qwen")
         assert [item["id"] for item in search["sources"]] == [

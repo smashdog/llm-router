@@ -3813,6 +3813,21 @@ class Gateway:
         configured = bool(
             enabled and host and 1 <= port <= 65535 and kind in PROXY_TYPES
         )
+        sources_cfg = self._download_sources_config()
+        sources = []
+        for source_id in DOWNLOAD_SOURCE_ORDER:
+            entry = sources_cfg.get(source_id)
+            sources.append(
+                {
+                    "id": source_id,
+                    "label": DOWNLOAD_SOURCES[source_id]["label"],
+                    "use_proxy": bool(
+                        configured
+                        and isinstance(entry, dict)
+                        and entry.get("use_proxy")
+                    ),
+                }
+            )
         return {
             "enabled": enabled,
             "type": kind,
@@ -3821,6 +3836,7 @@ class Gateway:
             "username": str(proxy.get("username") or ""),
             "has_password": bool(str(proxy.get("password") or "")),
             "configured": configured,
+            "sources": sources,
             "config_file": self._engine_config_label(),
         }
 
@@ -3835,6 +3851,20 @@ class Gateway:
 
     def save_proxy(self, payload: dict[str, Any]) -> dict[str, Any]:
         settings = self._normalize_proxy(payload, self._proxy_config())
+        proxy_ready = bool(settings["enabled"] and settings["host"] and settings["port"])
+        source_updates: dict[str, bool] = {}
+        raw_sources = payload.get("sources")
+        if raw_sources is not None:
+            if not isinstance(raw_sources, dict):
+                raise BadRequest("sources 必须是对象")
+            for source_id, use_proxy in raw_sources.items():
+                if source_id not in DOWNLOAD_SOURCES:
+                    raise BadRequest(f"未知下载源：{source_id}")
+                if not isinstance(use_proxy, bool):
+                    raise BadRequest("use_proxy 必须是布尔值")
+                if use_proxy and not proxy_ready:
+                    raise BadRequest("代理未启用或地址端口不完整，不能为下载源启用代理")
+                source_updates[source_id] = use_proxy
         with self._config_lock:
             new_config = copy.deepcopy(self.config)
             new_config["proxy"] = settings
@@ -3846,11 +3876,14 @@ class Gateway:
             if not isinstance(sources, dict):
                 sources = {}
                 downloads["sources"] = sources
-            if not (settings["enabled"] and settings["host"] and settings["port"]):
+            if not proxy_ready:
                 for source_id in DOWNLOAD_SOURCE_ORDER:
                     entry = sources.get(source_id)
                     if isinstance(entry, dict):
                         entry["use_proxy"] = False
+            else:
+                for source_id, use_proxy in source_updates.items():
+                    sources[source_id] = {"use_proxy": use_proxy}
             self._write_config_locked(new_config)
         if settings.get("password"):
             try:

@@ -143,10 +143,16 @@ try:
     set_value("proxy-port", "10809")
     set_value("proxy-user", "tester")
     set_value("proxy-pass", "ui-secret")
+    assert js("""return !document.querySelector(
+      '#proxy-sources input[data-proxy-source="huggingface"]').disabled""")
+    click('#proxy-sources input[data-proxy-source="huggingface"]')
+    assert js("""return document.querySelector(
+      '#proxy-sources input[data-proxy-source="huggingface"]').checked""")
     click("#proxy-save")
     wait("return document.getElementById('proxy-state').textContent === '已启用'",
          message="proxy saved")
     wait("return document.getElementById('proxy-save').textContent === '保存代理'")
+    assert mock_state()["sources"]["huggingface"] is True
     assert js("return document.getElementById('proxy-pass').value") == ""
     assert js("return document.getElementById('proxy-pass').placeholder").startswith("已保存")
     shot("proxy-saved-desktop.png")
@@ -264,6 +270,8 @@ try:
     assert state["dir"] == "/srv/models", state
     assert state["search_q"] == "qwen3 gguf", state
     assert state["sources"]["hf-mirror"] is True, state
+    assert state["sources"]["huggingface"] is True, state
+    assert state["sources"]["modelscope"] is False, state
     assert state["start"]["files"] == ["config.json", "sub/tokenizer.json"], state["start"]
     assert state["cancel"] is True, state
     errors = js("return window.__uiErrors || []")

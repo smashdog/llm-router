@@ -98,6 +98,14 @@ def proxy_view() -> dict:
         "username": proxy["username"],
         "has_password": bool(proxy["password"]),
         "configured": configured,
+        "sources": [
+            {
+                "id": source_id,
+                "label": label,
+                "use_proxy": bool(configured and STATE["sources"][source_id]),
+            }
+            for source_id, label, _tool in SOURCES
+        ],
         "config_file": "config.json",
     }
 
@@ -249,6 +257,10 @@ class Handler(BaseHTTPRequestHandler):
                 proxy["password"] = str(body["password"])
             if body.get("clear_password") is True:
                 proxy["password"] = ""
+            if isinstance(body.get("sources"), dict):
+                for source_id, use_proxy in body["sources"].items():
+                    if source_id in STATE["sources"]:
+                        STATE["sources"][source_id] = bool(use_proxy)
             if not proxy_view()["configured"]:
                 for key in STATE["sources"]:
                     STATE["sources"][key] = False
