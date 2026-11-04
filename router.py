@@ -1604,6 +1604,21 @@ class EngineManager:
             return str(status.get("value") or "unknown")
         return str(status or "unknown")
 
+    def _llama_load_failure(self, entry: Model, status: dict[str, Any]) -> EngineFailure:
+        code = status.get("exit_code")
+        tail = tail_file(self.log_path, 60)
+        low = tail.lower()
+        if any(marker in low for marker in (
+            "out of memory",
+            "cudamalloc failed",
+            "failed to allocate buffer for kv cache",
+        )):
+            return EngineFailure(
+                f"llama 加载 {entry.id} 失败：显存不足，模型或 KV cache 无法装入 GPU"
+                f"（exit code {code}）；日志：{self.log_path}"
+            )
+        return EngineFailure(f"llama failed to load {entry.id} (exit code {code}); log: {tail}")
+
     def _load_llama(self, entry: Model) -> None:
         timeout = float(self.timeouts.get("load_timeout_s") or 900)
         deadline = time.monotonic() + timeout
@@ -1616,12 +1631,11 @@ class EngineManager:
             target = next((m for m in data if m.get("id") == target_id), None)
             if target is not None:
                 state = self._llama_status(target)
-                if state == "loaded":
+                if state in ("loaded", "sleeping"):
                     self.current_model = target_id
                     return
                 if state == "unloaded" and isinstance(target.get("status"), dict) and target["status"].get("failed"):
-                    detail = target["status"].get("exit_code")
-                    raise EngineFailure(f"llama failed to load {entry.id} (exit code {detail}); log: {tail_file(self.log_path, 60)}")
+                    raise self._llama_load_failure(entry, target["status"])
             if time.monotonic() >= deadline:
                 raise EngineFailure(f"llama did not load {entry.id} within {int(timeout)}s; log: {tail_file(self.log_path, 60)}")
             if time.monotonic() - last_note > 15:
@@ -1630,13 +1644,15 @@ class EngineManager:
             time.sleep(1.0)
 
     def load(self, entry: Model) -> None:
-        if self.current_model == entry.engine_model and self.alive():
-            self.current_entry = entry
-            return
         if not self.alive():
             raise EngineFailure(f"{self.engine_id}: engine is not running")
         if self.kind == "llama_router":
+            # An engine that just started reports itself healthy before its models
+            # are loaded; always confirm the router's per-model state.
             self._load_llama_model(entry)
+        elif self.current_model == entry.engine_model:
+            self.current_entry = entry
+            return
         else:
             self._load_kvmem_model(entry)
         self.current_model = entry.engine_model
@@ -1654,8 +1670,10 @@ class EngineManager:
                 + ", ".join(str(m.get("id")) for m in data[:30])
             )
         state = self._llama_status(target)
-        if state == "loaded":
+        if state in ("loaded", "sleeping"):
             return
+        if state == "unloaded" and isinstance(target.get("status"), dict) and target["status"].get("failed"):
+            raise self._llama_load_failure(entry, target["status"])
         # The gateway keeps one engine/model at a time.  Unload anything else first so
         # the 8 GB card is not asked to hold two models.
         others = [
@@ -2676,6 +2694,13 @@ class Gateway:
     @staticmethod
     def _cache_startup_error(message: str) -> bool:
         text = str(message).lower()
+        if any(marker in text for marker in (
+            "out of memory",
+            "cudamalloc failed",
+            "failed to allocate",
+            "显存不足",
+        )):
+            return False
         if "cache-type" in text or "cache type" in text or "quantized" in text:
             return True
         return "kv" in text and any(
@@ -3001,6 +3026,8 @@ class Gateway:
                 for step in job.get("steps") or []:
                     if step.get("status") == "running":
                         step["status"] = "fail"
+                        if message:
+                            step["detail"] = message[:300]
                 if not any(step.get("status") == "fail" for step in job.get("steps") or []):
                     for step in job.get("steps") or []:
                         if step.get("status") == "pending":
