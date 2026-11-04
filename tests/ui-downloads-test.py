@@ -180,11 +180,15 @@ try:
       const cards = [...document.querySelectorAll('.download-card')];
       return {
         cards: cards.length,
-        badges: cards.map(card => card.querySelector('.source-badge').textContent),
+        badges: cards.filter(card => card.querySelector('.source-badge')).length,
+        repos: cards.map(card => card.querySelector('.repo').textContent.trim()),
+        heights: cards.map(card => card.querySelector('.repo').getBoundingClientRect().height),
         buttons: document.querySelectorAll('.download-card button[data-plan-source]').length,
         filters: [...document.querySelectorAll('#download-summary button')].map(b => b.textContent.trim()),
       };
     """)
+    assert stats["badges"] == 0, stats
+    assert min(stats["heights"]) >= 36, stats
     assert stats["buttons"] == 6, stats
     assert len(stats["filters"]) == 4, stats
     shot("downloads-desktop.png")

@@ -229,16 +229,11 @@
     display: flex; flex-direction: column; gap: 9px; padding: 14px;
     border-radius: 14px; background: var(--panel); border: 1px solid var(--line);
   }
-  .download-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .source-badge {
-    flex: 0 0 auto; padding: 2px 7px; border-radius: 6px; font-size: 10.5px;
-    border: 1px solid rgba(125,211,252,.26); color: #c7efff; background: rgba(125,211,252,.07);
-  }
-  .source-badge.hf-mirror { border-color: rgba(94,234,212,.30); color: #b7fff3; background: rgba(94,234,212,.08); }
-  .source-badge.modelscope { border-color: rgba(251,191,36,.28); color: #ffe5a3; background: rgba(251,191,36,.07); }
   .download-card .repo {
-    font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap; font-family: ui-monospace, Menlo, Consolas, monospace;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    min-height: 2.9em; line-height: 1.45; overflow: hidden; overflow-wrap: anywhere;
+    font-size: 13px; color: var(--text);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
   }
   .download-card .meta { display: flex; gap: 6px; flex-wrap: wrap; color: var(--faint); font-size: 11.5px; }
   .download-card .meta .sep::before { content: "·"; margin-right: 6px; }
@@ -1595,10 +1590,7 @@
     const tags = (item.tags || []).slice(0, 8)
       .map((tag) => `<span class="tag">${esc(tag)}</span>`);
     return `<article class="download-card">
-      <div class="download-card-head">
-        <span class="source-badge ${esc(item.source)}">${esc(item.source_label)}</span>
-        <span class="repo" title="${esc(item.repo_id)}">${esc(item.repo_id)}</span>
-      </div>
+      <span class="repo" title="${esc(item.repo_id)}">${esc(item.repo_id)}</span>
       ${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
       ${stats.length ? `<div class="stats">${stats.join("")}</div>` : ""}
       ${tags.length ? `<div class="tags">${tags.join("")}</div>` : ""}
