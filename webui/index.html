@@ -1048,7 +1048,7 @@
       if (m.quantization) facts.push(m.quantization);
       if (m.multimodal) facts.push("视觉");
       if (m.reasoning) facts.push("思考");
-      if (m.source) facts.push(m.source);
+      if (m.source) facts.push(ENGINE_LABELS[m.source] || m.source);
       if (Array.isArray(m.aliases) && m.aliases.length) facts.push("别名 " + m.aliases.join(", "));
       const unavailable = m.available === false;
       const loading = value === "loading";

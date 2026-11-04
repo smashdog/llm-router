@@ -50,7 +50,9 @@ python3 -m venv .venv
 
 首次启动会在当前目录自动生成最小 `config.json`（不含引擎），控制台显示“未配置引擎”引导，进入管理页填写引擎路径即可，无需重启网关。默认监听 `0.0.0.0:8080`，控制台为 `/`，聊天 UI 为 `/ui`；临时换端口可用 `./START-router.sh --host 127.0.0.1 --port 8081`（不写入配置文件）。`./START-router.sh --check` 只扫描并打印模型列表后退出。
 
-启动脚本会检查 Python 版本与 `requests`；也可设置 `ROUTER_PYTHON` 指定解释器。网关通过 `config.json` 指定引擎命令与模型目录，通过 `models.ini`（llama.cpp）、KVMem 的 `strata-*.json` 和 NInfer 的 `ninfer-*.json` 描述模型。NInfer 需要一份可用模板（管理页的“模板配置”），新增模型时从模板复制参数，并把模型 ID、`.ninfer` 路径和 `--model-id` 写入新的 `ninfer-<name>.json`。
+启动脚本会检查 Python 版本与 `requests`。网关通过 `config.json` 指定引擎命令与模型目录，通过 `models.ini`（llama.cpp）、KVMem 的 `strata-*.json` 和 NInfer 的 `ninfer-*.json` 描述模型。
+
+NInfer 需要一份可用模板（管理页的“模板配置”），新增模型时从模板复制参数，并把模型 ID、`.ninfer` 路径和 `--model-id` 写入新的 `ninfer-<name>.json`。模板里的 `env`（如 `CUDA_VISIBLE_DEVICES`、`LD_LIBRARY_PATH`）会随每份模型配置一起继承。
 
 ## 许可
 
