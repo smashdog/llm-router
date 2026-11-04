@@ -58,17 +58,10 @@
   .brand h1 { margin: 0; font-size: 18px; letter-spacing: -.01em; }
   .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
   .top-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .live {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 7px 11px; border-radius: 999px;
-    border: 1px solid var(--line); background: rgba(17,22,31,.8);
-    color: var(--muted); font-size: 12px; white-space: nowrap;
-  }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
   .dot.ok { background: var(--green); box-shadow: 0 0 0 4px rgba(74,222,128,.10); }
   .dot.warn { background: var(--amber); box-shadow: 0 0 0 4px rgba(251,191,36,.10); }
   .dot.bad { background: var(--red); box-shadow: 0 0 0 4px rgba(251,113,133,.10); }
-  .dot.live { background: var(--accent); box-shadow: 0 0 0 4px rgba(94,234,212,.12); animation: pulse 1.8s infinite; }
   @keyframes pulse { 50% { opacity: .45; } }
 
   .btn {
@@ -88,40 +81,31 @@
   .btn.ghost { background: transparent; }
   .btn.sm { min-height: 30px; padding: 5px 10px; font-size: 12px; border-radius: 8px; }
 
-  .hero {
-    position: relative; overflow: hidden;
-    display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr);
-    gap: 26px; padding: 26px;
-    background: linear-gradient(160deg, rgba(21,28,39,.96), rgba(13,18,26,.92));
-    border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+  .manage-head { margin-bottom: 14px; }
+  .manage-head h2 { margin: 0; font-size: 18px; letter-spacing: -.015em; }
+  .manage-head p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
+  .manage-layout {
+    display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; align-items: start;
   }
-  .hero::after {
-    content: ""; position: absolute; inset: -1px; pointer-events: none;
-    background: radial-gradient(500px 200px at 5% 0%, rgba(94,234,212,.10), transparent 70%);
+  .manage-menu {
+    padding: 10px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line);
   }
-  .hero > * { position: relative; z-index: 1; }
-  .eyebrow { color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
-  .hero h2 { margin: 8px 0 4px; font-size: clamp(26px, 3.6vw, 40px); letter-spacing: -.035em; line-height: 1.1; overflow-wrap: anywhere; }
-  .hero .sub { color: var(--muted); margin: 0; min-height: 24px; }
-  .hero .sub strong { color: var(--text); font-weight: 600; }
-  .hero-actions { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 20px; }
-  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-content: center; }
-  .metric {
-    padding: 13px 14px; border-radius: 12px; background: rgba(255,255,255,.025);
-    border: 1px solid var(--line-soft);
+  .manage-menu .menu-label { margin: 2px 4px 8px; color: var(--faint); font-size: 11px; letter-spacing: .06em; }
+  .menu-item {
+    display: block; width: 100%; text-align: left; padding: 9px 11px; border-radius: 9px;
+    border: 1px solid transparent; background: transparent; color: var(--muted);
+    font-size: 13px; cursor: pointer;
   }
-  .metric .k { color: var(--faint); font-size: 11px; letter-spacing: .04em; }
-  .metric .v { margin-top: 4px; font-size: 20px; font-weight: 650; letter-spacing: -.02em; }
-  .metric .v small { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .menu-item:hover { background: rgba(255,255,255,.03); }
+  .menu-item.on { color: #b7fff3; background: rgba(94,234,212,.10); border-color: rgba(94,234,212,.28); }
+  .manage-panel {
+    padding: 20px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line);
+  }
+  .manage-panel h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+  .manage-panel .panel-hint { margin: 5px 0 16px; color: var(--muted); font-size: 12.5px; }
 
-  .alert {
-    display: none; margin-top: 16px; padding: 13px 15px; border-radius: 12px;
-    border: 1px solid rgba(251,113,133,.28); background: rgba(251,113,133,.08);
-    color: #ffd8df; font-size: 13px; overflow-wrap: anywhere;
-  }
-  .alert.show { display: block; }
-  .alert .label { font-weight: 650; margin-right: 8px; }
-  .alert.offline { border-color: rgba(251,191,36,.28); background: rgba(251,191,36,.07); color: #ffe9b8; }
+  .head-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; align-self: center; }
+  .manage-panel .auth-panel { background: rgba(255,255,255,.02); }
 
   [hidden] { display: none !important; }
   .auth-panel {
@@ -296,12 +280,12 @@
 
   @media (max-width: 820px) {
     .shell { width: calc(100% - 24px); padding-top: 18px; }
-    .hero { grid-template-columns: 1fr; padding: 20px; }
-    .metrics { grid-template-columns: 1fr 1fr; }
     .top-right { width: 100%; }
     .search { max-width: none; }
     .auth-form { grid-template-columns: 1fr; }
     .auth-actions { padding-bottom: 0; }
+    .manage-layout { grid-template-columns: 1fr; }
+    .head-actions { width: 100%; margin-left: 0; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -319,65 +303,19 @@
       </div>
     </div>
     <div class="top-right">
-      <span class="live" id="connection"><span class="dot" id="connection-dot"></span><span id="connection-text">正在连接</span></span>
       <a class="btn ghost" href="/ui/" target="_blank" rel="noopener">打开聊天 UI</a>
+      <button class="btn" id="btn-manage" type="button" aria-pressed="false">管理</button>
     </div>
   </header>
 
-  <section class="hero" aria-labelledby="hero-title">
-    <div>
-      <div class="eyebrow">当前活动模型</div>
-      <h2 id="hero-title">空闲</h2>
-      <p class="sub" id="hero-sub">网关已启动，尚未加载模型。发起请求或从下方选择模型。</p>
-      <div class="hero-actions">
-        <button class="btn" id="btn-refresh">刷新</button>
-        <button class="btn" id="btn-reload">重新扫描模型</button>
-        <button class="btn danger" id="btn-stop">停止引擎</button>
-        <button class="btn ghost" id="btn-copy">复制 API 地址</button>
-      </div>
-    </div>
-    <div class="metrics">
-      <div class="metric"><div class="k">服务阶段</div><div class="v" id="m-phase">—</div></div>
-      <div class="metric"><div class="k">运行中请求 / 队列</div><div class="v" id="m-traffic">0 <small>/ 0</small></div></div>
-      <div class="metric"><div class="k">模型总数</div><div class="v" id="m-models">—</div></div>
-      <div class="metric"><div class="k">运行时长</div><div class="v" id="m-uptime">—</div></div>
-    </div>
-  </section>
-
-  <div class="alert" id="alert" role="alert"></div>
-  <div class="alert offline" id="offline" role="status"></div>
-
-  <section class="block" aria-labelledby="auth-title">
-    <div class="section-head">
-      <h2 id="auth-title">服务端 API 密钥</h2>
-      <span class="hint">保护 /v1 推理接口和聊天 UI 的 /props 探测；聊天设置里填写的密钥只保存在浏览器，不会修改这里。</span>
-    </div>
-    <div class="auth-panel">
-      <div class="auth-summary">
-        <span class="tag" id="auth-state">读取中</span>
-        <span id="auth-detail">正在读取服务端密钥状态…</span>
-      </div>
-      <form id="auth-form" class="auth-form">
-        <label class="auth-field" id="auth-current-field" hidden>当前密钥 <span class="name">修改或清除时需要</span>
-          <input id="auth-current" type="password" autocomplete="current-password" placeholder="输入当前已启用的密钥" />
-        </label>
-        <label class="auth-field">新密钥 <span class="name">单行，最多 512 字符</span>
-          <input id="auth-new" type="password" autocomplete="new-password" placeholder="输入要启用的服务端密钥" />
-        </label>
-        <div class="auth-actions">
-          <button class="btn primary" type="submit" id="auth-save">保存密钥</button>
-          <button class="btn danger" type="button" id="auth-clear">清除密钥</button>
-        </div>
-      </form>
-      <p class="auth-error" id="auth-error" hidden></p>
-      <p class="auth-note">密钥保存在服务端 api-key 文件中，保存后立即生效。聊天 UI 的 API Key 只作为客户端 Authorization 请求头发送，不会写入服务端。</p>
-    </div>
-  </section>
-
+  <main id="console-view">
   <section class="block" aria-labelledby="engines-title">
     <div class="section-head">
       <h2 id="engines-title">引擎</h2>
       <span class="hint">同一时间只运行一个引擎；切换模型时由网关自动停启。</span>
+      <div class="head-actions">
+        <button class="btn danger" id="btn-stop" type="button">停止引擎</button>
+      </div>
     </div>
     <div class="engines" id="engines"></div>
   </section>
@@ -386,7 +324,11 @@
     <div class="section-head">
       <h2 id="models-title">模型</h2>
       <span class="hint">加载会按需启动对应引擎，首次加载可能需要几十秒。</span>
-      <button class="btn primary" id="btn-add-model" type="button" style="margin-left:auto">新增模型</button>
+      <div class="head-actions">
+        <button class="btn ghost" id="btn-copy" type="button">复制 API 地址</button>
+        <button class="btn" id="btn-reload" type="button">重新扫描模型</button>
+        <button class="btn primary" id="btn-add-model" type="button">新增模型</button>
+      </div>
     </div>
     <div class="toolbar">
       <div class="search">
@@ -404,9 +346,49 @@
   </section>
 
   <footer class="footer">
-    <span id="foot-version">llm-router</span>
-    <span>推理接口 /v1 与聊天 UI 的 /props 需要服务端 API Key（可在上方配置）；控制台与 /models 无鉴权，仅限可信内网使用，请勿直接暴露到公网。</span>
+    <span>LLM Router</span>
+    <span>推理接口 /v1 与聊天 UI 的 /props 需要服务端 API Key（可在管理页配置）；控制台与 /models 无鉴权，仅限可信内网使用，请勿直接暴露到公网。</span>
   </footer>
+  </main>
+
+  <main id="manage-view" hidden>
+    <div class="manage-head">
+      <h2>管理</h2>
+      <p>网关配置与安全设置。</p>
+    </div>
+    <div class="manage-layout">
+      <aside class="manage-menu" aria-label="管理菜单">
+        <p class="menu-label">设置</p>
+        <button class="menu-item on" type="button" data-panel="auth">API 密钥管理</button>
+      </aside>
+      <div class="manage-content">
+        <section class="manage-panel" data-panel="auth" aria-labelledby="auth-title">
+          <h2 id="auth-title">API 密钥管理</h2>
+          <p class="panel-hint">保护 /v1 推理接口和聊天 UI 的 /props 探测；聊天设置里填写的密钥只保存在浏览器，不会修改这里。</p>
+          <div class="auth-panel">
+            <div class="auth-summary">
+              <span class="tag" id="auth-state">读取中</span>
+              <span id="auth-detail">正在读取服务端密钥状态…</span>
+            </div>
+            <form id="auth-form" class="auth-form">
+              <label class="auth-field" id="auth-current-field" hidden>当前密钥 <span class="name">修改或清除时需要</span>
+                <input id="auth-current" type="password" autocomplete="current-password" placeholder="输入当前已启用的密钥" />
+              </label>
+              <label class="auth-field">新密钥 <span class="name">单行，最多 512 字符</span>
+                <input id="auth-new" type="password" autocomplete="new-password" placeholder="输入要启用的服务端密钥" />
+              </label>
+              <div class="auth-actions">
+                <button class="btn primary" type="submit" id="auth-save">保存密钥</button>
+                <button class="btn danger" type="button" id="auth-clear">清除密钥</button>
+              </div>
+            </form>
+            <p class="auth-error" id="auth-error" hidden></p>
+            <p class="auth-note">密钥保存在服务端 api-key 文件中，保存后立即生效。聊天 UI 的 API Key 只作为客户端 Authorization 请求头发送，不会写入服务端。</p>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
 </div>
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
@@ -540,19 +522,12 @@
     filter: "all",
     query: "",
     busy: false,
-    offline: false,
-    sig: "",
     timer: null,
-    lastUpdate: 0,
     manage: null,
     addJob: null,
     addTimer: null,
   };
 
-  const PHASES = {
-    idle: "空闲", queued: "排队", starting: "启动引擎", loading: "加载模型",
-    ready: "就绪", stopping: "停止引擎", unloading: "卸载模型", error: "错误",
-  };
   const MODEL_STATES = {
     loaded: { label: "已加载", cls: "green" },
     loading: { label: "加载中", cls: "amber" },
@@ -586,17 +561,6 @@
 
   function modelState(model) {
     return (model.status && model.status.value) || model.state || "unloaded";
-  }
-
-  function fmtDuration(seconds) {
-    const s = Math.max(0, Math.floor(Number(seconds) || 0));
-    const d = Math.floor(s / 86400);
-    const h = Math.floor((s % 86400) / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    if (d) return `${d}天 ${h}时`;
-    if (h) return `${h}时 ${m}分`;
-    if (m) return `${m}分 ${s % 60}秒`;
-    return `${s}秒`;
   }
 
   function fmtTime(value) {
@@ -659,20 +623,35 @@
     return payload;
   }
 
-  function setOffline(error) {
-    state.offline = true;
-    const box = $("offline");
-    box.textContent = "无法连接网关：" + error.message + "（将自动重试）";
-    box.classList.add("show");
-    const c = $("connection");
-    $("connection-dot").className = "dot bad";
-    $("connection-text").textContent = "离线";
-    c.title = error.message;
+  async function loadAuth() {
+    try {
+      state.auth = await api("/router/auth");
+      renderAuth();
+    } catch (error) {
+      toast("无法读取 API 密钥状态：" + error.message, "bad");
+    }
   }
 
-  function setOnline() {
-    state.offline = false;
-    $("offline").classList.remove("show");
+  function selectManagePanel(panel) {
+    document.querySelectorAll(".manage-menu .menu-item").forEach((item) => {
+      item.classList.toggle("on", item.dataset.panel === panel);
+    });
+    document.querySelectorAll(".manage-content [data-panel]").forEach((node) => {
+      node.hidden = node.dataset.panel !== panel;
+    });
+  }
+
+  function setView(view) {
+    const manage = view === "manage";
+    $("console-view").hidden = manage;
+    $("manage-view").hidden = !manage;
+    const button = $("btn-manage");
+    button.textContent = manage ? "返回控制台" : "管理";
+    button.classList.toggle("primary", manage);
+    button.setAttribute("aria-pressed", manage ? "true" : "false");
+    document.title = manage ? "管理 · LLM Router" : "LLM Router 控制台";
+    window.scrollTo(0, 0);
+    if (manage) loadAuth();
   }
 
   function setAuthError(message) {
@@ -775,55 +754,6 @@
     }
   }
 
-  function renderStatus() {
-    const status = state.status;
-    if (!status) return;
-    const active = status.active_model;
-    $("hero-title").textContent = active || "空闲";
-    const phase = PHASES[status.phase] || status.phase || "未知";
-    const engineName = status.active_engine || "—";
-    let sub;
-    if (active) {
-      sub = `引擎 <strong>${esc(engineName)}</strong> · 阶段 <strong>${esc(phase)}</strong>`;
-      if (status.target_model && status.target_model !== active) {
-        sub += ` · 目标 <strong>${esc(status.target_model)}</strong>`;
-      }
-    } else if (status.async_operation && status.async_operation.kind === "restart") {
-      sub = `正在重启引擎以应用新的上下文 / KV 精度${status.async_operation.model ? `（随后重新加载 <strong>${esc(status.async_operation.model)}</strong>）` : ""}…`;
-    } else if (status.async_operation && status.async_operation.kind === "load") {
-      sub = `正在加载 <strong>${esc(status.async_operation.model)}</strong>…`;
-    } else {
-      sub = "网关已启动，尚未加载模型。发起请求或从下方选择模型。";
-    }
-    $("hero-sub").innerHTML = sub;
-    $("m-phase").textContent = phase;
-    $("m-traffic").innerHTML = `${Number(status.in_flight) || 0} <small>/ ${Number(status.queue) || 0}</small>`;
-    $("m-models").textContent = status.models != null ? status.models : "—";
-    $("m-uptime").textContent = fmtDuration(status.uptime_s);
-
-    const parts = [];
-    $("connection-dot").className = "dot " + (status.phase === "error" ? "bad" : "ok");
-    $("connection-text").textContent = `在线 · v${status.version || "?"}`;
-    $("foot-version").textContent = `llm-router ${status.version || ""} · 更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
-    if (status.last_switch) {
-      const sw = status.last_switch;
-      parts.push(`<span class="label">上一次切换</span>${esc(sw.from || "空闲")} → ${esc(sw.to)}，耗时 ${esc(sw.seconds)} 秒（${esc(sw.at)}）`);
-    }
-    const alert = $("alert");
-    if (status.last_error) {
-      parts.unshift(`<span class="label">最近错误</span>${esc(status.last_error)}`);
-    }
-    if (parts.length) {
-      alert.innerHTML = parts.join("<br>");
-      alert.classList.add("show");
-    } else {
-      alert.classList.remove("show");
-      alert.innerHTML = "";
-    }
-    $("btn-stop").disabled = state.busy || (!status.active_model && !(status.engine && status.engine.alive));
-    $("btn-reload").disabled = state.busy;
-  }
-
   function renderEngines() {
     const status = state.status;
     const host = $("engines");
@@ -918,31 +848,24 @@
   }
 
   function render() {
-    renderStatus();
     renderEngines();
     renderModels();
     renderAuth();
-    const status = state.status || {};
-    $("btn-refresh").disabled = false;
   }
 
   async function refresh() {
     if (state.loading) return;
     state.loading = true;
     try {
-      const [status, models, auth] = await Promise.all([
+      const [status, models] = await Promise.all([
         api("/router/status"),
         api("/models"),
-        state.authBusy ? Promise.resolve(state.auth) : api("/router/auth"),
       ]);
       state.status = status;
       state.models = Array.isArray(models.data) ? models.data : [];
-      state.auth = auth;
-      state.lastUpdate = Date.now();
-      setOnline();
       render();
-    } catch (error) {
-      setOffline(error);
+    } catch (_) {
+      /* 网关不可达时保持现有视图，等待下一次轮询 */
     } finally {
       state.loading = false;
     }
@@ -1397,7 +1320,12 @@
     else toast("复制失败，请手动复制：" + url, "bad");
   }
 
-  $("btn-refresh").addEventListener("click", refresh);
+  $("btn-manage").addEventListener("click", () => {
+    setView($("manage-view").hidden ? "manage" : "console");
+  });
+  document.querySelectorAll(".manage-menu .menu-item").forEach((item) => {
+    item.addEventListener("click", () => selectManagePanel(item.dataset.panel));
+  });
   $("btn-reload").addEventListener("click", reloadRegistry);
   $("btn-stop").addEventListener("click", stopEngine);
   $("btn-copy").addEventListener("click", copyApi);
