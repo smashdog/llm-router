@@ -3187,10 +3187,14 @@ class Gateway:
             running = bool(manager is not None and manager.alive())
             current = engine_path_fields(engine_id, engine_cfg) if configured else {}
             defaults = engine_slot_defaults(self.base_dir, engine_id)
+            # Unconfigured slots have no real values: keep the inputs empty and
+            # expose the conventional layout only as ``defaults`` suggestions.
+            # Filling them in made an untouched slot look configured (and the
+            # guessed paths often do not exist on a fresh deployment).
             fields = (
                 {key: str(current.get(key) or "") for key in spec["fields"]}
                 if configured
-                else {key: str(defaults.get(key) or "") for key in spec["fields"]}
+                else {key: "" for key in spec["fields"]}
             )
             needs_restart = False
             if running and manager is not None:

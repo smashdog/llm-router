@@ -123,6 +123,7 @@
     background: #0c121a; color: var(--text); font: inherit; font-size: 12.5px; outline: none;
   }
   .engine-path-fields input:focus { border-color: rgba(94,234,212,.45); }
+  .engine-path-fields input::placeholder { color: var(--faint); opacity: .8; }
   .engine-path-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 13px; }
   .engine-path-actions .hint { margin-right: auto; color: var(--faint); font-size: 11.5px; }
   .engine-path .params-error { margin-top: 10px !important; }
@@ -880,20 +881,27 @@
       const schema = PATH_FIELDS[item.engine] || [];
       const configured = !!item.configured;
       const fields = item.fields || {};
+      const defaults = item.defaults || {};
       const tags = [
         `<span class="tag ${configured ? "green" : "amber"}">${configured ? "已配置" : "未配置"}</span>`,
       ];
       if (item.running) tags.push('<span class="tag green">运行中</span>');
       else if (configured) tags.push('<span class="tag">已停止</span>');
       if (item.needs_restart) tags.push('<span class="tag amber">需重启</span>');
-      const rows = schema.map((field) => `
+      const rows = schema.map((field) => {
+        const placeholder = (!configured && defaults[field.key]) || field.placeholder;
+        return `
         <label>${esc(field.label)} <span class="name">${esc(field.hint)}</span>
           <input type="text" spellcheck="false" data-path-field="${esc(field.key)}"
-            placeholder="${esc(field.placeholder)}" value="${esc(fields[field.key] || "")}" />
-        </label>`).join("");
+            placeholder="${esc(placeholder)}" value="${esc(fields[field.key] || "")}" />
+        </label>`;
+      }).join("");
       const note = configured
         ? `${esc(data.config_file || "config.json")} 已记录 · 内部地址 ${esc(item.address || "—")}`
-        : "保存后会写入 config.json，并创建对应的引擎槽位。";
+        : "未配置；灰色提示为建议路径，可先填入再修改，保存后写入 config.json。";
+      const prefill = !configured && Object.values(defaults).some(Boolean)
+        ? '<button class="btn ghost" type="button" data-path-action="prefill">填入建议路径</button>'
+        : "";
       return `
         <article class="engine-path" data-engine="${esc(item.engine)}">
           <div class="engine-path-head">
@@ -905,6 +913,7 @@
           ${item.warning ? `<p class="path-warning">${esc(item.warning)}</p>` : ""}
           <div class="engine-path-actions">
             <span class="hint">${note}</span>
+            ${prefill}
             <button class="btn primary" type="button" data-path-action="${configured ? "save" : "create"}">${configured ? "保存路径" : "创建引擎"}</button>
             ${item.running ? '<button class="btn" type="button" data-path-action="restart">重启引擎</button>' : ""}
           </div>
@@ -1618,6 +1627,15 @@
     if (!card) return;
     const engine = card.dataset.engine;
     const action = button.dataset.pathAction;
+    if (action === "prefill") {
+      const item = (state.paths?.engines || []).find((entry) => entry.engine === engine);
+      const defaults = item?.defaults || {};
+      card.querySelectorAll("input[data-path-field]").forEach((input) => {
+        input.value = defaults[input.dataset.pathField] || "";
+      });
+      setPathError(card, "");
+      return;
+    }
     if (action === "restart") {
       restartEnginePaths(engine).catch((error) => toast(error.message, "bad"));
     } else {
