@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""llm-router: one OpenAI-compatible front door for the llama.cpp router and KVMem.
+"""llm-router: one OpenAI-compatible front door for llama.cpp, KVMem and NInfer.
 
 The gateway owns the public port.  It starts with no engine and no model loaded; the
 requested model selects the engine.  A cross-engine switch stops the current engine and
@@ -266,6 +266,14 @@ DEFAULT_SAMPLING = {
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
     },
+    "ninfer": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+    },
 }
 # A llama.cpp preset that encodes the reference defaults (the [*] block plus
 # the LFM3-2B-omni section); KVMem's reference config is Ornith 1.5.
@@ -323,8 +331,13 @@ def normalize_sampling(values: dict[str, Any], engine: str) -> dict[str, Any]:
         elif key == "min_p":
             out[key] = _sampling_number(key, raw, 0.0, 1.0)
         elif key == "repetition_penalty":
-            out[key] = _sampling_number(key, raw, 0.5, 2.0)
+            value = _sampling_number(key, raw, 0.5, 2.0)
+            if engine == "ninfer" and value != 1.0:
+                raise BadRequest("NInfer 只接受中立值 repetition_penalty=1")
+            out[key] = value
         elif key == "repeat_last_n":
+            if engine == "ninfer":
+                raise BadRequest("NInfer 不支持 repeat_last_n（重复窗口）")
             if engine == "kvmem":
                 out[key] = _sampling_number(key, raw, 1, 131072, integer=True)
             else:
@@ -412,6 +425,10 @@ class SamplingStore:
                 target = "repeat_penalty"
             elif engine == "kvmem" and key == "repeat_last_n":
                 target = "penalty_last_n"
+            elif engine == "ninfer" and key in ("repetition_penalty", "repeat_last_n"):
+                # NInfer has no repeat-window sampler and only accepts the
+                # neutral repetition penalty; do not forward either field.
+                continue
             else:
                 target = key
             payload[target] = value
@@ -561,7 +578,11 @@ class Model:
             "id": self.id,
             "object": "model",
             "created": self.created,
-            "owned_by": "llama.cpp" if self.engine == "llama" else "KVMem",
+            "owned_by": {
+                "llama": "llama.cpp",
+                "kvmem": "KVMem",
+                "ninfer": "NInfer",
+            }.get(self.engine, self.engine),
             # llama.cpp router UI reads model/name/status/architecture/meta/tags.
             "model": self.id,
             "name": self.display_name or self.id,
@@ -591,7 +612,7 @@ class Model:
             "quantization": self.quantization,
             "source": self.source,
             "config_path": self.config_path,
-            "deletable": self.source in ("preset", "strata"),
+            "deletable": self.source in ("preset", "strata", "ninfer"),
             "loaded": loaded,
             "available": self.available,
             "problem": self.problem,
@@ -908,6 +929,31 @@ def kvmem_reference_config(engine_cfg: dict[str, Any]) -> tuple[Path | None, dic
     return fallback if fallback else (None, None)
 
 
+def ninfer_reference_config(engine_cfg: dict[str, Any]) -> tuple[Path | None, dict[str, Any] | None]:
+    """The per-model JSON whose args seed a newly added NInfer model."""
+    models = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+    raw = str(models.get("template") or "").strip()
+    candidates: list[Path] = []
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = Path(str(engine_cfg.get("cwd") or "")) / path
+        candidates.append(path)
+    else:
+        config_dir = Path(str(models.get("dir") or ""))
+        try:
+            candidates = sorted(config_dir.glob("ninfer-*.json"))
+        except OSError:
+            candidates = []
+    for path in candidates:
+        cfg = read_json(path)
+        if not isinstance(cfg, dict):
+            continue
+        if (cfg.get("model") or cfg.get("artifact")) and isinstance(cfg.get("args"), list):
+            return path, cfg
+    return None, None
+
+
 def kvmem_tokenizer_tool(engine_cfg: dict[str, Any]) -> Path | None:
     """Locate tools/polystrata/assets.py, which exports a GGUF's own tokenizer."""
     cwd = Path(str(engine_cfg.get("cwd") or ""))
@@ -1202,6 +1248,92 @@ def discover_kvmem_models(engine_cfg: dict[str, Any]) -> list[Model]:
     return models
 
 
+def discover_ninfer_models(engine_cfg: dict[str, Any]) -> list[Model]:
+    config_dir = Path(str((engine_cfg.get("models") or {}).get("dir") or ""))
+    engine_cwd = Path(str(engine_cfg.get("cwd") or "."))
+    engine_command = engine_cfg.get("command")
+    engine_binary = str(engine_command[0]) if isinstance(engine_command, list) and engine_command else ""
+    candidates = []
+    try:
+        for path in config_dir.glob("ninfer-*.json"):
+            try:
+                candidates.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+    except OSError:
+        candidates = []
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    models: list[Model] = []
+    seen: set[str] = set()
+    for _, path in candidates:
+        cfg = read_json(path)
+        if not isinstance(cfg, dict):
+            continue
+        args = cfg.get("args")
+        if not isinstance(args, list):
+            continue
+        raw_model = str(cfg.get("model") or cfg.get("artifact") or "").strip()
+        if not raw_model:
+            continue
+        model_id = str(cfg.get("model_name") or path.stem.removeprefix("ninfer-"))
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        args = [str(item) for item in args]
+        ctx = parse_int(cfg.get("context_length"))
+        if ctx is None and "--max-context" in args[:-1]:
+            ctx = parse_int(args[args.index("--max-context") + 1])
+        max_out = parse_int(cfg.get("default_max_tokens"))
+        if max_out is None and "--default-max-tokens" in args[:-1]:
+            max_out = parse_int(args[args.index("--default-max-tokens") + 1])
+        if max_out is not None and max_out <= 0:
+            max_out = None
+        aliases_raw = cfg.get("aliases")
+        if isinstance(aliases_raw, str):
+            aliases = [x.strip() for x in aliases_raw.split(",") if x.strip()]
+        elif isinstance(aliases_raw, list):
+            aliases = [str(x).strip() for x in aliases_raw if str(x).strip()]
+        else:
+            aliases = []
+        cwd_raw = Path(str(cfg.get("cwd") or engine_cwd))
+        if not cwd_raw.is_absolute():
+            cwd_raw = engine_cwd / cwd_raw
+        exe_raw = str(cfg.get("exe") or engine_binary)
+        exe = Path(exe_raw)
+        if not exe.is_absolute():
+            exe = cwd_raw / exe
+        model_file = Path(raw_model)
+        if not model_file.is_absolute():
+            model_file = cwd_raw / model_file
+        problem = None
+        if not exe.is_file() or not os.access(exe, os.X_OK):
+            problem = f"引擎可执行文件不存在或不可执行（{exe}）"
+        elif not model_file.is_file():
+            problem = f"模型文件不存在（{model_file}）"
+        engine_model = str(cfg.get("model_id") or model_id)
+        display_name = str(cfg.get("display_name") or model_id)
+        models.append(
+            Model(
+                id=model_id,
+                engine="ninfer",
+                engine_model=engine_model,
+                config_path=str(path),
+                display_name=display_name,
+                aliases=aliases,
+                context_length=ctx,
+                max_output_tokens=max_out,
+                multimodal=bool(cfg.get("vision")),
+                reasoning=bool(cfg.get("reasoning")),
+                notes=cfg.get("notes"),
+                quantization=cfg.get("quantization"),
+                source="ninfer",
+                available=problem is None,
+                problem=problem,
+            )
+        )
+    return models
+
+
 class Registry:
     def __init__(self, config: dict[str, Any], base_dir: Path, log: logging.Logger):
         self.config = config
@@ -1223,6 +1355,8 @@ class Registry:
                     all_models.extend(discover_llama_models(engine_cfg))
                 elif kind == "kvmem_dir":
                     all_models.extend(discover_kvmem_models(engine_cfg))
+                elif kind == "ninfer_dir":
+                    all_models.extend(discover_ninfer_models(engine_cfg))
             except Exception:
                 self.log.exception("cannot scan models for engine %s", engine_id)
         counts: dict[str, int] = {}
@@ -1422,7 +1556,7 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "log_path": "logs/llama-engine.log",
     },
     "kvmem": {
-        "label": "KVMem",
+        "label": "KVMem（polystrata）",
         "kind": "kvmem",
         "models_kind": "kvmem_dir",
         "fields": ("binary", "cwd", "models_dir", "meta"),
@@ -1433,8 +1567,20 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "probe_timeout_s": 30,
         "log_path": "logs/kvmem-engine.log",
     },
+    "ninfer": {
+        "label": "NInfer（KVMem）",
+        "kind": "ninfer",
+        "models_kind": "ninfer_dir",
+        "fields": ("binary", "cwd", "models_dir", "template"),
+        "model_key": "template",
+        "host": "127.0.0.1",
+        "port": 18082,
+        "start_timeout_s": 900,
+        "probe_timeout_s": 30,
+        "log_path": "logs/ninfer-engine.log",
+    },
 }
-ENGINE_SLOT_ORDER = ("llama", "kvmem")
+ENGINE_SLOT_ORDER = ("llama", "kvmem", "ninfer")
 KV_PROBE_CODE = (
     "import serve.server\n"
     "print('LLM_ROUTER_KVPROBE_' + str(6 * 7))\n"
@@ -1461,6 +1607,15 @@ def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
             "cwd": str(home / "backends" / "polystrata"),
             "models_dir": str(models_dir),
             "meta": str(models_dir / "models.json"),
+        }
+    if engine_id == "ninfer":
+        home = root / "kvmem"
+        models_dir = home / "local_config"
+        return {
+            "binary": str(root / "build-ninfer" / "apps" / "ninfer-serve"),
+            "cwd": str(home),
+            "models_dir": str(models_dir),
+            "template": str(models_dir / "ninfer.template.json"),
         }
     return {}
 
@@ -1491,6 +1646,14 @@ def _slot_command(engine_id: str, fields: dict[str, str]) -> list[str]:
             "--host", "{host}",
             "--port", "{port}",
         ]
+    if engine_id == "ninfer":
+        # The model artifact and its serve options come from the per-model
+        # ninfer-*.json; the manager inserts them after the executable.
+        return [
+            fields["binary"],
+            "--host", "{host}",
+            "--port", "{port}",
+        ]
     return [
         fields["binary"],
         "-m", "serve.server",
@@ -1507,7 +1670,7 @@ def _rewrite_slot_command(
 ) -> list[str]:
     """Keep custom flags but move every known path to the new value."""
     replacements = []
-    for key in ("binary", "models_dir", "preset", "meta", "cwd"):
+    for key in ("binary", "models_dir", "preset", "meta", "template", "cwd"):
         before = str(old.get(key) or "")
         after = str(fields.get(key) or "")
         if before and after and before != after:
@@ -1544,6 +1707,12 @@ def build_engine_cfg(
     cfg.setdefault("log_path", spec["log_path"])
     if existing is None:
         cfg.setdefault("api_key", None)
+    if engine_id == "ninfer" and not cfg.get("env"):
+        # NInfer builds keep their shared libraries beside the executable.
+        build_root = Path(fields["binary"]).parent.parent
+        lib_dir = build_root / "lib"
+        if lib_dir.is_dir():
+            cfg["env"] = {"LD_LIBRARY_PATH": f"{build_root}:{lib_dir}"}
     models = cfg.get("models")
     models = models if isinstance(models, dict) else {}
     models["kind"] = str(models.get("kind") or spec["models_kind"])
@@ -1635,7 +1804,8 @@ def probe_engine_binary(
     """Cheaply verify the chosen executable is the right program.
 
     llama.cpp is asked for its version; KVMem's interpreter must import
-    serve.server from the working directory. Neither probe starts a server.
+    serve.server from the working directory; NInfer must identify itself as
+    ninfer-serve. None of the probes starts a server.
     """
     spec = ENGINE_SLOTS[engine_id]
     binary = fields["binary"]
@@ -1676,6 +1846,16 @@ def probe_engine_binary(
                 message += f"：{detail}"
             raise BadRequest(message)
         return
+    if engine_id == "ninfer":
+        if proc.returncode != 0 or not re.search(r"ninfer-serve\s+\S+", output, re.I):
+            detail = _probe_tail(output)
+            message = "binary：不是可用的 ninfer-serve"
+            if proc.returncode:
+                message += f"（退出码 {proc.returncode}）"
+            if detail:
+                message += f"：{detail}"
+            raise BadRequest(message)
+        return
     if proc.returncode != 0 or not re.search(r"version\s*:\s*\S+", output, re.I):
         detail = _probe_tail(output)
         message = "binary：不是可用的 llama-server"
@@ -1690,6 +1870,8 @@ def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
     try:
         if engine_id == "llama":
             return discover_llama_models(cfg)
+        if engine_id == "ninfer":
+            return discover_ninfer_models(cfg)
         return discover_kvmem_models(cfg)
     except Exception as exc:
         raise BadRequest(f"无法扫描模型目录：{exc}") from exc
@@ -1835,12 +2017,31 @@ class EngineManager:
         except OSError:
             pass
 
+    def _ninfer_model_config(self, entry: Model) -> tuple[dict[str, Any], str, list[str]]:
+        if not entry.config_path:
+            raise EngineFailure(f"{self.engine_id}: {entry.id} has no config path")
+        cfg = read_json(Path(entry.config_path))
+        if not isinstance(cfg, dict):
+            raise EngineFailure(f"{self.engine_id}: cannot read {entry.config_path}")
+        artifact = str(cfg.get("model") or cfg.get("artifact") or "").strip()
+        if not artifact:
+            raise EngineFailure(f"{self.engine_id}: {entry.id} config has no model path")
+        args = cfg.get("args")
+        args = [str(item) for item in args] if isinstance(args, list) else []
+        return cfg, artifact, args
+
     def _build_command(self, entry: Model) -> list[str]:
         command = self.cfg.get("command")
         if not isinstance(command, list) or not command:
             raise EngineFailure(f"{self.engine_id}: no command in config")
         if self.kind == "kvmem" and not entry.config_path:
             raise EngineFailure(f"{self.engine_id}: {entry.id} has no config path")
+        if self.kind == "ninfer":
+            model_cfg, artifact, args = self._ninfer_model_config(entry)
+            binary = str(model_cfg.get("exe") or command[0])
+            # ninfer-serve takes the artifact path first, then its serve
+            # options; host/port stay from the engine slot command.
+            command = [binary, artifact, *args, *[str(token) for token in command[1:]]]
         out = []
         for token in command:
             value = str(token)
@@ -1856,7 +2057,7 @@ class EngineManager:
         extra = self.cfg.get("env")
         if isinstance(extra, dict):
             env.update({str(k): str(v) for k, v in extra.items()})
-        if self.kind == "kvmem" and entry.config_path:
+        if self.kind in ("kvmem", "ninfer") and entry.config_path:
             cfg = read_json(Path(entry.config_path))
             if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict):
                 env.update({str(k): str(v) for k, v in cfg["env"].items()})
@@ -1902,11 +2103,13 @@ class EngineManager:
             self.pgid = self.proc.pid
         self.last_pid = self.proc.pid
         self.started_at = now()
-        self.current_model = entry.engine_model if self.kind == "kvmem" else None
+        self.current_model = entry.engine_model if self.kind in ("kvmem", "ninfer") else None
         self._write_state()
         try:
             if self.kind == "llama_router":
                 self._wait_llama_ready()
+            elif self.kind == "ninfer":
+                self._wait_ninfer_ready(entry)
             else:
                 self._wait_kvmem_ready(entry)
         except Exception:
@@ -1983,6 +2186,51 @@ class EngineManager:
             f"log: {tail_file(self.log_path, 40)}"
         )
 
+    def _wait_ninfer_ready(self, entry: Model) -> None:
+        timeout = float(self.cfg.get("start_timeout_s") or self.timeouts.get("load_timeout_s") or 900)
+        deadline = time.monotonic() + timeout
+        last_note = 0.0
+        last_error = ""
+        while time.monotonic() < deadline:
+            if not self.alive():
+                raise EngineFailure(f"NInfer engine exited during startup; log: {tail_file(self.log_path, 40)}")
+            try:
+                status, body = self._json_request("GET", "/health", entry=entry, timeout=4)
+                if status == 200:
+                    status2, body2 = self._json_request("GET", "/v1/models", entry=entry, timeout=5)
+                    if status2 == 200 and isinstance(body2, dict):
+                        data = body2.get("data")
+                        data = data if isinstance(data, list) else []
+                        target = next((m for m in data if m.get("id") == entry.engine_model), None)
+                        if target is not None and self._llama_status(target) in ("loaded", "sleeping"):
+                            return
+                        if data:
+                            last_error = "models=" + ", ".join(str(m.get("id")) for m in data[:5])
+                elif status in (401, 403):
+                    raise EngineFailure(
+                        f"NInfer rejected the configured API key (HTTP {status}); check engines.ninfer.api_key"
+                    )
+                elif isinstance(body, dict):
+                    err = body.get("error")
+                    if isinstance(err, dict):
+                        last_error = str(err.get("message") or err)
+            except requests.RequestException as exc:
+                last_error = str(exc)
+            if time.monotonic() - last_note > 15:
+                last_note = time.monotonic()
+                self.log.info(
+                    "waiting for NInfer model %s on %s:%s%s",
+                    entry.id,
+                    self.host,
+                    self.port,
+                    f" ({last_error})" if last_error else "",
+                )
+            time.sleep(1.0)
+        raise EngineFailure(
+            f"NInfer model {entry.id} did not become ready within {int(timeout)}s; "
+            f"log: {tail_file(self.log_path, 40)}"
+        )
+
     def _llama_models(self) -> list[dict[str, Any]]:
         status, body = self._json_request("GET", "/models", timeout=5)
         if status != 200 or not isinstance(body, dict):
@@ -2045,6 +2293,15 @@ class EngineManager:
             # An engine that just started reports itself healthy before its models
             # are loaded; always confirm the router's per-model state.
             self._load_llama_model(entry)
+        elif self.kind == "ninfer":
+            # NInfer runs one artifact per process; switching models means a
+            # restart, which the gateway already does when it switches engines.
+            if self.current_model == entry.engine_model:
+                self.current_entry = entry
+                return
+            self.log.info("restarting NInfer engine for %s (was %s)", entry.id, self.current_model or "—")
+            self.stop()
+            self.start(entry)
         elif self.current_model == entry.engine_model:
             self.current_entry = entry
             return
@@ -2155,6 +2412,11 @@ class EngineManager:
             self.current_model = None
             self.current_entry = None
             self._clear_state()
+            return
+        if self.kind == "ninfer":
+            # NInfer has no unload endpoint in single-model mode; stopping the
+            # engine is the unload, and the next request starts it again.
+            self.stop()
             return
         if self.kind == "llama_router":
             data = self._llama_models()
@@ -2866,7 +3128,7 @@ class Gateway:
 
     @staticmethod
     def _short_kind(kind: str | None) -> str:
-        return {"llama_dir": "llama", "kvmem_dir": "kvmem"}.get(str(kind), "")
+        return {"llama_dir": "llama", "kvmem_dir": "kvmem", "ninfer_dir": "ninfer"}.get(str(kind), "")
 
     def _engine_config_label(self) -> str:
         try:
@@ -2939,7 +3201,7 @@ class Gateway:
         self, engine_id: str, paths: Any, create: bool = False
     ) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama 或 kvmem")
+            raise BadRequest("engine 必须是 llama、kvmem 或 ninfer")
         engines_cfg = self.config.get("engines")
         if engines_cfg is None:
             engines_cfg = {}
@@ -3030,7 +3292,7 @@ class Gateway:
 
     def restart_engine_paths(self, engine_id: str) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama 或 kvmem")
+            raise BadRequest("engine 必须是 llama、kvmem 或 ninfer")
         engines_cfg = self.config.get("engines")
         if not isinstance(engines_cfg, dict) or not isinstance(
             engines_cfg.get(engine_id), dict
@@ -3083,7 +3345,21 @@ class Gateway:
                 out[engine_id] = {
                     "engine": engine_id,
                     "kind": "kvmem",
-                    "label": "KVMem",
+                    "label": "KVMem（polystrata）",
+                    "models_dir": models_cfg.get("dir"),
+                    "template": str(template_path) if template_path else None,
+                    "defaults": {
+                        "args": list((template or {}).get("args") or []),
+                        "vision_gpu": False,
+                    },
+                    "default_params": self.default_sampling(engine_id),
+                }
+            elif kind == "ninfer_dir":
+                template_path, template = ninfer_reference_config(engine_cfg)
+                out[engine_id] = {
+                    "engine": engine_id,
+                    "kind": "ninfer",
+                    "label": "NInfer（KVMem）",
                     "models_dir": models_cfg.get("dir"),
                     "template": str(template_path) if template_path else None,
                     "defaults": {
@@ -3132,11 +3408,11 @@ class Gateway:
         if not engine_id or engine_id not in self.config.get("engines", {}):
             raise BadRequest("engine must name a configured engine")
         kind = self._engine_kind(engine_id)
-        if kind not in ("llama_dir", "kvmem_dir"):
+        if kind not in ("llama_dir", "kvmem_dir", "ninfer_dir"):
             raise BadRequest(f"engine {engine_id!r} cannot add models")
         model = payload.get("model")
         if not isinstance(model, str) or not model.strip():
-            raise BadRequest('send {"engine": "...", "model": "/path/model.gguf"}')
+            raise BadRequest('send {"engine": "...", "model": "/path/model.gguf|.ninfer"}')
         vision = payload.get("vision")
         if vision is not None and not isinstance(vision, str):
             raise BadRequest("vision must be a path or null")
@@ -3169,6 +3445,11 @@ class Gateway:
             context_length is not None or cache_type_k is not None or cache_type_v is not None
         ):
             raise BadRequest("KVMem 引擎固定使用模型上下文与 q8 量化，不能设置上下文或 K/V 精度")
+        if kind == "ninfer_dir":
+            if vision_path:
+                raise BadRequest("NInfer 模型暂不支持在控制台配置视觉 mmproj")
+            if context_length is not None or cache_type_k is not None or cache_type_v is not None:
+                raise BadRequest("NInfer 的上下文与 KV 参数由模板配置决定，不能单独设置")
         steps = [
             {"key": "paths", "label": "检查模型路径", "status": "pending", "detail": ""},
             {"key": "metadata", "label": "读取 GGUF 元数据", "status": "pending", "detail": ""},
@@ -3177,6 +3458,9 @@ class Gateway:
             {"key": "start", "label": "启动引擎并加载模型", "status": "pending", "detail": ""},
             {"key": "smoke", "label": "冒烟测试", "status": "pending", "detail": ""},
         ]
+        if kind == "ninfer_dir":
+            steps[1]["label"] = "检查 .ninfer 模型"
+            steps[2]["label"] = "复制模板参数"
         if vision_path:
             steps.append(
                 {"key": "vision_smoke", "label": "视觉冒烟测试", "status": "pending", "detail": ""}
@@ -3347,6 +3631,143 @@ class Gateway:
             tokens = 0
         return text or reasoning, tokens
 
+    def _model_add_ninfer_worker(
+        self,
+        job: dict[str, Any],
+        engine_id: str,
+        model: Path,
+        smoke: bool,
+    ) -> None:
+        """Add a .ninfer model as a single-model NInfer process.
+
+        NInfer's router mode refuses KVMem, so each model gets its own
+        ninfer-*.json (artifact, serve options and env) and the gateway starts
+        the engine for that one model, exactly like a KVMem strata config.
+        """
+        engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
+        config_file: Path | None = None
+        name: str | None = None
+        try:
+            self._job_step(job, "paths", "running")
+            if not model.is_file():
+                raise BadRequest(f"模型路径不存在：{model}")
+            if model.suffix.lower() != ".ninfer":
+                raise BadRequest("NInfer 模型路径必须是 .ninfer 文件")
+            self._job_step(job, "paths", "ok", f"{model}；NInfer 单模型模式")
+
+            self._job_step(job, "metadata", "running")
+            name = slugify_model_id(job.get("name") or model.stem)
+            if self.registry.resolve(name) is not None:
+                raise BadRequest(f"模型 ID {name} 已存在")
+            job["name"] = name
+            template_path, template = ninfer_reference_config(engine_cfg)
+            if template is None or template_path is None:
+                raise BadRequest(
+                    "找不到 NInfer 模板配置；请在管理页把 NInfer 模板指向一份可用的 ninfer-*.json"
+                )
+            self._job_step(
+                job, "metadata", "ok",
+                f"ID {name}；模板 {template_path.name}",
+            )
+
+            self._job_step(job, "kv", "running")
+            self._job_step(
+                job, "kv", "ok",
+                "上下文、KVMem 与 KV 量化均继承模板；单模型模式无需 GGUF 元数据",
+            )
+
+            self._job_step(job, "config", "running")
+            params = job.get("params") or self.default_sampling(engine_id)
+            cleaned = self.params.replace(name, params, "ninfer")
+            if not cleaned:
+                cleaned = self.params.replace(name, self.default_sampling(engine_id), "ninfer")
+
+            models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+            config_dir = Path(str(models_cfg.get("dir") or ""))
+            config_file = config_dir / f"ninfer-{slugify_model_id(name).lower()}.json"
+            if config_file.exists():
+                raise BadRequest(f"配置已存在：{config_file}")
+            new_cfg = json.loads(json.dumps(template))
+            new_cfg["model_name"] = name
+            new_cfg["model_id"] = name
+            new_cfg["display_name"] = model.stem
+            new_cfg["aliases"] = []
+            new_cfg["model"] = str(model)
+            new_cfg.pop("artifact", None)
+            new_cfg["notes"] = f"NInfer 单模型模式；参数复制自 {template_path.name}"
+            if not new_cfg.get("exe"):
+                command = engine_cfg.get("command")
+                if isinstance(command, list) and command:
+                    new_cfg["exe"] = str(command[0])
+            if not new_cfg.get("cwd"):
+                new_cfg["cwd"] = str(engine_cfg.get("cwd") or "")
+            args = [str(item) for item in (new_cfg.get("args") or [])]
+            args = _config_arg_replace(args, "--model-id", name)
+            if "--model-id" not in args[:-1]:
+                args = ["--model-id", name, *args]
+            for router_flag in ("--host", "--port", "--api-key", "--models-dir", "--models-preset"):
+                args = _config_arg_remove(args, router_flag)
+            new_cfg["args"] = args
+            write_json_atomic(config_file, new_cfg)
+            job["config_path"] = str(config_file)
+            self._job_step(
+                job, "config", "ok",
+                f"已写入 {config_file}；参数复制自 {template_path.name}",
+            )
+
+            self._job_step(job, "start", "running", "正在停止当前引擎…")
+            self.ensure_no_async()
+            with self.cond:
+                engine_alive = bool(self.engine is not None and self.engine.alive())
+            if engine_alive:
+                self.stop_engine()
+            self.registry.reload()
+            entry = self.registry.resolve(name)
+            if entry is None:
+                raise EngineFailure("写入配置后注册表仍未发现该模型")
+            if not entry.available:
+                raise EngineFailure(f"引擎配置不可用：{entry.problem}")
+            self._job_step(job, "start", "running", "正在启动引擎并加载模型…")
+            self.preload(name)
+            self._job_step(
+                job, "start", "ok",
+                f"{entry.engine} 已加载 {entry.id}（引擎模型 {entry.engine_model}）",
+            )
+
+            if smoke:
+                self._job_step(job, "smoke", "running", "发送文本请求…")
+                text, text_tokens = self._smoke_completion(
+                    entry, [{"role": "user", "content": SMOKE_PROMPT}], job
+                )
+                self._job_step(
+                    job, "smoke", "ok",
+                    f"文本正常（prompt {text_tokens} tokens）：{text[:80]}",
+                )
+            else:
+                self._job_step(job, "smoke", "ok", "跳过（未勾选冒烟测试）")
+            self._job_finish(job, "ok")
+            self.log.info("NInfer model add %s (%s) finished", job["id"], name)
+        except Exception as exc:
+            message = exc.message if isinstance(exc, GatewayError) else str(exc)
+            self.log.exception("NInfer model add %s failed", job["id"])
+            with self.model_jobs_lock:
+                for step in job.get("steps") or []:
+                    if step.get("status") == "running":
+                        step["status"] = "fail"
+                        if message:
+                            step["detail"] = message[:300]
+                if not any(step.get("status") == "fail" for step in job.get("steps") or []):
+                    for step in job.get("steps") or []:
+                        if step.get("status") == "pending":
+                            step["status"] = "fail"
+                            break
+            self._rollback_model_add(job, "ninfer", name, None, config_file)
+            self._job_finish(job, "failed", message)
+        finally:
+            with self.model_jobs_lock:
+                job["status"] = job.get("status") if job.get("status") != "running" else "failed"
+                job["finished_at"] = job.get("finished_at") or iso_now()
+
     def _model_add_worker(
         self,
         job: dict[str, Any],
@@ -3357,6 +3778,9 @@ class Gateway:
         smoke: bool,
         vision_gpu: bool = False,
     ) -> None:
+        if kind == "ninfer_dir":
+            self._model_add_ninfer_worker(job, engine_id, model, smoke)
+            return
         engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
         short = self._short_kind(kind)
         preset_path: Path | None = None
@@ -3727,7 +4151,7 @@ class Gateway:
         entry = self.registry.resolve(name)
         if entry is None:
             raise ModelNotFound(f"model {name!r} is not in the registry")
-        if entry.source not in ("preset", "strata"):
+        if entry.source not in ("preset", "strata", "ninfer"):
             raise BadRequest("该模型由目录扫描发现，没有可删除的配置文件")
         removed: list[str] = []
         if entry.source == "preset":
@@ -3735,6 +4159,12 @@ class Gateway:
             if not preset_path.is_file() or not remove_llama_preset(preset_path, entry.engine_model):
                 raise BadRequest(f"models.ini 中找不到 [{entry.engine_model}] 段")
             removed.append(str(preset_path))
+        elif entry.source == "ninfer":
+            config_file = Path(str(entry.config_path or ""))
+            if not config_file.is_file():
+                raise BadRequest(f"配置文件不存在：{config_file}")
+            config_file.unlink()
+            removed.append(str(config_file))
         else:
             config_file = Path(str(entry.config_path or ""))
             if not config_file.is_file():
@@ -3800,8 +4230,12 @@ class Gateway:
             return None
         if not isinstance(raw, dict) or not raw:
             raise BadRequest("engine_params must be a non-empty object")
-        if entry.engine != "llama":
+        if entry.engine == "kvmem":
             raise BadRequest("KVMem 模型固定使用模型上下文与 q8 量化，不支持修改上下文或 K/V 精度")
+        if entry.engine == "ninfer":
+            raise BadRequest("NInfer 的上下文与 KV 参数由模型配置决定，不支持在控制台修改")
+        if entry.engine != "llama":
+            raise BadRequest(f"引擎 {entry.engine!r} 不支持修改上下文或 K/V 精度")
         preset_path = Path(str(entry.config_path or ""))
         if entry.source != "preset" or not preset_path.is_file():
             raise BadRequest("该模型由目录扫描发现，没有可编辑的 models.ini 预设段")
@@ -5051,16 +5485,37 @@ def setup_logging(base_dir: Path, config: dict[str, Any]) -> logging.Logger:
     return logger
 
 
+DEFAULT_CONFIG: dict[str, Any] = {
+    "listen": {"host": "0.0.0.0", "port": 8080},
+    "engines": {},
+    "timeouts": {"queue_s": 600},
+    "log_file": "logs/router.log",
+    "state_file": "state.json",
+    "pid_file": "router.pid",
+    "model_params_file": "model-params.json",
+    "api_keys_file": "api-keys.json",
+}
+
+
 def load_config(path: Path) -> dict[str, Any]:
+    """Load config.json, creating a minimal one on first start."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(path, DEFAULT_CONFIG)
+        print(f"created default config: {path}")
+        print("no engine configured yet; open the management page in the web UI to add one")
+        return json.loads(json.dumps(DEFAULT_CONFIG))
     data = read_json(path)
     if not isinstance(data, dict):
-        raise SystemExit(f"cannot read config: {path}")
+        raise SystemExit(f"cannot read config: {path} (expected a JSON object)")
     return data
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="llm-router gateway")
     parser.add_argument("--config", default=str(Path(__file__).resolve().parent / "config.json"))
+    parser.add_argument("--host", help="listen host override (not written to config.json)")
+    parser.add_argument("--port", type=int, help="listen port override (not written to config.json)")
     parser.add_argument("--check", action="store_true", help="scan and print models, then exit")
     args = parser.parse_args(argv)
     base_dir = Path(__file__).resolve().parent
@@ -5095,8 +5550,8 @@ def main(argv: list[str] | None = None) -> int:
     Handler.gateway = gateway
 
     listen = config.get("listen", {})
-    host = str(listen.get("host") or "0.0.0.0")
-    port = int(listen.get("port") or 8080)
+    host = str(args.host or listen.get("host") or "0.0.0.0")
+    port = int(args.port or listen.get("port") or 8080)
     try:
         server = ThreadingHTTPServer((host, port), Handler)
     except OSError as exc:
