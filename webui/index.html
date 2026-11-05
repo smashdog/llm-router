@@ -909,10 +909,10 @@
           <p class="params-group-title">引擎参数 <span id="add-engine-caption">llama.cpp · 上下文留空使用 GGUF 上限</span></p>
           <div class="params-grid engine-grid">
             <label>上下文长度 <span class="name">ctx-size</span>
-              <input id="add-context" type="number" step="1" min="256" placeholder="留空使用 GGUF 上限" /></label>
-            <label>K 量化精度 <span class="name">cache-type-k</span>
+              <input id="add-context" type="number" step="1" min="256" placeholder="留空读取 GGUF；缺失则必填" /></label>
+            <label id="add-cache-k-field">K 量化精度 <span class="name">cache-type-k</span>
               <select id="add-cache-k"></select></label>
-            <label>V 量化精度 <span class="name">cache-type-v</span>
+            <label id="add-cache-v-field">V 量化精度 <span class="name">cache-type-v</span>
               <select id="add-cache-v"></select></label>
             <label id="add-budget-field" hidden>KVMem 预算 <span class="name">kvmem-budget</span>
               <input id="add-budget" type="number" step="32" min="128" placeholder="32768" /></label>
@@ -2972,17 +2972,22 @@
       form.elements.repeat_last_n.value = "";
     }
     const llama = kind === "llama";
-    $("add-engine-params").hidden = !llama && !kvllama;
+    $("add-engine-params").hidden = !llama && !kvllama && !kv;
     $("add-budget-field").hidden = !kvllama;
     $("add-budget").value = kvllama ? "32768" : "";
+    $("add-cache-k-field").hidden = !(llama || kvllama);
+    $("add-cache-v-field").hidden = !(llama || kvllama);
     $("add-context").value = "";
+    $("add-context").placeholder = "留空读取 GGUF；缺失则必填";
     if (llama || kvllama) {
       fillCacheSelect($("add-cache-k"), engine.cache_types, "q8_0");
       fillCacheSelect($("add-cache-v"), engine.cache_types, "q8_0");
     }
     $("add-engine-caption").textContent = kvllama
-      ? "llama-kvmem-server · 预算留空用 32768，上下文留空使用 GGUF 上限"
-      : "llama.cpp · 上下文留空使用 GGUF 上限";
+      ? "llama-kvmem-server · 预算留空用 32768，上下文留空读取 GGUF"
+      : kv
+        ? "KVMem · 上下文留空读取 GGUF；GGUF 无该字段时必须填写"
+        : "llama.cpp · 上下文留空读取 GGUF";
     $("add-model-hint").textContent = ninfer
       ? ".ninfer 文件，必填"
       : kvllama || kv
@@ -3013,8 +3018,8 @@
       : kvllama
         ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；预算默认 32768 tokens，必须与生成预留一起落在上下文内；KV 精度默认 q8_0；其余参数可在“KVMem 引擎”页按需覆盖模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
         : kv
-          ? "KV 精度固定 q8_0（引擎不支持时省略）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数可在“KVMem 引擎”页按需覆盖 ornith 模板，采样默认来自 ornith。MTP 留空时按模型 GGUF 自动判断。"
-          : "上下文默认取 GGUF 上限，可填更小值；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
+          ? "KV 精度固定 q8_0（引擎不支持时省略）；上下文留空读取 GGUF 上限，GGUF 缺少该字段时必须手动填写；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数可在“KVMem 引擎”页按需覆盖 ornith 模板，采样默认来自 ornith。MTP 留空时按模型 GGUF 自动判断。"
+          : "上下文留空读取 GGUF 上限，可填更小值（GGUF 无该字段时必须填写）；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
   }
 
   function syncVisionDevice() {
@@ -3162,7 +3167,7 @@
       }
       body.vision = null;
     }
-    if (engineInfo.kind === "llama" || engineInfo.kind === "kvmem_llama") {
+    if (engineInfo.kind === "llama" || engineInfo.kind === "kvmem_llama" || engineInfo.kind === "kvmem") {
       const contextRaw = $("add-context").value.trim();
       if (contextRaw !== "") {
         const context = Number(contextRaw);
@@ -3172,6 +3177,8 @@
         }
         body.context_length = context;
       }
+    }
+    if (engineInfo.kind === "llama" || engineInfo.kind === "kvmem_llama") {
       body.cache_type_k = $("add-cache-k").value || "q8_0";
       body.cache_type_v = $("add-cache-v").value || "q8_0";
     }

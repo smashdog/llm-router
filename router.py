@@ -2218,6 +2218,21 @@ def gguf_model_info(
     return info or None
 
 
+def resolve_add_context(info: dict[str, Any] | None, requested: Any) -> tuple[int, str]:
+    """Pick the context used when adding a model: manual value, else GGUF metadata."""
+    gguf_context = int((info or {}).get("context_length") or 0)
+    if requested is None:
+        if gguf_context <= 0:
+            raise BadRequest("GGUF 中没有 context_length；请填写上下文长度")
+        return gguf_context, f"上下文 {gguf_context:,}（GGUF 上限）"
+    context = int(requested)
+    if gguf_context <= 0:
+        return context, f"上下文 {context:,}（手动指定；GGUF 无该字段）"
+    if context > gguf_context:
+        raise BadRequest(f"上下文长度 {context:,} 超过 GGUF 上限 {gguf_context:,}")
+    return context, f"上下文 {context:,}（GGUF 上限 {gguf_context:,}）"
+
+
 def slugify_model_id(stem: str) -> str:
     value = re.sub(r"[^A-Za-z0-9._-]+", "-", str(stem)).strip("-._")
     return value or "model"
@@ -6358,10 +6373,8 @@ class Gateway:
         for label, value in (("cache_type_k", cache_type_k), ("cache_type_v", cache_type_v)):
             if value is not None and not isinstance(value, str):
                 raise BadRequest(f"{label} must be a string")
-        if kind == "kvmem_dir" and (
-            context_length is not None or cache_type_k is not None or cache_type_v is not None
-        ):
-            raise BadRequest("KVMem 引擎固定使用模型上下文与 q8 量化，不能设置上下文或 K/V 精度")
+        if kind == "kvmem_dir" and (cache_type_k is not None or cache_type_v is not None):
+            raise BadRequest("KVMem 引擎 KV 精度固定 q8_0，不能设置 K/V 精度")
         if kind == "ninfer_dir":
             if vision_path:
                 raise BadRequest("NInfer 模型暂不支持在控制台配置视觉 mmproj")
@@ -6838,20 +6851,7 @@ class Gateway:
             info = gguf_model_info(model)
             if info is None:
                 raise BadRequest("无法读取 GGUF 头：文件不是有效的 GGUF 模型")
-            gguf_context = int(info.get("context_length") or 0)
-            if gguf_context <= 0:
-                raise BadRequest("GGUF 中没有 context_length；无法确定上下文上限")
-            requested_context = job.get("context_length")
-            if requested_context is None:
-                context = gguf_context
-                context_note = f"上下文 {context:,}（GGUF 上限）"
-            else:
-                context = int(requested_context)
-                if context > gguf_context:
-                    raise BadRequest(
-                        f"上下文长度 {context:,} 超过 GGUF 上限 {gguf_context:,}"
-                    )
-                context_note = f"上下文 {context:,}（GGUF 上限 {gguf_context:,}）"
+            context, context_note = resolve_add_context(info, job.get("context_length"))
             base_name = job.get("name") or (
                 model.parent.name if source_is_dir else model.stem
             )
@@ -7104,20 +7104,7 @@ class Gateway:
             info = gguf_model_info(model)
             if info is None:
                 raise BadRequest("无法读取 GGUF 头：文件不是有效的 GGUF 模型")
-            gguf_context = int(info.get("context_length") or 0)
-            if gguf_context <= 0:
-                raise BadRequest("GGUF 中没有 context_length；无法确定上下文上限")
-            requested_context = job.get("context_length")
-            if requested_context is None:
-                context = gguf_context
-                context_note = f"上下文 {context:,}（GGUF 上限）"
-            else:
-                context = int(requested_context)
-                if context > gguf_context:
-                    raise BadRequest(
-                        f"上下文长度 {context:,} 超过 GGUF 上限 {gguf_context:,}"
-                    )
-                context_note = f"上下文 {context:,}（GGUF 上限 {gguf_context:,}）"
+            context, context_note = resolve_add_context(info, job.get("context_length"))
             base_name = job.get("name") or (
                 model.parent.name if source_is_dir else model.stem
             )
