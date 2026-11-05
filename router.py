@@ -1232,8 +1232,8 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     ),
     _kv_engine_spec(
         "kvmem_mtp", "--kvmem-mtp", "启用 MTP", "spec", "boolean",
-        note="留空时按模型 GGUF 的 nextn_predict_layers 自动判断；没有内嵌草稿块会强制关闭"
-             "（window 1 / --no-draft / lookup 0）",
+        note="留空时按模型 GGUF 的内嵌 nextn 草稿块自动判断；缺少 nextn 张量（有些量化只保留"
+             "元数据）会强制关闭（window 1 / --no-draft / lookup 0）",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
@@ -1487,24 +1487,37 @@ def kvmem_mtp_support(
     values: dict[str, Any] | None = None,
     main_info: dict[str, Any] | None = None,
 ) -> bool | None:
-    """Does the model (or its explicit --draft-model) carry an MTP block?"""
+    """Does the model (or its explicit --draft-model) carry a runnable MTP block?
+
+    ``nextn_predict_layers`` alone is not enough: some quants (mradermacher i1,
+    for one) keep the metadata but drop the ``nextn.*`` tensors of the draft
+    block.  strata-poly then exits on ``--kvmem-mtp``, so mirror its check —
+    the block at ``block_count - nextn_predict_layers`` must have
+    ``nextn.eh_proj.weight`` and must not carry a token table or output matrix
+    of its own.
+    """
+    model_raw = _config_arg_value(args, "--model")
+    model = Path(str(model_raw)).expanduser() if model_raw else None
+    main = main_info
+    if main is None or "mtp_block" not in main:
+        main = gguf_model_info(model) if model is not None and model.is_file() else None
+    if main is None:
+        return None
+    block_count = int(main.get("block_count") or 0)
+    nextn = int(main.get("nextn_predict_layers") or 0)
+    # strata-poly reads the draft block from blk[block_count - nextn].
+    index = block_count - nextn
+
     draft_raw = (values or {}).get("kvmem_draft_model")
     if not draft_raw:
         draft_raw = _config_arg_value(args, "--draft-model")
     if draft_raw:
         draft = Path(str(draft_raw)).expanduser()
-        info = gguf_model_info(draft) if draft.is_file() else None
-        return bool(info and int(info.get("nextn_predict_layers") or 0) > 0)
-    if main_info is not None:
-        return int(main_info.get("nextn_predict_layers") or 0) > 0
-    model_raw = _config_arg_value(args, "--model")
-    if not model_raw:
-        return None
-    model = Path(str(model_raw)).expanduser()
-    info = gguf_model_info(model) if model.is_file() else None
-    if info is None:
-        return None
-    return int(info.get("nextn_predict_layers") or 0) > 0
+        if not draft.is_file():
+            return False
+        info = gguf_model_info(draft, mtp_index=index if index > 0 else None)
+        return bool(info and info.get("mtp_block"))
+    return bool(main.get("mtp_block"))
 
 
 def normalize_kvmem_poly_engine(values: dict[str, Any] | None) -> dict[str, Any]:
@@ -1608,7 +1621,7 @@ def kvmem_poly_apply_engine_values(
     if wanted_mtp:
         if mtp_supported is False:
             raise BadRequest(
-                "该模型 GGUF 没有内嵌 MTP 草稿块（nextn_predict_layers），"
+                "该模型 GGUF 没有可用的内嵌 MTP 草稿块（缺少 nextn.eh_proj.weight 等张量），"
                 "不能启用 --kvmem-mtp；请留空/关闭 MTP，或设置 --draft-model"
             )
         out = _config_switch_remove(out, "--no-draft")
@@ -2118,15 +2131,50 @@ def _gguf_read_value(fh: Any, value_type: int) -> Any:
     return None
 
 
-def gguf_model_info(path: Path) -> dict[str, Any] | None:
-    """Architecture, model name and maximum context length from a GGUF header."""
+def _gguf_has_mtp_block(fh: Any, n_tensors: int, index: int | None) -> bool:
+    """Does the tensor table hold a runnable nextn draft block at blk[index]?
+
+    Mirrors strata-poly's load_shape(): the block needs nextn.eh_proj.weight
+    and must not bring its own token table or output matrix, which the engine
+    does not run.  The caller leaves the stream at the tensor table.
+    """
+    if index is None or index < 0:
+        return False
+    prefix = f"blk.{index}.nextn."
+    probe = prefix + "eh_proj.weight"
+    own_table = (prefix + "embed_tokens.weight", prefix + "shared_head_head.weight")
+    found = False
+    for _ in range(n_tensors):
+        name_len = struct.unpack("<Q", fh.read(8))[0]
+        if name_len > 1 << 20:
+            raise ValueError(f"implausible GGUF tensor name length {name_len}")
+        name = fh.read(name_len).decode("utf-8", "replace")
+        n_dims = struct.unpack("<I", fh.read(4))[0]
+        if n_dims > 8:
+            raise ValueError(f"implausible GGUF tensor rank {n_dims}")
+        fh.seek(8 * n_dims + 4 + 8, os.SEEK_CUR)  # dims, type, offset
+        if name == probe:
+            found = True
+        elif name in own_table:
+            return False
+    return found
+
+
+def gguf_model_info(
+    path: Path, *, mtp_index: int | None = None
+) -> dict[str, Any] | None:
+    """Architecture, name, context, layer count and MTP block from a GGUF header.
+
+    ``mtp_index`` checks the draft block at an explicit layer index (a sidecar
+    draft file); by default it is the file's own ``block_count - nextn``.
+    """
     info: dict[str, Any] = {}
     try:
         with path.open("rb") as fh:
             if fh.read(4) != b"GGUF":
                 return None
             struct.unpack("<I", fh.read(4))[0]  # version
-            fh.read(8)  # tensor count
+            n_tensors = struct.unpack("<Q", fh.read(8))[0]
             n_kv = struct.unpack("<Q", fh.read(8))[0]
             for _ in range(n_kv):
                 key_len = struct.unpack("<Q", fh.read(8))[0]
@@ -2141,12 +2189,26 @@ def gguf_model_info(path: Path) -> dict[str, Any] | None:
                     value = _gguf_read_value(fh, value_type)
                     if isinstance(value, int) and value > 0:
                         info["context_length"] = value
+                elif lower == "block_count" or lower.endswith(".block_count"):
+                    value = _gguf_read_value(fh, value_type)
+                    if isinstance(value, int) and value > 0:
+                        info["block_count"] = value
                 elif lower.endswith(".nextn_predict_layers"):
                     value = _gguf_read_value(fh, value_type)
                     if isinstance(value, int) and value >= 0:
                         info["nextn_predict_layers"] = value
                 else:
                     _gguf_skip_value(fh, value_type)
+            if mtp_index is None:
+                block_count = int(info.get("block_count") or 0)
+                nextn = int(info.get("nextn_predict_layers") or 0)
+                # strata-poly only takes the embedded block when nextn == 1.
+                mtp_index = block_count - 1 if block_count > 0 and nextn == 1 else None
+            try:
+                info["mtp_block"] = _gguf_has_mtp_block(fh, n_tensors, mtp_index)
+            except (struct.error, ValueError):
+                # A broken tensor table must not cost the caller the metadata.
+                info["mtp_block"] = False
     except (OSError, struct.error, ValueError):
         return None
     return info or None
