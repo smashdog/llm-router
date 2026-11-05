@@ -458,12 +458,13 @@
   .params-grid.engine-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .params-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
   .params-grid label .name { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--faint); font-size: 10.5px; }
-  .params-grid input, .params-grid select {
+  .params-grid input, .params-grid select, .params-grid textarea {
     width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 8px;
     border: 1px solid var(--line); background: #0c121a; color: var(--text);
     font: inherit; font-size: 12.5px; outline: none;
   }
-  .params-grid input:focus, .params-grid select:focus { border-color: rgba(94,234,212,.45); }
+  .params-grid textarea { resize: vertical; min-height: 56px; line-height: 1.5; }
+  .params-grid input:focus, .params-grid select:focus, .params-grid textarea:focus { border-color: rgba(94,234,212,.45); }
   .params-group-title {
     margin: 16px 0 -4px; color: var(--muted); font-size: 12.5px; font-weight: 600;
   }
@@ -503,11 +504,13 @@
   .radio-card .desc { display: block; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
   .add-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-top: 14px; }
   .add-fields label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
-  .add-fields input {
-    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+  .add-fields input, .add-fields textarea {
+    width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
     background: #0c121a; color: var(--text); font: inherit; font-size: 12.5px; outline: none;
   }
-  .add-fields input:focus { border-color: rgba(94,234,212,.45); }
+  .add-fields textarea { resize: vertical; min-height: 78px; line-height: 1.5; }
+  #add-model { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .add-fields input:focus, .add-fields textarea:focus { border-color: rgba(94,234,212,.45); }
   .device-row {
     display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
     margin-top: 10px; color: var(--muted); font-size: 12.5px;
@@ -811,7 +814,7 @@
           <p class="params-group-title">模型名称 <span>只用于控制台与聊天 UI 显示，不改变模型 ID</span></p>
           <div class="params-grid">
             <label>显示名称 <span class="name">display-name</span>
-              <input id="params-name-input" type="text" spellcheck="false" maxlength="80" placeholder="" /></label>
+              <textarea id="params-name-input" rows="2" spellcheck="false" placeholder=""></textarea></label>
           </div>
           <p class="params-hint" id="params-name-hint">留空使用默认名称。</p>
         </div>
@@ -883,10 +886,10 @@
       <p>选择引擎并填写模型路径。网关会写入配置、启动引擎并做一次冒烟测试；不会复制或修改模型文件。</p>
       <div class="radio-row" id="add-engines" role="radiogroup" aria-label="模型类型"></div>
       <div class="add-fields">
-        <label>模型名称 <span class="name">选填，最多 80 字符</span>
-          <input id="add-name" type="text" spellcheck="false" maxlength="80" placeholder="如 Ornith 1.5；留空使用模型文件名" /></label>
+        <label>模型名称 <span class="name">选填</span>
+          <textarea id="add-name" rows="3" spellcheck="false" placeholder="如 Ornith 1.5；留空使用模型文件名"></textarea></label>
         <label>模型路径 <span class="name" id="add-model-hint">.gguf 文件，必填</span>
-          <input id="add-model" type="text" spellcheck="false" placeholder="/path/to/model.gguf" /></label>
+          <textarea id="add-model" rows="3" spellcheck="false" placeholder="/path/to/model.gguf"></textarea></label>
         <label id="add-vision-field">视觉路径 <span class="name">mmproj .gguf，选填</span>
           <input id="add-vision" type="text" spellcheck="false" placeholder="/path/to/mmproj.gguf（留空表示无视觉）" /></label>
       </div>
@@ -2788,11 +2791,6 @@
     }
     const body = { model: paramsModel, params: values };
     const displayName = $("params-name-input").value.trim();
-    if (displayName.length > 80) {
-      $("params-error").textContent = "模型名称最多 80 个字符。";
-      $("params-error").hidden = false;
-      return;
-    }
     body.display_name = displayName;
     if (model && model.engine === "llama" && model.source === "preset") {
       const contextRaw = $("params-context").value.trim();
@@ -3128,7 +3126,7 @@
     const form = $("add-form");
     const engine = selectedAddEngine();
     if (!engine) { showAddError("请选择模型类型。"); return; }
-    const model = $("add-model").value.trim();
+    const model = $("add-model").value.trim().replace(/[\r\n]+/g, "");
     if (!model) { showAddError("请填写模型路径。"); $("add-model").focus(); return; }
     const engineInfo = (state.manage && state.manage.engines && state.manage.engines[engine]) || {};
     const params = {};
@@ -3149,10 +3147,6 @@
       return;
     }
     const displayName = $("add-name").value.trim();
-    if (displayName.length > 80) {
-      showAddError("模型名称最多 80 个字符。");
-      return;
-    }
     const body = {
       engine,
       model,

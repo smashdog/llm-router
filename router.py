@@ -1920,8 +1920,6 @@ def cleanup_stale_state(state_path: Path, log: logging.Logger) -> None:
 # ---------------------------------------------------------------------------
 # models
 
-MAX_MODEL_DISPLAY_NAME = 80
-
 
 @dataclass
 class Model:
@@ -6271,12 +6269,9 @@ class Gateway:
         return data if isinstance(data, dict) else {}
 
     def set_model_display_name(self, model_id: str, display_name: str | None) -> bool:
-        """Persist a short display name for one model id; empty clears the override."""
-        name = str(display_name or "").strip()
-        if len(name) > MAX_MODEL_DISPLAY_NAME:
-            raise BadRequest(f"模型名称最多 {MAX_MODEL_DISPLAY_NAME} 个字符")
-        if any(ch in name for ch in "\r\n\t"):
-            raise BadRequest("模型名称不能包含换行或制表符")
+        """Persist a display name for one model id; empty clears the override."""
+        # Collapse whitespace so a multi-line textarea value stays a single title.
+        name = " ".join(str(display_name or "").split())
         with self._model_meta_lock:
             path = self._model_meta_path()
             data = self._read_model_meta()
@@ -6343,12 +6338,7 @@ class Gateway:
         display_name = payload.get("display_name")
         if display_name is not None and not isinstance(display_name, str):
             raise BadRequest("display_name must be a string")
-        display_name = (display_name or "").strip() or None
-        if display_name is not None:
-            if len(display_name) > MAX_MODEL_DISPLAY_NAME:
-                raise BadRequest(f"模型名称最多 {MAX_MODEL_DISPLAY_NAME} 个字符")
-            if any(ch in display_name for ch in "\r\n\t"):
-                raise BadRequest("模型名称不能包含换行或制表符")
+        display_name = " ".join((display_name or "").split()) or None
         smoke = payload.get("smoke", True) is not False
         vision_path = (vision or "").strip() or None
         vision_device = payload.get("vision_device", "cpu")
