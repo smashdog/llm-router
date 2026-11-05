@@ -5477,7 +5477,7 @@ class Gateway:
             ordered = list(self.download_jobs.values())
 
             def compact(job: dict[str, Any]) -> dict[str, Any]:
-                return {
+                data = {
                     key: job.get(key)
                     for key in (
                         "id", "source", "source_label", "repo_id", "dir",
@@ -5485,6 +5485,11 @@ class Gateway:
                         "started_at", "finished_at", "error",
                     )
                 }
+                if job.get("status") == "running":
+                    total = parse_int(job.get("total_bytes")) or 0
+                    done = self._downloaded_bytes(job)
+                    data["downloaded_bytes"] = min(done, total) if total else done
+                return data
 
             active_jobs = [
                 compact(job) for job in ordered if job.get("status") == "running"
@@ -6044,6 +6049,39 @@ class Gateway:
             job_id, job["status"], return_code, len(missing),
         )
 
+    def _downloaded_bytes(self, job: dict[str, Any]) -> int:
+        """Bytes already on disk for a download job.
+
+        hf downloads each file into ``.cache/huggingface/download`` as a
+        ``*.incomplete`` file and only moves it to the destination when it is
+        complete, so both locations have to be counted.
+        """
+        target = Path(str(job.get("target_dir") or ""))
+        if not str(target):
+            return 0
+        total = 0
+        for rel in job.get("files") or []:
+            try:
+                path = target / str(rel)
+                if path.is_file():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+        partial_dir = target / ".cache" / "huggingface" / "download"
+        try:
+            entries = list(partial_dir.iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
+            if not entry.name.endswith(".incomplete"):
+                continue
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+        return total
+
     def download_job_view(self, job_id: str) -> dict[str, Any] | None:
         with self.download_jobs_lock:
             job = self.download_jobs.get(job_id)
@@ -6051,6 +6089,9 @@ class Gateway:
                 return None
             data = json.loads(json.dumps(job))
         log_path = self.download_logs.get(job_id)
+        total = parse_int(data.get("total_bytes")) or 0
+        done = self._downloaded_bytes(data)
+        data["downloaded_bytes"] = min(done, total) if total else done
         data["log_tail"] = (
             self._redact_secrets(tail_file(log_path, 120)) if log_path else ""
         )

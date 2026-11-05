@@ -307,6 +307,20 @@
   .job-head strong { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
   .job-head .tag { margin-left: auto; }
   .job-meta { margin: 6px 0 0; color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
+  .job-progress { margin: 10px 0 0; }
+  .job-progress-track {
+    height: 8px; border-radius: 999px; overflow: hidden;
+    background: #080c12; border: 1px solid var(--line-soft);
+  }
+  .job-progress-track span {
+    display: block; height: 100%; width: 0;
+    background: linear-gradient(90deg, #facc15, #f59e0b);
+    transition: width .4s ease;
+  }
+  .job-progress-meta {
+    margin: 6px 0 0; color: var(--faint); font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
   .job-log {
     margin: 9px 0 0; max-height: 220px; overflow: auto; white-space: pre-wrap;
     font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -2140,12 +2154,22 @@
     if (job.started_at) meta.push(`开始 ${fmtTime(job.started_at)}`);
     if (job.finished_at) meta.push(`结束 ${fmtTime(job.finished_at)}`);
     if (job.error) meta.push(job.error);
+    const totalBytes = Number(job.total_bytes) || 0;
+    const downloaded = job.downloaded_bytes == null ? null : Number(job.downloaded_bytes) || 0;
+    const percent = totalBytes > 0 && downloaded != null
+      ? Math.max(0, Math.min(100, (downloaded / totalBytes) * 100))
+      : null;
+    const progress = percent == null ? "" : `<div class="job-progress">
+        <div class="job-progress-track"><span style="width:${percent.toFixed(1)}%"></span></div>
+        <p class="job-progress-meta">${fmtBytes(downloaded)} / ${fmtBytes(totalBytes)} · ${percent.toFixed(1)}%</p>
+      </div>`;
     return `<div class="download-job">
       <div class="job-head">
         <strong>${esc(job.source_label || job.source)} · ${esc(job.repo_id || job.id)}</strong>
         <span class="tag ${status[1]}">${esc(status[0])}</span>
       </div>
       <p class="job-meta">${esc(meta.join(" · "))}</p>
+      ${progress}
       ${job.log_tail ? `<pre class="job-log">${esc(job.log_tail)}</pre>` : ""}
       <div class="job-actions">
         <span class="hint">任务 ${esc(job.id)}</span>
