@@ -1920,6 +1920,8 @@ def cleanup_stale_state(state_path: Path, log: logging.Logger) -> None:
 # ---------------------------------------------------------------------------
 # models
 
+MAX_MODEL_DISPLAY_NAME = 80
+
 
 @dataclass
 class Model:
@@ -1928,6 +1930,8 @@ class Model:
     engine_model: str
     config_path: str | None = None
     display_name: str = ""
+    display_name_default: str = ""
+    display_name_custom: bool = False
     aliases: list[str] = field(default_factory=list)
     context_length: int | None = None
     cache_type_k: str | None = None
@@ -1986,6 +1990,8 @@ class Model:
             "engine": self.engine,
             "engine_model": self.engine_model,
             "display_name": self.display_name or self.id,
+            "display_name_default": self.display_name_default or self.display_name or self.id,
+            "display_name_custom": self.display_name_custom,
             "aliases": list(self.aliases),
             "context_length": self.context_length,
             "cache_type_k": self.cache_type_k,
@@ -2965,6 +2971,28 @@ class Registry:
         self.loaded_at = 0.0
         self.reload()
 
+    def meta_path(self) -> Path:
+        """Sidecar file holding gateway-side display names (model id -> name)."""
+        return resolve_path(
+            self.base_dir, self.config.get("model_meta_file") or "model-meta.json"
+        )
+
+    def _apply_display_names(self, models: list[Model]) -> None:
+        data = read_json(self.meta_path(), {})
+        entries = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(entries, dict):
+            return
+        for model in models:
+            entry = entries.get(model.id)
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("display_name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            model.display_name_default = model.display_name or model.id
+            model.display_name = name.strip()
+            model.display_name_custom = True
+
     def reload(self) -> list[Model]:
         all_models: list[Model] = []
         for engine_id, engine_cfg in self.config.get("engines", {}).items():
@@ -2990,6 +3018,7 @@ class Registry:
                 if model.id not in model.aliases:
                     model.aliases.append(model.id)
                 model.id = f"{model.engine}/{model.id}"
+        self._apply_display_names(all_models)
         by_id = {m.id: m for m in all_models}
         by_alias: dict[str, Model | None] = {}
         for model in all_models:
@@ -4352,6 +4381,7 @@ class Gateway:
         self.config_path = config_path or (base_dir / "config.json")
         self._config_lock = threading.Lock()
         self._auth_lock = threading.Lock()
+        self._model_meta_lock = threading.Lock()
         self.timeouts = config.get("timeouts", {})
         self.cond = threading.Condition(threading.RLock())
         self.switching = False
@@ -6190,6 +6220,66 @@ class Gateway:
             job["error"] = error
             job["finished_at"] = iso_now()
 
+    def _model_meta_path(self) -> Path:
+        return resolve_path(
+            self.base_dir, self.config.get("model_meta_file") or "model-meta.json"
+        )
+
+    def _read_model_meta(self) -> dict[str, Any]:
+        data = read_json(self._model_meta_path(), {})
+        return data if isinstance(data, dict) else {}
+
+    def set_model_display_name(self, model_id: str, display_name: str | None) -> bool:
+        """Persist a short display name for one model id; empty clears the override."""
+        name = str(display_name or "").strip()
+        if len(name) > MAX_MODEL_DISPLAY_NAME:
+            raise BadRequest(f"模型名称最多 {MAX_MODEL_DISPLAY_NAME} 个字符")
+        if any(ch in name for ch in "\r\n\t"):
+            raise BadRequest("模型名称不能包含换行或制表符")
+        with self._model_meta_lock:
+            path = self._model_meta_path()
+            data = self._read_model_meta()
+            models = data.get("models")
+            models = dict(models) if isinstance(models, dict) else {}
+            entry = models.get(model_id)
+            current = entry.get("display_name") if isinstance(entry, dict) else None
+            if (name or None) == (current or None):
+                return False
+            if name:
+                merged = dict(entry) if isinstance(entry, dict) else {}
+                merged["display_name"] = name
+                models[model_id] = merged
+            elif isinstance(entry, dict):
+                merged = dict(entry)
+                merged.pop("display_name", None)
+                if merged:
+                    models[model_id] = merged
+                else:
+                    models.pop(model_id, None)
+            else:
+                models.pop(model_id, None)
+            data["version"] = 1
+            data["models"] = models
+            if models:
+                write_json_atomic(path, data)
+            else:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    self.log.warning("cannot remove empty model meta file %s", path)
+            return True
+
+    def _apply_job_display_name(self, job: dict[str, Any], name: str | None) -> None:
+        display_name = job.get("display_name")
+        if not display_name or not name:
+            return
+        try:
+            self.set_model_display_name(name, str(display_name))
+        except Exception:
+            self.log.exception("cannot save display name of model %s", name)
+
     def start_model_add(self, payload: dict[str, Any]) -> dict[str, Any]:
         engine_id = str(payload.get("engine") or "").strip()
         if not engine_id or engine_id not in self.config.get("engines", {}):
@@ -6209,6 +6299,15 @@ class Gateway:
         name = payload.get("name")
         if name is not None and not isinstance(name, str):
             raise BadRequest("name must be a string")
+        display_name = payload.get("display_name")
+        if display_name is not None and not isinstance(display_name, str):
+            raise BadRequest("display_name must be a string")
+        display_name = (display_name or "").strip() or None
+        if display_name is not None:
+            if len(display_name) > MAX_MODEL_DISPLAY_NAME:
+                raise BadRequest(f"模型名称最多 {MAX_MODEL_DISPLAY_NAME} 个字符")
+            if any(ch in display_name for ch in "\r\n\t"):
+                raise BadRequest("模型名称不能包含换行或制表符")
         smoke = payload.get("smoke", True) is not False
         vision_path = (vision or "").strip() or None
         vision_device = payload.get("vision_device", "cpu")
@@ -6300,6 +6399,7 @@ class Gateway:
             "kvmem_budget": kvmem_budget,
             "engine_params": engine_values,
             "name": (name or "").strip() or None,
+            "display_name": display_name,
             "params": params,
             "smoke": smoke,
             "status": "running",
@@ -6507,6 +6607,7 @@ class Gateway:
                 f"已写入 {config_file}；参数复制自 {template_path.name}",
             )
 
+            self._apply_job_display_name(job, name)
             self._job_step(job, "start", "running", "正在停止当前引擎…")
             self.ensure_no_async()
             with self.cond:
@@ -6846,6 +6947,7 @@ class Gateway:
                 ),
             )
 
+            self._apply_job_display_name(job, name)
             self._job_step(job, "start", "running", "正在停止当前引擎…")
             self.ensure_no_async()
             with self.cond:
@@ -7179,6 +7281,7 @@ class Gateway:
                     ),
                 )
 
+            self._apply_job_display_name(job, name)
             self._job_step(job, "start", "running", "正在停止当前引擎…")
             self.ensure_no_async()
             with self.cond:
@@ -7333,6 +7436,11 @@ class Gateway:
                     removed.append(str(config_file))
             except OSError:
                 self.log.exception("cannot roll back configuration of failed model %s", name)
+            if job.get("display_name"):
+                try:
+                    self.set_model_display_name(name, None)
+                except Exception:
+                    self.log.exception("cannot remove display name of failed model %s", name)
         job["rollback"] = bool(removed)
         job["removed"] = removed
         try:
@@ -7380,6 +7488,10 @@ class Gateway:
                 meta.pop(entry.id, None)
                 write_json_atomic(meta_path, meta)
                 removed.append(str(meta_path))
+        try:
+            self.set_model_display_name(entry.id, None)
+        except Exception:
+            self.log.exception("cannot remove display name of deleted model %s", entry.id)
         with self.cond:
             active = self.active
             target = self.target
@@ -7529,8 +7641,11 @@ class Gateway:
         values: dict[str, Any],
         engine_params: Any = None,
         vision_device: Any = None,
+        display_name: Any = None,
     ) -> dict[str, Any]:
-        """Validate and persist sampling, llama preset and vision parameters."""
+        """Validate and persist sampling, llama preset, vision and display-name parameters."""
+        if display_name is not None and not isinstance(display_name, str):
+            raise BadRequest("display_name must be a string")
         cleaned = normalize_sampling(values, entry.engine)
         engine_values = self._engine_params_values(entry, engine_params)
         vision_gpu = self._vision_device_value(entry, vision_device)
@@ -7539,11 +7654,24 @@ class Gateway:
             "params": saved,
             "engine_params": None,
             "vision_gpu": entry.vision_gpu,
+            "display_name": entry.display_name or entry.id,
+            "display_name_custom": entry.display_name_custom,
             "restarting": False,
             "restart_pending": False,
         }
         changed_vision = vision_gpu is not None and vision_gpu != entry.vision_gpu
-        if not engine_values and not changed_vision:
+        engine_changed = bool(engine_values) or changed_vision
+        if not engine_changed:
+            # A display name only affects the gateway's model list, never the engine.
+            if display_name is None:
+                return result
+            changed_name = self.set_model_display_name(entry.id, display_name)
+            if changed_name:
+                self.registry.reload()
+                fresh = self.registry.resolve(entry.id)
+                if fresh is not None:
+                    result["display_name"] = fresh.display_name or fresh.id
+                    result["display_name_custom"] = fresh.display_name_custom
             return result
         if entry.engine == "llama":
             preset_path = Path(str(entry.config_path or ""))
@@ -7626,8 +7754,13 @@ class Gateway:
             write_json_atomic(config_path, config)
             if fresh_values is not None:
                 result["engine_params"] = fresh_values
+        if display_name is not None:
+            self.set_model_display_name(entry.id, display_name)
         self.registry.reload()
         fresh = self.registry.resolve(entry.id)
+        if fresh is not None:
+            result["display_name"] = fresh.display_name or fresh.id
+            result["display_name_custom"] = fresh.display_name_custom
         if entry.engine == "llama":
             result["engine_params"] = {
                 "context_length": fresh.context_length if fresh else None,
@@ -8533,7 +8666,11 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(values, dict):
                 raise BadRequest("params must be an object")
             result = self.gateway.save_model_params(
-                entry, values, payload.get("engine_params"), payload.get("vision_device")
+                entry,
+                values,
+                payload.get("engine_params"),
+                payload.get("vision_device"),
+                payload.get("display_name"),
             )
             self._json(
                 200,
@@ -8931,6 +9068,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "state_file": "state.json",
     "pid_file": "router.pid",
     "model_params_file": "model-params.json",
+    "model_meta_file": "model-meta.json",
     "api_keys_file": "api-keys.json",
     "proxy": {
         "enabled": False,

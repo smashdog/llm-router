@@ -793,6 +793,14 @@
         <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="params-kvmem-tab" hidden>KVMem 引擎<span class="tab-count" id="params-kvmem-count"></span></button>
       </div>
       <div class="params-panel" data-param-panel="basic">
+        <div id="params-name">
+          <p class="params-group-title">模型名称 <span>只用于控制台与聊天 UI 显示，不改变模型 ID</span></p>
+          <div class="params-grid">
+            <label>显示名称 <span class="name">display-name</span>
+              <input id="params-name-input" type="text" spellcheck="false" maxlength="80" placeholder="" /></label>
+          </div>
+          <p class="params-hint" id="params-name-hint">留空使用默认名称。</p>
+        </div>
         <div id="params-engine">
           <p class="params-group-title">引擎参数 <span id="params-engine-caption">llama.cpp · 保存后自动重启引擎生效</span></p>
           <div class="params-grid engine-grid">
@@ -861,6 +869,8 @@
       <p>选择引擎并填写模型路径。网关会写入配置、启动引擎并做一次冒烟测试；不会复制或修改模型文件。</p>
       <div class="radio-row" id="add-engines" role="radiogroup" aria-label="模型类型"></div>
       <div class="add-fields">
+        <label>模型名称 <span class="name">选填，最多 80 字符</span>
+          <input id="add-name" type="text" spellcheck="false" maxlength="80" placeholder="如 Ornith 1.5；留空使用模型文件名" /></label>
         <label>模型路径 <span class="name" id="add-model-hint">.gguf 文件，必填</span>
           <input id="add-model" type="text" spellcheck="false" placeholder="/path/to/model.gguf" /></label>
         <label id="add-vision-field">视觉路径 <span class="name">mmproj .gguf，选填</span>
@@ -2633,6 +2643,11 @@
     const dialog = $("params-dialog");
     const form = $("params-form");
     form.reset();
+    const nameInput = $("params-name-input");
+    const defaultName = model.display_name_default || model.name || model.id;
+    nameInput.value = model.display_name_custom ? (model.display_name || "") : "";
+    nameInput.placeholder = defaultName;
+    $("params-name-hint").textContent = `留空使用默认名称：${defaultName}`;
     const params = model.params || {};
     const engineParams = model.engine_params || {};
     for (const key of PARAM_FIELDS) {
@@ -2748,6 +2763,13 @@
       return;
     }
     const body = { model: paramsModel, params: values };
+    const displayName = $("params-name-input").value.trim();
+    if (displayName.length > 80) {
+      $("params-error").textContent = "模型名称最多 80 个字符。";
+      $("params-error").hidden = false;
+      return;
+    }
+    body.display_name = displayName;
     if (model && model.engine === "llama" && model.source === "preset") {
       const contextRaw = $("params-context").value.trim();
       const engineParams = {};
@@ -2849,6 +2871,11 @@
           model.engine_params = payload.engine_params;
         }
         if (payload.vision_gpu != null) model.vision_gpu = payload.vision_gpu;
+        if (payload.display_name) {
+          model.display_name = payload.display_name;
+          model.name = payload.display_name;
+          model.display_name_custom = payload.display_name_custom === true;
+        }
       }
       $("params-dialog").close();
       if (payload.restarting) {
@@ -3097,9 +3124,15 @@
       showAddError(error.message);
       return;
     }
+    const displayName = $("add-name").value.trim();
+    if (displayName.length > 80) {
+      showAddError("模型名称最多 80 个字符。");
+      return;
+    }
     const body = {
       engine,
       model,
+      display_name: displayName || null,
       vision: $("add-vision").value.trim() || null,
       vision_device: (document.querySelector('input[name="add-vision-device"]:checked') || {}).value || "cpu",
       smoke: $("add-smoke").checked,

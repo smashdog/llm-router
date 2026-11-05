@@ -10,6 +10,7 @@ tmp/
 config.json
 config.json.bak*
 model-params.json
+model-meta.json
 models.ini
 models/
 models-kvmem-llama/
