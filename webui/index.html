@@ -509,7 +509,8 @@
     background: #0c121a; color: var(--text); font: inherit; font-size: 12.5px; outline: none;
   }
   .add-fields textarea { resize: vertical; min-height: 78px; line-height: 1.5; }
-  #add-model { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .add-fields .add-name-field, .add-fields .span-all { grid-column: 1 / -1; }
+  #add-model, #add-vision { font-family: ui-monospace, Menlo, Consolas, monospace; }
   .add-fields input:focus, .add-fields textarea:focus { border-color: rgba(94,234,212,.45); }
   .device-row {
     display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
@@ -886,12 +887,12 @@
       <p>选择引擎并填写模型路径。网关会写入配置、启动引擎并做一次冒烟测试；不会复制或修改模型文件。</p>
       <div class="radio-row" id="add-engines" role="radiogroup" aria-label="模型类型"></div>
       <div class="add-fields">
-        <label>模型名称 <span class="name">选填</span>
-          <textarea id="add-name" rows="3" spellcheck="false" placeholder="如 Ornith 1.5；留空使用模型文件名"></textarea></label>
-        <label>模型路径 <span class="name" id="add-model-hint">.gguf 文件，必填</span>
+        <label id="add-model-field">模型路径 <span class="name" id="add-model-hint">.gguf 文件，必填</span>
           <textarea id="add-model" rows="3" spellcheck="false" placeholder="/path/to/model.gguf"></textarea></label>
         <label id="add-vision-field">视觉路径 <span class="name">mmproj .gguf，选填</span>
-          <input id="add-vision" type="text" spellcheck="false" placeholder="/path/to/mmproj.gguf（留空表示无视觉）" /></label>
+          <textarea id="add-vision" rows="3" spellcheck="false" placeholder="/path/to/mmproj.gguf（留空表示无视觉）"></textarea></label>
+        <label class="add-name-field">模型名称 <span class="name">选填</span>
+          <input id="add-name" type="text" spellcheck="false" placeholder="如 Ornith 1.5；留空使用模型文件名" /></label>
       </div>
       <div class="device-row disabled" id="add-vision-device" role="radiogroup" aria-label="视觉运行位置">
         <span class="device-label">视觉运行位置</span>
@@ -2999,6 +3000,7 @@
         ? "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf"
         : "/path/to/model.gguf";
     $("add-vision-field").hidden = ninfer;
+    $("add-model-field").classList.toggle("span-all", ninfer);
     $("add-vision-device").hidden = ninfer;
     $("add-vision-hint").hidden = ninfer;
     if (ninfer) $("add-vision").value = "";
