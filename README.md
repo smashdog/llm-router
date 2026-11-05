@@ -23,9 +23,9 @@
 
 ## 内置聊天 UI
 
-`webui/llama-ui` 是 llama.cpp `tools/ui` 的完整（full-ui）静态构建，源码版本记录在 `ui-build.json` 的 `llama_commit` 与 `entry_files` 中。本地修改只有一处：`src/lib/constants/settings.constants.ts` 里 API Key 的帮助文字改为网关说明（仅保存在浏览器、服务端密钥在控制台 `/` 修改）。构建输出保持相对资源路径，不写死 `base href`，因此 `ui_path` 可以改成任意子路径。
+`webui/llama-ui` 是 llama.cpp `tools/ui` 的完整（full-ui）静态构建，源码版本记录在 `ui-build.json` 的 `llama_commit` 与 `entry_files` 中。本地修改有两处：`src/lib/constants/settings.constants.ts` 里 API Key 的帮助文字改为网关说明（仅保存在浏览器、服务端密钥在控制台 `/` 修改）；发送消息前等待正在处理（文件读取、音频转码）的附件完成，避免附件落在发送之后、跟到下一条消息。构建输出保持相对资源路径，不写死 `base href`，因此 `ui_path` 可以改成任意子路径。
 
-更新步骤：在 llama.cpp 的 `tools/ui` 执行 `npm ci && npm run build`，把 `dist/` 复制到 `webui/llama-ui`，重新应用上述帮助文字，并用新源码的入口哈希更新 `ui-build.json`。网关会在 `/props` 中固定返回 `ui: true`，不要依赖引擎的 `--no-ui` 值。
+更新步骤：在 llama.cpp 的 `tools/ui` 执行 `npm ci && npm run build`，把 `dist/` 复制到 `webui/llama-ui`，重新应用上述本地修改，并用新源码的入口哈希更新 `ui-build.json`。网关会在 `/props` 中固定返回 `ui: true`，不要依赖引擎的 `--no-ui` 值。
 
 ## 接口
 

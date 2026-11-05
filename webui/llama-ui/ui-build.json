@@ -3,7 +3,8 @@
   "mode": "full-ui",
   "console_chat_protocol": null,
   "local_changes": [
-    "src/lib/constants/settings.constants.ts: gateway-specific API key help text"
+    "src/lib/constants/settings.constants.ts: gateway-specific API key help text",
+    "ChatScreen/ChatScreenForm + use-chat-screen-file-upload: wait for in-flight attachment processing before sending"
   ],
   "entry_files": {
     "src/.gitignore": "b39decba66e79d9a8ab7a89e6e3c7942c0c92f125e9ece55c45020b877170638",
@@ -123,11 +124,11 @@
     "src/lib/components/app/chat/ChatMessages/ChatMessageStatistics/ChatMessageStatisticsBadge.svelte": "bd730415efa86583e0d13851ec6dcbb6b1e389111464b66ebe138cd7846eb574",
     "src/lib/components/app/chat/ChatMessages/ChatMessages.svelte": "c52c87fcbb6b3d32be49547369dda41561de537e720044df258011dd9ca8ee84",
     "src/lib/components/app/chat/ChatMessages/LazyChatMessage.svelte": "df38820e557f9fae65a23a37e4c7a3b6545b57366f3d8eae2d7e6b98e9e31909",
-    "src/lib/components/app/chat/ChatScreen/ChatScreen.svelte": "d030018eaaf9bdf5b6743bcfa49e20b3e150e1f89f379c67eb6f6d5317fdecfa",
+    "src/lib/components/app/chat/ChatScreen/ChatScreen.svelte": "eec6680b93363c359e8ee124256ca2c516a455443f931dca6887afba48a064d3",
     "src/lib/components/app/chat/ChatScreen/ChatScreenActionScrollDown.svelte": "0dc4276c45c3925061e2cdb37597d38d641fc2ba976fa98f423e9335175a0491",
     "src/lib/components/app/chat/ChatScreen/ChatScreenDialogsAndAlerts.svelte": "58c39f1829673800a5b0e75d70a21f4fc296a40fc574fee2cc94473c29bd7d89",
     "src/lib/components/app/chat/ChatScreen/ChatScreenDragOverlay.svelte": "c7bcbd637a2df26e7fc1b2ecf5e111525a17388de01115932b94fb15b01c9336",
-    "src/lib/components/app/chat/ChatScreen/ChatScreenForm.svelte": "6eebbac4f93396cd0dd6bffa5e78ac3b7a25208f1088769dc5d95449d03f6feb",
+    "src/lib/components/app/chat/ChatScreen/ChatScreenForm.svelte": "944fa8e2d4d697a1408edc850b5ae57b985fdaf5a9eb66961cc2d30fce3033b8",
     "src/lib/components/app/chat/ChatScreen/ChatScreenGreeting.svelte": "faf6b28a85c9533f673520190026b75b2fa5da0c4c5cf628f0cc3900d3cba7bd",
     "src/lib/components/app/chat/ChatScreen/ChatScreenServerError.svelte": "d6f2698112ebe764d47d89ad543494b6bed32280d1eee403790aa20c73276672",
     "src/lib/components/app/chat/ChatScreen/ChatScreenStreamResumeStatus.svelte": "bb9935e2db9ea324bd3431cee50150b57f2fa104997441b1f65f14d9bfed2f99",
@@ -519,7 +520,7 @@
     "src/lib/constants/routes.constants.ts": "593ff3fdfe118c49ee2fe24cff1c75f40d34c5bf26f3cf18f0d25f4d6fc1aec7",
     "src/lib/constants/sandbox.constants.ts": "e0a1d826cfc43eb6705d02cb8b6e0f9625b3884f8403df06b811cffcb0e1b659",
     "src/lib/constants/settings-keys.constants.ts": "406017e53e4775c54f1ee6cca263e6402fdd4b5be2612afb49915ff3bc528d04",
-    "src/lib/constants/settings.constants.ts": "53918326e9216dc5f0cd9917f5f75600953a40b4d1a567a3c835bd18765c7b90",
+    "src/lib/constants/settings.constants.ts": "96679c6fa12d7b8ac482178e8f19c87b7a0279712b8f4c091b17583ef24f6c84",
     "src/lib/constants/special-characters.constants.ts": "aad2af752d8cd68ad722f814b1ae6023743ff37e7f65fe80f9f9cb2708cf8bbc",
     "src/lib/constants/storage.constants.ts": "6b458cf0c3edb32482ca80f99d43ceff84373ff4e3b56db4a6b90a384d41e1bc",
     "src/lib/constants/stream.constants.ts": "c0e35045ffc7968707712b5d9ad9a9941c262882de8787ec0d136a04f305927c",
@@ -560,7 +561,7 @@
     "src/lib/hooks/use-chat-message-edit-context.svelte.ts": "aaebc6e0655db651a6b9036db74245f30937c1e58ab3d12f8be40d343817c512",
     "src/lib/hooks/use-chat-screen-active-model.svelte.ts": "e60dffff2d5a2424d29ef1ce09756811f8e1ac9ad0775ed4d8ea197da6dc3e99",
     "src/lib/hooks/use-chat-screen-drag-and-drop.svelte.ts": "060a16641c662a24d0d6cec067e0511068334b02f2cc59a867c88227d4da7809",
-    "src/lib/hooks/use-chat-screen-file-upload.svelte.ts": "791350ef72a5bfc5887949e362c7252b73dfe8310e27be3fb702fd28350f27db",
+    "src/lib/hooks/use-chat-screen-file-upload.svelte.ts": "0f7ddcfdf2ea66e83334303bf503558d036283b0b73660bcc48ce6f0f4557037",
     "src/lib/hooks/use-context-gauge.svelte.ts": "37e516d2d3ad2db2177ffd3e642dbf6a977cd5773c90f3babcfb4d5868447a72",
     "src/lib/hooks/use-debounced-search.svelte.ts": "677763907aeaf442c2844b180925d0f8c7350d2853e96f2e1ffe4a8680c06010",
     "src/lib/hooks/use-draft-messages.svelte.ts": "02ae25b06feba622b38dd79999a577e4565dd26de595d003c396483a3bed6d93",
