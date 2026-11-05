@@ -1137,19 +1137,28 @@
     return values;
   }
 
-  function kvmemEngineSpecs() {
-    const schema = state.manage && state.manage.kvmem_engine_schema;
+  function kvmemEngineSpecs(kind) {
+    const manage = state.manage || {};
+    const schema = kind === "kvmem"
+      ? manage.kvmem_poly_engine_schema
+      : manage.kvmem_engine_schema;
     return Array.isArray(schema) ? schema : [];
   }
 
-  function kvmemUiSpecs() {
-    // The budget stays in the basic panel; the tab holds everything else.
-    return kvmemEngineSpecs().filter((spec) => spec.key !== "kvmem_budget");
+  function kvmemUiSpecs(kind) {
+    const specs = kvmemEngineSpecs(kind);
+    // KVMem+llama.cpp keeps the budget in the basic panel; polystrata has no
+    // basic engine panel, so its budget lives in the tab with everything else.
+    return kind === "kvmem" ? specs : specs.filter((spec) => spec.key !== "kvmem_budget");
   }
 
-  function renderKvmemEngine(host, countHost, hintHost, values) {
+  function kvmemEngineTitle(kind) {
+    return kind === "kvmem" ? "strata-poly" : "llama-kvmem-server";
+  }
+
+  function renderKvmemEngine(host, countHost, hintHost, values, kind) {
     if (!host) return;
-    const specs = kvmemUiSpecs();
+    const specs = kvmemUiSpecs(kind);
     const groups = [];
     for (const spec of specs) {
       let group = groups[groups.length - 1];
@@ -1160,7 +1169,7 @@
       group.specs.push(spec);
     }
     host.innerHTML = groups.length ? groups.map((group) => `
-      <p class="params-group-title">${esc(group.label)} <span>llama-kvmem-server</span></p>
+      <p class="params-group-title">${esc(group.label)} <span>${esc(kvmemEngineTitle(kind))}</span></p>
       <div class="params-grid">
         ${group.specs.map((spec) => `
           <label>${esc(spec.label)} <span class="name">${esc(spec.flag)}</span>
@@ -1176,15 +1185,17 @@
     if (countHost) countHost.textContent = specs.length ? String(specs.length) : "";
     if (hintHost) {
       hintHost.textContent = specs.length
-        ? "这些是 llama-kvmem-server 的进程级参数，写入模型自己的 kvmem-llama-*.json；留空表示沿用模板或引擎默认。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。"
+        ? (kind === "kvmem"
+            ? "这些是 strata-poly 的进程级参数，写入模型自己的 strata-*.json；留空表示沿用模板或引擎默认。MTP 留空时按模型 GGUF 的 nextn_predict_layers 自动判断。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。"
+            : "这些是 llama-kvmem-server 的进程级参数，写入模型自己的 kvmem-llama-*.json；留空表示沿用模板或引擎默认。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。")
         : "";
     }
   }
 
-  function readKvmemEngine(host) {
+  function readKvmemEngine(host, kind) {
     const values = {};
     if (!host) return values;
-    for (const spec of kvmemUiSpecs()) {
+    for (const spec of kvmemUiSpecs(kind)) {
       const input = host.querySelector(`[data-param-key="${spec.key}"]`);
       if (!input) continue;
       const raw = String(input.value || "").trim();
@@ -2632,15 +2643,15 @@
       $("params-more"), $("params-more-count"), $("params-more-hint"),
       model.engine, params,
     );
-    renderKvmemEngine(
-      $("params-kvmem"), $("params-kvmem-count"), $("params-kvmem-hint"),
-      engineParams,
-    );
-    showParamTab(dialog, "basic");
     const kv = model.engine === "kvmem";
     const ninfer = model.engine === "ninfer";
     const kvllama = model.engine === "kvmem_llama";
-    setKvmemTabVisible(dialog, kvllama);
+    renderKvmemEngine(
+      $("params-kvmem"), $("params-kvmem-count"), $("params-kvmem-hint"),
+      engineParams, kv ? "kvmem" : "kvmem_llama",
+    );
+    showParamTab(dialog, "basic");
+    setKvmemTabVisible(dialog, kvllama || kv);
     const editable = model.engine === "llama" && model.source === "preset";
     const visionEditable = !ninfer && (
       editable
@@ -2704,7 +2715,7 @@
       : kvllama
         ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；上下文与 K/V 精度在新增模型时固定，KVMem 预算在“基本参数”，其余引擎参数在“KVMem 引擎”页，保存后自动重启引擎。"
         : kv
-          ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文与 KV 精度固定为模型上限和 q8_0。"
+          ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文固定为模型上限，KV 精度固定 q8_0；KVMem 引擎参数在“KVMem 引擎”页，保存后自动重启引擎。"
           : editable
             ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。修改上下文或 KV 精度会自动重启引擎。"
             : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。该模型由目录扫描发现，无法修改上下文与 KV 精度。";
@@ -2758,7 +2769,7 @@
     if (model && model.engine === "kvmem_llama") {
       let kvParams;
       try {
-        kvParams = readKvmemEngine($("params-kvmem"));
+        kvParams = readKvmemEngine($("params-kvmem"), "kvmem_llama");
       } catch (error) {
         $("params-error").textContent = error.message;
         $("params-error").hidden = false;
@@ -2775,6 +2786,29 @@
           return;
         }
         kvParams.kvmem_budget = budget;
+      }
+      const diskMib = Number(kvParams.kvmem_disk_mib || 0);
+      const diskPath = String(kvParams.kvmem_disk_path || "").trim();
+      if (diskMib > 0 && !diskPath) {
+        $("params-error").textContent = "SSD 额度大于 0 时必须填写 SSD 目录。";
+        $("params-error").hidden = false;
+        return;
+      }
+      if (diskPath && !(diskMib > 0)) {
+        $("params-error").textContent = "填写 SSD 目录时必须同时把 SSD 额度设为大于 0。";
+        $("params-error").hidden = false;
+        return;
+      }
+      body.engine_params = kvParams;
+    }
+    if (model && model.engine === "kvmem") {
+      let kvParams;
+      try {
+        kvParams = readKvmemEngine($("params-kvmem"), "kvmem");
+      } catch (error) {
+        $("params-error").textContent = error.message;
+        $("params-error").hidden = false;
+        return;
       }
       const diskMib = Number(kvParams.kvmem_disk_mib || 0);
       const diskPath = String(kvParams.kvmem_disk_path || "").trim();
@@ -2811,7 +2845,7 @@
           model.cache_type_k = payload.engine_params.cache_type_k;
           model.cache_type_v = payload.engine_params.cache_type_v;
         }
-        if (model.engine === "kvmem_llama" && payload.engine_params) {
+        if ((model.engine === "kvmem_llama" || model.engine === "kvmem") && payload.engine_params) {
           model.engine_params = payload.engine_params;
         }
         if (payload.vision_gpu != null) model.vision_gpu = payload.vision_gpu;
@@ -2902,12 +2936,12 @@
       : "llama.cpp · 上下文留空使用 GGUF 上限";
     $("add-model-hint").textContent = ninfer
       ? ".ninfer 文件，必填"
-      : kvllama
+      : kvllama || kv
         ? "模型目录或 .gguf 文件，必填（目录自动挑选最大 GGUF 与 mmproj）"
         : ".gguf 文件，必填";
     $("add-model").placeholder = ninfer
       ? "/path/to/model.ninfer"
-      : kvllama
+      : kvllama || kv
         ? "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf"
         : "/path/to/model.gguf";
     $("add-vision-field").hidden = ninfer;
@@ -2915,9 +2949,11 @@
     $("add-vision-hint").hidden = ninfer;
     if (ninfer) $("add-vision").value = "";
     syncVisionDevice();
-    setKvmemTabVisible($("add-dialog"), kvllama);
+    setKvmemTabVisible($("add-dialog"), kvllama || kv);
     renderKvmemEngine(
-      $("add-kvmem"), $("add-kvmem-count"), $("add-kvmem-hint"), null,
+      $("add-kvmem"), $("add-kvmem-count"), $("add-kvmem-hint"),
+      kv && !kvllama ? engine.engine_params || null : null,
+      kv ? "kvmem" : "kvmem_llama",
     );
     renderMoreParams(
       $("add-more"), $("add-more-count"), $("add-more-hint"),
@@ -2928,7 +2964,7 @@
       : kvllama
         ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；预算默认 32768 tokens，必须与生成预留一起落在上下文内；KV 精度默认 q8_0；其余参数可在“KVMem 引擎”页按需覆盖模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
         : kv
-          ? "KV 精度固定 q8_0（--kv q8_0；引擎不支持时省略，使用默认）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数复制 ornith 模板，采样默认来自 ornith。"
+          ? "KV 精度固定 q8_0（引擎不支持时省略）；上下文取 GGUF 上限；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数可在“KVMem 引擎”页按需覆盖 ornith 模板，采样默认来自 ornith。MTP 留空时按模型 GGUF 自动判断。"
           : "上下文默认取 GGUF 上限，可填更小值；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
   }
 
@@ -3091,7 +3127,7 @@
     if (engineInfo.kind === "kvmem_llama") {
       let engineParams;
       try {
-        engineParams = readKvmemEngine($("add-kvmem"));
+        engineParams = readKvmemEngine($("add-kvmem"), "kvmem_llama");
       } catch (error) {
         showAddError(error.message);
         return;
@@ -3114,6 +3150,30 @@
           return;
         }
         body.kvmem_budget = budget;
+      }
+      const diskMib = Number(advanced.kvmem_disk_mib || 0);
+      const diskPath = String(advanced.kvmem_disk_path || "").trim();
+      if (diskMib > 0 && !diskPath) {
+        showAddError("SSD 额度大于 0 时必须填写 SSD 目录。");
+        return;
+      }
+      if (diskPath && !(diskMib > 0)) {
+        showAddError("填写 SSD 目录时必须同时把 SSD 额度设为大于 0。");
+        return;
+      }
+      if (Object.keys(advanced).length) body.engine_params = advanced;
+    }
+    if (engineInfo.kind === "kvmem") {
+      let engineParams;
+      try {
+        engineParams = readKvmemEngine($("add-kvmem"), "kvmem");
+      } catch (error) {
+        showAddError(error.message);
+        return;
+      }
+      const advanced = {};
+      for (const [key, value] of Object.entries(engineParams)) {
+        if (value !== null) advanced[key] = value;
       }
       const diskMib = Number(advanced.kvmem_disk_mib || 0);
       const diskPath = String(advanced.kvmem_disk_path || "").trim();

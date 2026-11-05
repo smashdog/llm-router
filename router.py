@@ -731,6 +731,7 @@ def _kv_engine_spec(
     choices: list[dict[str, Any]] | None = None,
     note: str | None = None,
     off_flag: str | None = None,
+    group_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     flag_list = (flags,) if isinstance(flags, str) else tuple(flags)
     spec: dict[str, Any] = {
@@ -739,7 +740,7 @@ def _kv_engine_spec(
         "flags": list(flag_list),
         "label": label,
         "group": group,
-        "group_label": KVMEM_LLAMA_GROUP_LABELS[group],
+        "group_label": (group_labels or KVMEM_LLAMA_GROUP_LABELS)[group],
         "type": kind,
         "default": default,
     }
@@ -1059,6 +1060,195 @@ def kvmem_llama_engine_schema() -> list[dict[str, Any]]:
     return [dict(spec) for spec in KVMEM_LLAMA_ENGINE_SPECS]
 
 
+# ---------------------------------------------------------------------------
+# KVMem (polystrata) per-model engine options
+#
+# These are the process-level flags strata-poly accepts directly (see
+# strata-poly --help).  The router copies the Ornith template for each new
+# model, so leaving a field empty keeps the template value.
+
+POLYSTRATA_ENGINE_GROUPS = (
+    ("core", "预算与保留"),
+    ("retrieval", "检索与选择"),
+    ("memory", "内存与存储"),
+    ("runtime", "运行与显存"),
+    ("spec", "推测解码（MTP）"),
+)
+POLYSTRATA_GROUP_LABELS = dict(POLYSTRATA_ENGINE_GROUPS)
+
+POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
+    _kv_engine_spec(
+        "kvmem_budget", "--kvmem-budget", "KV 预算 B", "core",
+        default=32768, low=128, step=32,
+        note="历史选择预算；与生成预留一起必须落在上下文内，并可按 block 对齐",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_gen_reserve", "--kvmem-gen-reserve", "生成预留 R", "core",
+        default=4096, low=32, step=32,
+        note="可复用追加空间，不是单次输出上限；prompt batch 不得超过它",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_block_tokens", "--kvmem-block-tokens", "检索块 block", "core", "enum",
+        default="32",
+        choices=[
+            {"value": "32", "label": "32"},
+            {"value": "64", "label": "64"},
+        ],
+        note="固定为 32 或 64；B/R/sink/recent 都要对齐",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_host_mib", "--kvmem-host-mib", "Host KV 预算（MiB）", "core",
+        default=4096, low=1, step=1,
+        note="共享原生 K/V 的 RAM 硬预算",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_sink_tokens", "--kvmem-sink-tokens", "开头保留 sink", "core",
+        low=0, step=32,
+        note="按 block 对齐；与 recent 一起不超过预算 B",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_recent_tokens", "--kvmem-recent-tokens", "最近保留", "core",
+        low=32, step=32,
+        note="始终保留的最新后缀；至少一个 block 且按 block 对齐",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_query_scorer", "--kvmem-query-scorer", "Query 打分", "retrieval", "enum",
+        default="page-softmax",
+        choices=[
+            {"value": "page-softmax", "label": "page-softmax"},
+            {"value": "meanq-cosine", "label": "meanq-cosine"},
+        ],
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_score_agg", "--kvmem-score-agg", "分数聚合", "retrieval", "enum",
+        choices=[
+            {"value": "mean", "label": "mean"},
+            {"value": "max", "label": "max"},
+        ],
+        note="留空由引擎按打分器选择：page-softmax 用 mean，meanq-cosine 用 max",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_graph_alpha", "--kvmem-graph-alpha", "图传播 alpha", "retrieval", "number",
+        default=0.2, low=0.0, high=1.0, step=0.01,
+        note="留空时 page-softmax 用 0.2，meanq-cosine 用 0",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_query_max_tokens", "--kvmem-query-max-tokens", "Query 上限", "retrieval",
+        default=8192, low=1, high=8192, step=1,
+        note="检索 query 截取的最大 token 数",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_query_replay_max_tokens", "--kvmem-query-replay-max-tokens",
+        "Query 重放上限", "retrieval",
+        default=65536, low=1, high=65536, step=1,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_lrfu", "--kvmem-lrfu", "历史加权 LRFU", "retrieval", "boolean",
+        off_flag="--no-kvmem-lrfu",
+        note="留空跟随模板；page-softmax 模板默认关闭",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_lrfu_lambda", "--kvmem-lrfu-lambda", "LRFU 衰减 λ", "retrieval", "number",
+        default=0.5, low=0.0, high=1.0, step=0.01,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_lrfu_top_frac", "--kvmem-lrfu-top-frac", "LRFU 命中比例", "retrieval",
+        "number", default=0.9, low=0.0, high=1.0, step=0.01, low_exclusive=True,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_history_reuse", "--kvmem-history-reuse", "历史前缀复用", "retrieval", "boolean",
+        note="多会话（sessions > 1）和 SSD 下沉需要它",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_verify_transfers", "--kvmem-verify-transfers", "传输校验", "retrieval", "boolean",
+        note="原生字节校验与诊断，会轻微拖慢",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_disk_mib", "--kvmem-disk-mib", "SSD 额度（MiB）", "memory",
+        default=0, low=0, step=256,
+        note="0 关闭；大于 0 时必须同时设置 SSD 目录",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_disk_path", "--kvmem-disk-path", "SSD 目录", "memory",
+        "string", note="进程内原生 K/V 下沉目录；额度为 0 时不要设置",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_sessions", "--kvmem-sessions", "保留会话数", "memory",
+        default=4, low=1, high=16, step=1,
+        note="1..16；大于 1 时需要历史前缀复用和非零预算",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "prompt_batch", "--prompt-batch", "Prompt batch", "runtime",
+        default=1024, low=1, step=1,
+        note="每批读入的提示 token 数；不得超过生成预留 R",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "prompt_cache", "--prompt-cache", "Prompt 检查点", "runtime",
+        default=0, low=0, step=1,
+        note="每个检查点约占 150 MB RAM；0 表示关闭",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "conversation_cache_mib", "--conversation-cache-mib", "会话缓存（MiB）", "runtime",
+        default=0, low=0, step=256,
+        note="停放非活动会话的 RAM；0 关闭",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "conversation_cache_slots", "--conversation-cache-slots", "会话缓存槽位", "runtime",
+        default=0, low=0, step=1,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "threads", ("-t", "--threads"), "CPU 线程", "runtime",
+        low=-1, step=1, note="≤0 使用全部可用线程",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "vram_reserve_mib", "--vram-reserve-mib", "VRAM 预留（MiB）", "runtime",
+        default=256, low=256, high=8192, step=64,
+        note="专家缓存之外留给系统的显存，至少 256",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_mtp", "--kvmem-mtp", "启用 MTP", "spec", "boolean",
+        note="留空时按模型 GGUF 的 nextn_predict_layers 自动判断；没有内嵌草稿块会强制关闭"
+             "（window 1 / --no-draft / lookup 0）",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_draft_model", "--draft-model", "MTP 草稿模型", "spec", "string",
+        note="主模型没有内嵌 nextn 块时，可从同一模型的另一份 GGUF 读取草稿块",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+]
+POLYSTRATA_ENGINE_BY_KEY = {spec["key"]: spec for spec in POLYSTRATA_ENGINE_SPECS}
+
+
+def kvmem_poly_engine_schema() -> list[dict[str, Any]]:
+    return [dict(spec) for spec in POLYSTRATA_ENGINE_SPECS]
+
+
 def _config_switch_present(args: list[str], flag: str) -> bool:
     return any(
         str(item) == flag or str(item).startswith(flag + "=")
@@ -1256,6 +1446,276 @@ def kvmem_llama_validate_disk(args: list[str]) -> None:
         cpu_gb = 0.0
     if cpu_gb > 0 and mib > 0:
         raise BadRequest("旧 --kvmem-cpu-gb 与 SSD 分层不能同时启用")
+
+
+def kvmem_poly_engine_values(args: list[str]) -> dict[str, Any]:
+    """Read the whitelisted strata-poly KVMem options from one model's args."""
+    tokens = [str(item) for item in args]
+    out: dict[str, Any] = {}
+    for spec in POLYSTRATA_ENGINE_SPECS:
+        key = spec["key"]
+        if spec["type"] == "boolean":
+            if any(_config_switch_present(tokens, flag) for flag in spec["flags"]):
+                out[key] = True
+            elif spec.get("off_flag") and _config_switch_present(tokens, spec["off_flag"]):
+                out[key] = False
+            elif key == "kvmem_lrfu":
+                continue
+            else:
+                out[key] = False
+            continue
+        raw = _config_arg_value(tokens, *spec["flags"])
+        if raw is None:
+            continue
+        if spec["type"] == "integer":
+            value = parse_int(raw)
+            if value is None:
+                continue
+        elif spec["type"] == "number":
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+        else:
+            value = raw
+        out[key] = value
+    return out
+
+
+def kvmem_mtp_support(
+    args: list[str],
+    values: dict[str, Any] | None = None,
+    main_info: dict[str, Any] | None = None,
+) -> bool | None:
+    """Does the model (or its explicit --draft-model) carry an MTP block?"""
+    draft_raw = (values or {}).get("kvmem_draft_model")
+    if not draft_raw:
+        draft_raw = _config_arg_value(args, "--draft-model")
+    if draft_raw:
+        draft = Path(str(draft_raw)).expanduser()
+        info = gguf_model_info(draft) if draft.is_file() else None
+        return bool(info and int(info.get("nextn_predict_layers") or 0) > 0)
+    if main_info is not None:
+        return int(main_info.get("nextn_predict_layers") or 0) > 0
+    model_raw = _config_arg_value(args, "--model")
+    if not model_raw:
+        return None
+    model = Path(str(model_raw)).expanduser()
+    info = gguf_model_info(model) if model.is_file() else None
+    if info is None:
+        return None
+    return int(info.get("nextn_predict_layers") or 0) > 0
+
+
+def normalize_kvmem_poly_engine(values: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate strata-poly KVMem options; None explicitly clears a flag."""
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise BadRequest("engine_params must be an object")
+    out: dict[str, Any] = {}
+    for key, raw in values.items():
+        spec = POLYSTRATA_ENGINE_BY_KEY.get(key)
+        if spec is None:
+            raise BadRequest(f"unknown engine parameter {key!r}")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            out[key] = None
+            continue
+        kind = spec["type"]
+        if kind == "boolean":
+            if isinstance(raw, bool):
+                value = raw
+            elif raw in (0, 1):
+                value = bool(raw)
+            else:
+                raise BadRequest(f"{key}: expected true or false")
+        elif kind in ("enum", "string"):
+            if not isinstance(raw, str):
+                raise BadRequest(f"{key}: expected a string")
+            value = raw.strip()
+            if len(value) > 4096:
+                raise BadRequest(f"{key}: too long")
+            choices = spec.get("choices")
+            if choices and value not in [choice["value"] for choice in choices]:
+                allowed = ", ".join(str(choice["value"]) for choice in choices)
+                raise BadRequest(f"{key}: expected one of {allowed}")
+        else:
+            value = _sampling_number(
+                key, raw, spec.get("min", 0), spec.get("max"),
+                integer=(kind == "integer"),
+                low_exclusive=bool(spec.get("exclusive_min")),
+            )
+        out[key] = value
+    return out
+
+
+def kvmem_poly_apply_engine_values(
+    args: list[str],
+    values: dict[str, Any],
+    *,
+    mtp_supported: bool | None = None,
+) -> list[str]:
+    """Write validated strata-poly options into a model's CLI args.
+
+    MTP is special: strata-poly refuses ``--kvmem-mtp`` when the GGUF has no
+    embedded nextn draft block, and its KVMem path requires
+    ``--window 1 --no-draft --lookup 0`` when MTP is off.  Auto mode (the
+    field is not sent) therefore turns MTP off and normalizes those flags.
+    """
+    out = [str(item) for item in args]
+    requested_mtp = values.get("kvmem_mtp")
+    explicit_mtp = "kvmem_mtp" in values and requested_mtp is not None
+    for key, value in values.items():
+        if key == "kvmem_mtp":
+            continue
+        spec = POLYSTRATA_ENGINE_BY_KEY.get(key)
+        if spec is None:
+            continue
+        flags = spec["flags"]
+        off_flag = spec.get("off_flag")
+        if spec["type"] == "boolean":
+            if value is True:
+                for flag in flags:
+                    out = _config_switch_remove(out, flag)
+                if off_flag:
+                    out = _config_switch_remove(out, off_flag)
+                out.append(spec["flag"])
+            elif value is False:
+                for flag in flags:
+                    out = _config_switch_remove(out, flag)
+                if off_flag:
+                    out = _config_switch_remove(out, off_flag)
+                    out.append(off_flag)
+            else:
+                for flag in flags:
+                    out = _config_switch_remove(out, flag)
+                if off_flag:
+                    out = _config_switch_remove(out, off_flag)
+            continue
+        if value is None:
+            for flag in flags:
+                out = _config_arg_remove(out, flag)
+            continue
+        for flag in flags[1:]:
+            out = _config_arg_remove(out, flag)
+        out = _config_arg_set(out, spec["flag"], value)
+
+    current_mtp = _config_switch_present(out, "--kvmem-mtp")
+    if explicit_mtp:
+        wanted_mtp = bool(requested_mtp)
+    else:
+        wanted_mtp = current_mtp and mtp_supported is not False
+    if wanted_mtp:
+        if mtp_supported is False:
+            raise BadRequest(
+                "该模型 GGUF 没有内嵌 MTP 草稿块（nextn_predict_layers），"
+                "不能启用 --kvmem-mtp；请留空/关闭 MTP，或设置 --draft-model"
+            )
+        out = _config_switch_remove(out, "--no-draft")
+        window = parse_int(_config_arg_value(out, "--window"))
+        if window is None or window < 2 or window > 4:
+            out = _config_arg_set(out, "--window", 2)
+        out = _config_arg_set(out, "--lookup", 0)
+        if not _config_switch_present(out, "--kvmem-mtp"):
+            out.append("--kvmem-mtp")
+    else:
+        out = _config_switch_remove(out, "--kvmem-mtp")
+        if not _config_switch_present(out, "--no-draft"):
+            out.append("--no-draft")
+        out = _config_arg_set(out, "--window", 1)
+        out = _config_arg_set(out, "--lookup", 0)
+    return out
+
+
+def kvmem_poly_fit_tuning(
+    args: list[str],
+    context: int,
+    *,
+    explicit_budget: bool = False,
+    explicit_reserve: bool = False,
+) -> list[str]:
+    """Make B + R fit the context, aligning them to the KVMem block."""
+    block = parse_int(_config_arg_value(args, "--kvmem-block-tokens")) or 32
+    if block not in (32, 64):
+        raise BadRequest("KVMem block 只能是 32 或 64")
+    budget = parse_int(_config_arg_value(args, "--kvmem-budget")) or 32768
+    reserve = parse_int(_config_arg_value(args, "--kvmem-gen-reserve"))
+    reserve = reserve if reserve is not None else 4096
+    budget = max(128, budget // block * block)
+    reserve = max(block, reserve // block * block)
+    if budget + reserve <= context:
+        out = _config_arg_set(args, "--kvmem-budget", budget)
+        out = _config_arg_set(out, "--kvmem-gen-reserve", reserve)
+        batch = parse_int(_config_arg_value(out, "--prompt-batch")) or 1024
+        if batch > reserve:
+            out = _config_arg_set(out, "--prompt-batch", max(1, reserve))
+        return out
+    if explicit_budget or explicit_reserve:
+        raise BadRequest(
+            f"KVMem 预算 {budget:,} + 生成预留 {reserve:,} 超过上下文 {context:,}"
+        )
+    reserve = max(block, min(reserve, (context // 4) // block * block))
+    budget = max(128, min(budget, ((context - reserve) // block) * block))
+    if budget + reserve > context or budget < 128:
+        raise BadRequest(
+            f"上下文 {context:,} 太小，无法容纳 KVMem 预算与生成预留"
+            f"（block {block:,}，预留 {reserve:,}）"
+        )
+    out = _config_arg_set(args, "--kvmem-budget", budget)
+    out = _config_arg_set(out, "--kvmem-gen-reserve", reserve)
+    batch = parse_int(_config_arg_value(out, "--prompt-batch")) or 1024
+    if batch > reserve:
+        out = _config_arg_set(out, "--prompt-batch", max(1, reserve))
+    return out
+
+
+def kvmem_poly_validate_args(args: list[str], context: int) -> None:
+    """Reject option combinations strata-poly would only fail on after loading."""
+    block = parse_int(_config_arg_value(args, "--kvmem-block-tokens")) or 32
+    if block not in (32, 64):
+        raise BadRequest("KVMem block 只能是 32 或 64")
+    budget = parse_int(_config_arg_value(args, "--kvmem-budget")) or 32768
+    reserve = parse_int(_config_arg_value(args, "--kvmem-gen-reserve")) or 4096
+    if budget < 128 or budget % block != 0:
+        raise BadRequest(f"KVMem 预算 {budget:,} 必须 ≥128 且按 block {block} 对齐")
+    if reserve < block or reserve % block != 0:
+        raise BadRequest(f"生成预留 {reserve:,} 必须至少一个 block 且按 block {block} 对齐")
+    if budget + reserve > context:
+        raise BadRequest(f"KVMem 预算 {budget:,} + 生成预留 {reserve:,} 超过上下文 {context:,}")
+    batch = parse_int(_config_arg_value(args, "--prompt-batch")) or 1024
+    if batch <= 0 or batch > reserve:
+        raise BadRequest(f"prompt batch {batch:,} 必须在 1 到生成预留 {reserve:,} 之间")
+    sink = parse_int(_config_arg_value(args, "--kvmem-sink-tokens")) or 0
+    recent = parse_int(_config_arg_value(args, "--kvmem-recent-tokens")) or block
+    if sink % block != 0 or recent < block or recent % block != 0:
+        raise BadRequest(f"KVMem sink/recent 必须按 block {block} 对齐，recent 至少一个 block")
+    if sink + recent > budget:
+        raise BadRequest(f"KVMem sink {sink:,} + recent {recent:,} 超过预算 {budget:,}")
+    host_mib = parse_int(_config_arg_value(args, "--kvmem-host-mib")) or 4096
+    if host_mib <= 0:
+        raise BadRequest("KVMem Host 预算必须大于 0")
+    kvmem_llama_validate_disk(args)
+    sessions = parse_int(_config_arg_value(args, "--kvmem-sessions")) or 1
+    if sessions < 1 or sessions > 16:
+        raise BadRequest("KVMem sessions 必须在 1..16")
+    history = _config_switch_present(args, "--kvmem-history-reuse")
+    if sessions > 1 and not (history and budget > 0):
+        raise BadRequest("KVMem sessions > 1 需要历史前缀复用和非零预算")
+    if history and budget <= 0:
+        raise BadRequest("KVMem 历史前缀复用需要非零预算")
+    mtp = _config_switch_present(args, "--kvmem-mtp")
+    window = parse_int(_config_arg_value(args, "--window")) or 0
+    draft = _config_switch_present(args, "--no-draft")
+    lookup = parse_int(_config_arg_value(args, "--lookup")) or 0
+    if mtp:
+        if budget <= 0:
+            raise BadRequest("KVMem MTP 需要非零预算")
+        if window < 2 or window > 4 or draft:
+            raise BadRequest("KVMem MTP 需要 --window 2..4 且不能带 --no-draft")
+    elif window != 1 or not draft:
+        raise BadRequest("KVMem 关闭 MTP 时需要 --window 1 --no-draft")
+    if lookup != 0:
+        raise BadRequest("KVMem 不接受非零 --lookup")
 
 
 class SamplingStore:
@@ -1681,6 +2141,10 @@ def gguf_model_info(path: Path) -> dict[str, Any] | None:
                     value = _gguf_read_value(fh, value_type)
                     if isinstance(value, int) and value > 0:
                         info["context_length"] = value
+                elif lower.endswith(".nextn_predict_layers"):
+                    value = _gguf_read_value(fh, value_type)
+                    if isinstance(value, int) and value >= 0:
+                        info["nextn_predict_layers"] = value
                 else:
                     _gguf_skip_value(fh, value_type)
     except (OSError, struct.error, ValueError):
@@ -5572,14 +6036,21 @@ class Gateway:
                 }
             elif kind == "kvmem_dir":
                 template_path, template = kvmem_reference_config(engine_cfg)
+                template_args = [str(item) for item in (template or {}).get("args") or []]
+                template_params = kvmem_poly_engine_values(template_args)
+                # MTP depends on the model's own GGUF, so the add dialog starts
+                # blank there and the worker decides from nextn_predict_layers.
+                template_params.pop("kvmem_mtp", None)
+                template_params.pop("kvmem_draft_model", None)
                 out[engine_id] = {
                     "engine": engine_id,
                     "kind": "kvmem",
                     "label": "KVMem（polystrata）",
                     "models_dir": models_cfg.get("dir"),
                     "template": str(template_path) if template_path else None,
+                    "engine_params": template_params,
                     "defaults": {
-                        "args": list((template or {}).get("args") or []),
+                        "args": template_args,
                         "vision_gpu": False,
                     },
                     "default_params": self.default_sampling(engine_id),
@@ -5628,6 +6099,7 @@ class Gateway:
                 for kind in ("llama", "kvmem", "ninfer", "kvmem_llama")
             },
             "kvmem_engine_schema": kvmem_llama_engine_schema(),
+            "kvmem_poly_engine_schema": kvmem_poly_engine_schema(),
             "smoke_image": str(self.smoke_image_path),
             "engine_defaults": {
                 "kv": {"method": "q8_0/q8_0 (k8v8)", "fallback": "engine default"},
@@ -5721,9 +6193,11 @@ class Gateway:
                 if isinstance(existing, int) and existing != kvmem_budget:
                     raise BadRequest("kvmem_budget 与 engine_params.kvmem_budget 不一致")
                 engine_values["kvmem_budget"] = kvmem_budget
+        elif kind == "kvmem_dir":
+            engine_values = normalize_kvmem_poly_engine(raw_engine_params)
         else:
             if raw_engine_params:
-                raise BadRequest("只有 KVMem + llama.cpp 接受 engine_params")
+                raise BadRequest("只有 KVMem 引擎接受 engine_params")
             engine_values = {}
         if kind == "kvmem_llama_dir":
             for label, value in (("cache_type_k", cache_type_k), ("cache_type_v", cache_type_v)):
@@ -5749,6 +6223,8 @@ class Gateway:
             )
         if kind == "kvmem_llama_dir":
             steps[2]["label"] = "选择 KV 精度与 KVMem 参数"
+        if kind == "kvmem_dir":
+            steps[2]["label"] = "选择 KV 精度、MTP 与 KVMem 参数"
         job = {
             "id": uuid.uuid4().hex[:12],
             "kind": "add",
@@ -5830,38 +6306,6 @@ class Gateway:
         if not tokenizer.is_dir() or not (tokenizer / "vocab.json").is_file():
             raise BadRequest(f"tokenizer 导出结果无效：{tokenizer}")
         return tokenizer
-
-    @staticmethod
-    def _fit_kvmem_budget(args: list[str], context: int) -> list[str]:
-        """Keep the template's KVMem tuning when it fits the model's context."""
-        def number(flag: str, default: int) -> int:
-            if flag in args[:-1]:
-                try:
-                    return int(args[args.index(flag) + 1])
-                except (TypeError, ValueError):
-                    return default
-            return default
-
-        block = max(1, number("--kvmem-block-tokens", 64))
-        budget = max(128, number("--kvmem-budget", 32768))
-        reserve = max(block, number("--kvmem-gen-reserve", 4096))
-        if budget + reserve <= context:
-            return args
-        reserve = max(block, min(reserve, (context // 4) // block * block))
-        budget = max(128, min(budget, ((context - reserve) // block) * block))
-        if budget + reserve > context:
-            reserve = max(block, (context // 5) // block * block)
-            budget = max(128, ((context - reserve) // block) * block)
-        if budget + reserve > context or budget < 128:
-            raise BadRequest(
-                f"上下文 {context} 太小，无法容纳 KVMem 的预算与生成保留（至少需要 5 × block）"
-            )
-        args = _config_arg_replace(args, "--kvmem-budget", budget)
-        args = _config_arg_replace(args, "--kvmem-gen-reserve", reserve)
-        prefill = number("--prompt-batch", 512)
-        if prefill > reserve:
-            args = _config_arg_replace(args, "--prompt-batch", max(block, reserve))
-        return args
 
     @staticmethod
     def _cache_startup_error(message: str) -> bool:
@@ -6424,7 +6868,27 @@ class Gateway:
         cache_override = False
         try:
             self._job_step(job, "paths", "running")
-            if not model.is_file():
+            source_is_dir = short == "kvmem" and model.is_dir()
+            auto_vision = None
+            if source_is_dir:
+                picked_model, auto_vision = self._pick_gguf_files(model)
+                if picked_model is None:
+                    raise BadRequest(f"目录中没有 .gguf 模型文件：{model}")
+                model = picked_model
+                if vision is None and auto_vision is not None:
+                    vision = auto_vision
+                    with self.model_jobs_lock:
+                        if not any(
+                            step.get("key") == "vision_smoke"
+                            for step in job.get("steps") or []
+                        ):
+                            job.setdefault("steps", []).append({
+                                "key": "vision_smoke",
+                                "label": "视觉冒烟测试",
+                                "status": "pending",
+                                "detail": "",
+                            })
+            elif not model.is_file():
                 raise BadRequest(f"模型路径不存在：{model}")
             if model.suffix.lower() != ".gguf":
                 raise BadRequest("模型路径不是 .gguf 文件")
@@ -6433,9 +6897,12 @@ class Gateway:
                     raise BadRequest(f"视觉路径不存在：{vision}")
                 if vision.suffix.lower() != ".gguf":
                     raise BadRequest("视觉路径不是 .gguf 文件")
+            path_note = (
+                f"目录 {model.parent} → {model.name}" if source_is_dir else str(model)
+            )
             self._job_step(
                 job, "paths", "ok",
-                str(model) + (f"；视觉 {vision}" if vision is not None else "；无视觉"),
+                path_note + (f"；视觉 {vision.name}" if vision is not None else "；无视觉"),
             )
 
             self._job_step(job, "metadata", "running")
@@ -6456,7 +6923,10 @@ class Gateway:
                         f"上下文长度 {context:,} 超过 GGUF 上限 {gguf_context:,}"
                     )
                 context_note = f"上下文 {context:,}（GGUF 上限 {gguf_context:,}）"
-            name = slugify_model_id(job.get("name") or model.stem)
+            base_name = job.get("name") or (
+                model.parent.name if source_is_dir else model.stem
+            )
+            name = slugify_model_id(base_name)
             if self.registry.resolve(name) is not None:
                 raise BadRequest(f"模型 ID {name} 已存在")
             vision_flags = None
@@ -6575,11 +7045,45 @@ class Gateway:
                 args = [str(item) for item in (kv_cfg.get("args") or [])]
                 args = _config_arg_replace(args, "--model", str(model))
                 args = _config_arg_replace(args, "--max-context", context)
-                args = self._fit_kvmem_budget(args, context)
+                engine_values = {
+                    key: value
+                    for key, value in (job.get("engine_params") or {}).items()
+                    if value is not None
+                }
+                mtp_supported = kvmem_mtp_support(args, engine_values, info)
+                args = kvmem_poly_apply_engine_values(
+                    args, engine_values, mtp_supported=mtp_supported
+                )
+                template_budget = parse_int(
+                    _config_arg_value([str(item) for item in (template.get("args") or [])],
+                                      "--kvmem-budget")
+                )
+                template_reserve = parse_int(
+                    _config_arg_value([str(item) for item in (template.get("args") or [])],
+                                      "--kvmem-gen-reserve")
+                )
+                explicit_budget = (
+                    engine_values.get("kvmem_budget") is not None
+                    and engine_values.get("kvmem_budget") != template_budget
+                )
+                explicit_reserve = (
+                    engine_values.get("kvmem_gen_reserve") is not None
+                    and engine_values.get("kvmem_gen_reserve") != template_reserve
+                )
+                args = kvmem_poly_fit_tuning(
+                    args,
+                    context,
+                    explicit_budget=explicit_budget,
+                    explicit_reserve=explicit_reserve,
+                )
+                kvmem_poly_validate_args(args, context)
                 if cache_override:
                     args = _config_arg_replace(args, "--kv", "q8_0")
                 else:
                     args = _config_arg_remove(args, "--kv")
+                if not _config_switch_present(args, "--kvmem-mtp"):
+                    kv_cfg.pop("kvmem_mtp_policy", None)
+                    kv_cfg.pop("kvmem_mtp_drafts_max", None)
                 kv_cfg["args"] = args
                 kv_cfg["tokenizer"] = str(tokenizer)
                 kv_cfg["tokenizer_preparation"] = "explicit_export"
@@ -6866,7 +7370,7 @@ class Gateway:
         if not isinstance(raw, dict) or not raw:
             raise BadRequest("engine_params must be a non-empty object")
         if entry.engine == "kvmem":
-            raise BadRequest("KVMem 模型固定使用模型上下文与 q8 量化，不支持修改上下文或 K/V 精度")
+            return normalize_kvmem_poly_engine(raw)
         if entry.engine == "ninfer":
             raise BadRequest("NInfer 的上下文与 KV 参数由模型配置决定，不支持在控制台修改")
         if entry.engine == "kvmem_llama":
@@ -7019,6 +7523,44 @@ class Gateway:
                 kvmem_llama_validate_disk(args)
                 config["args"] = args
                 fresh_values = kvmem_llama_engine_values(args)
+            elif entry.engine == "kvmem" and engine_values is not None:
+                args = config.get("args")
+                if not isinstance(args, list):
+                    raise BadRequest("模型配置没有 args 列表")
+                args = [str(item) for item in args]
+                context = (
+                    parse_int(_config_arg_value(args, "--max-context", "--ctx"))
+                    or parse_int(config.get("context_length"))
+                    or entry.context_length
+                )
+                if not context:
+                    raise BadRequest("无法从模型配置读取上下文长度")
+                current_budget = parse_int(_config_arg_value(args, "--kvmem-budget"))
+                current_reserve = parse_int(_config_arg_value(args, "--kvmem-gen-reserve"))
+                explicit_budget = (
+                    engine_values.get("kvmem_budget") is not None
+                    and engine_values.get("kvmem_budget") != current_budget
+                )
+                explicit_reserve = (
+                    engine_values.get("kvmem_gen_reserve") is not None
+                    and engine_values.get("kvmem_gen_reserve") != current_reserve
+                )
+                mtp_supported = kvmem_mtp_support(args, engine_values, None)
+                args = kvmem_poly_apply_engine_values(
+                    args, engine_values, mtp_supported=mtp_supported
+                )
+                args = kvmem_poly_fit_tuning(
+                    args,
+                    int(context),
+                    explicit_budget=explicit_budget,
+                    explicit_reserve=explicit_reserve,
+                )
+                kvmem_poly_validate_args(args, int(context))
+                if not _config_switch_present(args, "--kvmem-mtp"):
+                    config.pop("kvmem_mtp_policy", None)
+                    config.pop("kvmem_mtp_drafts_max", None)
+                config["args"] = args
+                fresh_values = kvmem_poly_engine_values(args)
             write_json_atomic(config_path, config)
             if fresh_values is not None:
                 result["engine_params"] = fresh_values
@@ -7030,6 +7572,8 @@ class Gateway:
                 "cache_type_k": fresh.cache_type_k if fresh else None,
                 "cache_type_v": fresh.cache_type_v if fresh else None,
             }
+        elif entry.engine == "kvmem":
+            result["engine_params"] = self._kvmem_poly_engine_values(fresh or entry)
         elif entry.engine == "kvmem_llama":
             result["engine_params"] = self._kvmem_llama_engine_values(fresh or entry)
         result["vision_gpu"] = (
@@ -7176,6 +7720,17 @@ class Gateway:
             return {}
         return kvmem_llama_engine_values([str(item) for item in args])
 
+    def _kvmem_poly_engine_values(self, entry: Model) -> dict[str, Any]:
+        """Whitelisted strata-poly options from one strata-*.json."""
+        if entry.engine != "kvmem":
+            return {}
+        config_path = Path(str(entry.config_path or ""))
+        config = read_json(config_path, {})
+        args = config.get("args") if isinstance(config, dict) else None
+        if not isinstance(args, list):
+            return {}
+        return kvmem_poly_engine_values([str(item) for item in args])
+
     def model_list(self) -> dict[str, Any]:
         with self.cond:
             active = self.active
@@ -7191,7 +7746,9 @@ class Gateway:
                 model, active, target, switching, phase, pending_load, live
             )
             item = model.openai(status, status == "loaded", self.params.get(model.id))
-            if model.engine == "kvmem_llama":
+            if model.engine == "kvmem":
+                item["engine_params"] = self._kvmem_poly_engine_values(model)
+            elif model.engine == "kvmem_llama":
                 item["engine_params"] = self._kvmem_llama_engine_values(model)
             if status == "failed" and last_error and target is not None and target.id == model.id:
                 item["error"] = last_error
@@ -7203,7 +7760,9 @@ class Gateway:
             if item.get("id") == model.id:
                 return item
         item = model.openai("unloaded", False, self.params.get(model.id))
-        if model.engine == "kvmem_llama":
+        if model.engine == "kvmem":
+            item["engine_params"] = self._kvmem_poly_engine_values(model)
+        elif model.engine == "kvmem_llama":
             item["engine_params"] = self._kvmem_llama_engine_values(model)
         return item
 
@@ -7215,7 +7774,9 @@ class Gateway:
                 "engine": entry.engine,
                 "params": self.params.get(entry.id),
             }
-            if entry.engine == "kvmem_llama":
+            if entry.engine == "kvmem":
+                row["engine_params"] = self._kvmem_poly_engine_values(entry)
+            elif entry.engine == "kvmem_llama":
                 row["engine_params"] = self._kvmem_llama_engine_values(entry)
             data.append(row)
         return {"object": "list", "data": data}
