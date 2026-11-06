@@ -1384,7 +1384,7 @@
         ? "请求级采样参数在“基本参数”页。"
         : "KVMem 扩展参数在“kvmem参数”页，请求级采样参数在“基本参数”页。";
       hintHost.textContent = total
-        ? `这些是 ${kvmemEngineTitle(kind)} 自身的参数，写入模型自己的引擎配置（视觉组写入 vision 段）；留空表示沿用模板或引擎默认。${tabNote}保存后按需重启引擎。`
+        ? `这些是 ${kvmemEngineTitle(kind)} 自身的参数，写入模型自己的引擎配置（引擎参数写入 args，草稿验证窗口等写入 user_args，模型级字段与视觉组写入配置顶层和 vision 段）；留空表示沿用模板或引擎默认。${tabNote}保存后按需重启引擎。`
         : "";
     }
   }

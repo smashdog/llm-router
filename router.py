@@ -20,6 +20,7 @@ import mimetypes
 import os
 import queue
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -752,6 +753,7 @@ def _kv_engine_spec(
     owner: str | None = None,
     config_path: tuple[str, ...] | None = None,
     vision_only: bool = False,
+    store: str | None = None,
 ) -> dict[str, Any]:
     flag_list = (flags,) if isinstance(flags, str) else tuple(flags)
     spec: dict[str, Any] = {
@@ -771,6 +773,12 @@ def _kv_engine_spec(
         # Some engine options live in the model's JSON config rather than in
         # its argv (PolyStrata's "vision" block, for one).
         spec["config_path"] = list(config_path)
+    if store:
+        # "user_args": the value is written to the config's hand-set options,
+        # which serve/server.py merges over "args" at every start (the Strata
+        # launcher rewrites its own drafter flags in "args", so a value kept
+        # there would be dropped).
+        spec["store"] = store
     if vision_only:
         spec["vision_only"] = True
     if low is not None:
@@ -1508,13 +1516,16 @@ def kvmem_poly_engine_schema() -> list[dict[str, Any]]:
 # keeps every engine option in the config's "args" list (see the engine's
 # --help and the project docs).  The router copies the gyro-gyro-m template
 # for each new model, so leaving a field empty keeps the template value.
-# Options that the Strata launcher rewrites by itself (--mtp, --draft,
-# --draft-fallback) are intentionally not exposed.
+# The drafter is chosen with the config's "drafting" field (auto/mtp/dflash2/
+# off); serve/server.py writes --draft/--draft-model/--draft-fallback itself,
+# so only that switch and its tuning knobs are exposed, never the raw flags.
+# A few settings (--spec, --draft-conf, --draft-cap) are rewritten by the
+# launcher at every start, so the form keeps them in "user_args".
 
 STRATA_ENGINE_GROUPS = (
     ("model", "模型与包"),
     ("context", "上下文与 KV"),
-    ("draft", "推测解码（MTP / 查表）"),
+    ("draft", "推测解码（MTP / DFlash2 / 查表）"),
     ("expert", "专家缓存与内存"),
     ("prefill", "预填充与并发"),
     ("cache", "提示与会话缓存"),
@@ -1549,6 +1560,32 @@ STRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         "tokenizer", ("tokenizer",), "Tokenizer 目录", "model", "string",
         config_path=("tokenizer",),
         note="可选；留空由引擎使用内置模板与模型自带词表",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "arch", ("arch",), "模型架构族", "model", "enum",
+        config_path=("arch",),
+        choices=[
+            {"value": "qwen4exp", "label": "qwen4exp · Flash-Next / Gyro"},
+            {"value": "qwen35moe", "label": "qwen35moe · Qwen3.6-35B-A3B"},
+            {"value": "deepseek41", "label": "deepseek41 · DeepSeek-V4.1-Flash"},
+        ],
+        note="决定对话模板、停止符与工具调用方言；留空按 tokenizer 推断",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "ple_io", "--ple-io", "PLE 表读取方式", "model", "enum",
+        choices=[
+            {"value": "direct", "label": "direct · SSD 直读（默认）"},
+            {"value": "mmap", "label": "mmap · 走页缓存"},
+            {"value": "ram", "label": "ram · 整表锁进内存"},
+        ],
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "ple_row_cache", "--ple-row-cache", "PLE 行缓存", "model",
+        low=0, high=10485760, step=1,
+        note="每行 90 B；默认 1048576，0 关闭",
         group_labels=STRATA_GROUP_LABELS,
     ),
     # -- context / KV ------------------------------------------------------
@@ -1596,11 +1633,62 @@ STRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         note="linear/yarn 的扩展因子；留空使用模型文件，1 表示关闭",
         group_labels=STRATA_GROUP_LABELS,
     ),
+    _kv_engine_spec(
+        "rope_freq_base", "--rope-freq-base", "RoPE 频率基数", "context", "number",
+        low=0.0, high=100000000.0, step=1000.0,
+        note="原始 ggml 旋钮；0 使用模型的 1e7",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "rope_freq_scale", "--rope-freq-scale", "RoPE 角度缩放", "context", "number",
+        low=0.0, high=1024.0, step=0.0001,
+        note="原始 ggml 旋钮；0 表示 1/--rope-scale",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "yarn_orig_ctx", "--yarn-orig-ctx", "YaRN 原始上下文", "context",
+        low=0, high=4194304, step=1024,
+        note="YaRN 校正所针对的训练上下文；0 使用 262144",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
     # -- drafting ----------------------------------------------------------
     _kv_engine_spec(
+        "drafting", ("drafting",), "草稿来源", "draft", "enum",
+        config_path=("drafting",),
+        choices=[
+            {"value": "auto", "label": "auto · 自动"},
+            {"value": "mtp", "label": "mtp · 模型自带草稿层"},
+            {"value": "dflash2", "label": "dflash2 · 块草稿器"},
+            {"value": "off", "label": "off · 关闭草稿"},
+        ],
+        note="auto 有 DFlash2 包就用 DFlash2，否则用 MTP；DFlash2 需先 strata drafting fetch（约 1.2 GB），包缺失或 model_name 不是 qwen3.8-flash-next-… 形式都会退回 MTP，引擎日志会说明",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "mtp_path", "--mtp", "MTP 草稿层目录", "draft", "string",
+        note="strata-mtp-convert 生成的 .rt 目录（dense.bin/experts.bin）；清空则不加载 MTP",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "mtp_draft_vocab", "--mtp-draft-vocab", "草稿词表", "draft", "string",
+        note="草稿头使用的 token 子集；留空使用 <mtp>/draft_vocab.bin，DFlash2 也读它",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "lookup_sizes", "--lookup-sizes", "查表窗口尺寸", "draft", "string",
+        note="逗号分隔，如 5,6,12；留空为 MTP+1、MTP+2 与 --lookup-max-t",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "coupled_draft", ("--coupled-draft", "--no-coupled-draft"), "采样联动草稿", "draft",
+        "boolean",
+        note="开启后按采样分布起草；关闭（默认）用 argmax 起草",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
         "spec", "--spec", "MTP 验证窗口", "draft",
-        low=1, high=16, step=1,
-        note="草稿层每次检查提出多少 token；模板写入 4",
+        low=1, high=16, step=1, store="user_args",
+        note="草稿层每次检查提出多少 token；模板写入 4；DFlash2 也采用这里的值",
         group_labels=STRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
@@ -1657,14 +1745,14 @@ STRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     ),
     _kv_engine_spec(
         "draft_conf", "--draft-conf", "DFlash2 置信度阈值", "draft", "number",
-        low=0.0, high=1.0, step=0.01,
-        note="仅 --draft dflash2；0 表示使用 --spec-min-p",
+        low=0.0, high=1.0, step=0.01, store="user_args",
+        note="仅 DFlash2；0 表示使用 --spec-min-p；写入 user_args，启动时不会被包装器覆盖",
         group_labels=STRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
         "draft_cap", "--draft-cap", "DFlash2 窗口上限", "draft",
-        low=1, high=16, step=1,
-        note="仅 --draft dflash2；留空按显卡选择",
+        low=1, high=16, step=1, store="user_args",
+        note="仅 DFlash2；留空按显卡选择；写入 user_args",
         group_labels=STRATA_GROUP_LABELS,
     ),
     # -- experts -----------------------------------------------------------
@@ -1708,6 +1796,102 @@ STRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     _kv_engine_spec(
         "mmap_experts", "--mmap-experts", "专家使用 mmap", "expert", "boolean",
         note="退出常驻专家 arena，回到文件映射（冷读更慢）",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "resident_cpu_experts", "--resident-cpu-experts", "内存驻留专家（配合 mmap）",
+        "expert", "boolean",
+        note="显存槽位之外的专家常驻内存，自适应换入不再读文件",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "adapt_every", "--adapt-every", "自适应换入间隔", "expert",
+        low=0, high=1000000, step=1,
+        note="每隔多少个验证窗口做一次自适应换入（默认 4）；0 关闭自适应换入",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "adapt_swaps", "--adapt-swaps", "每次换入专家数", "expert",
+        low=0, high=4096, step=1,
+        note="每次自适应最多换入的专家数；留空由引擎决定",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "pcie_frac", "--pcie-frac", "PCIe 专家占比", "expert", "number",
+        low=0.0, high=1.0, step=0.05,
+        note="进入 PCIe 卸载的专家比例；0 关闭；留空自动（Q2_0 约 0.2、native 约 0.55 并在前几窗微调）",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_profile_save", "--expert-profile-save", "自适应统计保存路径", "expert",
+        "string",
+        note="把显存专家与启动以来的路由统计保存为 profile.bin；留空不保存",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_profile_save_every", "--expert-profile-save-every", "统计保存间隔（分钟）",
+        "expert", low=0, high=1440, step=1,
+        note="默认 10；0 表示只在退出时保存",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_cache_device1", "--expert-cache-device1", "CUDA1 专家槽位", "expert",
+        "string",
+        note="整数或 auto（能放多少放多少）",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_cache_device2", "--expert-cache-device2", "CUDA2 专家槽位", "expert",
+        "string",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_cache_device3", "--expert-cache-device3", "CUDA3 专家槽位", "expert",
+        "string",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_cache_remote_placement", "--expert-cache-remote-placement",
+        "多卡专家分配", "expert", "enum",
+        choices=[
+            {"value": "stripe", "label": "stripe · 按专家条带"},
+            {"value": "layer", "label": "layer · 按整层"},
+        ],
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "remote_expert_opt", "--remote-expert-opt", "远程专家解码优化", "expert",
+        "boolean",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "peer_device", "--peer-device", "对等专家缓存卡", "expert",
+        low=0, high=64, step=1,
+        note="把第二张卡作为专家缓存层；不能与 --layer-split 同用",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "peer_reserve_mib", "--peer-reserve-mib", "对等卡显存预留（MiB）", "expert",
+        low=0, high=65536, step=64,
+        note="默认 600",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "peer_slots", "--peer-slots", "对等卡专家槽位", "expert",
+        low=0, high=65536, step=1,
+        note="留空按显存放得下的数量",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "peer_adapt_swaps", "--peer-adapt-swaps", "对等卡每次换入数", "expert",
+        low=0, high=4096, step=1,
+        note="留空同 --adapt-swaps",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "peer_prefill_rows", "--peer-prefill-rows", "对等卡预填充行数", "expert",
+        low=0, high=1048576, step=1,
+        note="每层由对等卡计算的提示行数；0 表示提示路径留在主卡",
         group_labels=STRATA_GROUP_LABELS,
     ),
     # -- prefill / batching ------------------------------------------------
@@ -1769,6 +1953,39 @@ STRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         ],
         group_labels=STRATA_GROUP_LABELS,
     ),
+    _kv_engine_spec(
+        "pool_tasks", "--pool-tasks", "CPU 专家批任务数", "prefill",
+        low=0, high=4096, step=1,
+        note="0 表示每线程 3 个；正数按行数封顶",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "pool_affinity", "--pool-affinity", "CPU 线程亲和", "prefill", "enum",
+        choices=[
+            {"value": "all", "label": "all · 每物理核一个（默认）"},
+            {"value": "auto", "label": "auto · 混合核 P 核优先"},
+            {"value": "p-cores", "label": "p-cores · 仅 P 核"},
+            {"value": "measure", "label": "measure · 启动时实测选择"},
+        ],
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "aux_cpus", "--aux-cpus", "辅助线程 CPU", "prefill", "string",
+        note="off、auto 或 CPU 列表（如 24,26）；留空由系统调度",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "pipeline_windows", "--pipeline-windows", "多卡窗口流水", "prefill",
+        low=0, high=2, step=1,
+        note="层拆分时两张卡重叠验证窗口；0 关闭，1 仅短读，2 解码也重叠",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "prefill_head_alias", "--prefill-head-alias", "预填充时卸载输出头",
+        "prefill", "boolean",
+        note="读提示时先卸载原生输出头，解码前再载入，省提示缓冲显存",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
     # -- prompt / conversation cache --------------------------------------
     _kv_engine_spec(
         "prompt_cache", "--prompt-cache", "提示检查点", "cache",
@@ -1825,6 +2042,17 @@ STRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         note="0 表示不限制；容器看不到真实限制时使用",
         group_labels=STRATA_GROUP_LABELS,
     ),
+    _kv_engine_spec(
+        "session_min_free_mib", "--session-min-free-mib", "会话保存最低空闲磁盘（MiB）",
+        "cache", low=0, high=1048576, step=256,
+        note="默认 4096；0 表示不检查",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "session_save_reclaim", "--session-save-reclaim", "会话保存时回收页缓存",
+        "cache", "boolean",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
     # -- runtime / VRAM ----------------------------------------------------
     _kv_engine_spec(
         "vram_reserve_mib", "--vram-reserve-mib", "VRAM 预留（MiB）", "runtime",
@@ -1844,7 +2072,7 @@ STRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     ),
     _kv_engine_spec(
         "layer_split", "--layer-split", "多卡层划分", "runtime", "string",
-        note="auto 或后续每张卡的首层，如 18 或 16,32",
+        note="auto 或后续每张卡的首层，如 18 或 16,32；写入 args，优先于配置里的 layer_split",
         group_labels=STRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
@@ -1853,7 +2081,37 @@ STRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         note="显式层拆分时每张卡只加载自己的层",
         group_labels=STRATA_GROUP_LABELS,
     ),
+    _kv_engine_spec(
+        "vram_segment_mib", "--vram-segment-mib", "弹性显存分段（MiB）", "runtime",
+        low=0, high=65536, step=64,
+        note="配合“弹性显存”使用；默认 512",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "split_skip_if_fits", ("split_skip_if_fits",), "单卡够用则不分层",
+        "runtime", "boolean", config_path=("split_skip_if_fits",),
+        note="多卡层拆分时，若首卡放得下全部专家与 KV 就只用首卡",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "replicas", ("replicas",), "数据并行副本数", "runtime",
+        low=1, high=8, step=1, config_path=("replicas",),
+        note="把 --gpu 列表均分成 N 组，各跑一个引擎；留空单副本",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "user_args", ("user_args",), "额外引擎参数", "runtime", "string",
+        config_path=("user_args",),
+        note="手工参数，启动时覆盖上面生成的同名参数；按命令行格式填写，如 --foo 1 --bar on",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
     # -- vision ------------------------------------------------------------
+    _kv_engine_spec(
+        "vision_mmproj", ("vision", "mmproj"), "视觉编码器文件", "vision", "string",
+        config_path=("vision", "mmproj"), vision_only=True,
+        note="strata-vision 使用的 mmproj GGUF；留空沿用配置",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
     _kv_engine_spec(
         "vision_threads", "vision.threads", "编码线程", "vision",
         low=0, high=256, step=1,
@@ -2837,8 +3095,8 @@ def strata_engine_values(
     """Read the whitelisted Strata engine options from one model's config.
 
     Nearly every option lives in ``args`` (plus the launcher's ``user_args``
-    overrides); the tokenizer and the ``vision`` block live in the JSON config
-    itself.
+    overrides); the tokenizer, the architecture and the ``vision`` block live
+    in the JSON config itself.
     """
     user = config.get("user_args") if isinstance(config, dict) else None
     tokens = _strata_effective_args([str(item) for item in args], user)
@@ -2847,10 +3105,28 @@ def strata_engine_values(
         key = spec["key"]
         if spec.get("config_path"):
             raw = _config_path_value(config, spec["config_path"])
-            if raw is None or (isinstance(raw, str) and not raw.strip()):
+            if key == "drafting":
+                # serve/server.py: an absent choice is Auto, except that the
+                # older "mtp": false draft-layer switch still means Off.
+                text = str(raw or "").strip().lower()
+                if not text:
+                    legacy_off = isinstance(config, dict) and config.get("mtp") is False
+                    raw = "off" if legacy_off else "auto"
+                elif text in ("auto", "mtp", "dflash2", "off"):
+                    raw = text
+                else:
+                    raw = "auto"
+            elif raw is None or (isinstance(raw, str) and not raw.strip()):
                 continue
             if isinstance(raw, bool):
                 out[key] = raw
+            elif isinstance(raw, (list, tuple)):
+                # user_args is a command line, layer_split a layer list.
+                items = [str(item) for item in raw]
+                if key == "user_args":
+                    out[key] = shlex.join(items)
+                else:
+                    out[key] = ",".join(items)
             elif spec["type"] == "integer":
                 value = parse_int(raw)
                 if value is not None:
@@ -2893,6 +3169,30 @@ def _strata_check_string_value(key: str, value: str) -> None:
             number = parse_int(value)
             if number is None or number < 0:
                 raise BadRequest("expert_cache：必须是 auto 或非负整数")
+    elif key in ("expert_cache_device1", "expert_cache_device2", "expert_cache_device3"):
+        if value != "auto":
+            number = parse_int(value)
+            if number is None or number < 0:
+                raise BadRequest(f"{key}：必须是 auto 或非负整数")
+    elif key == "user_args":
+        try:
+            tokens = shlex.split(value)
+        except ValueError as exc:
+            raise BadRequest(f"user_args：无法按命令行解析（{exc}）")
+        if len(tokens) > 512 or any("\n" in token or "\r" in token for token in tokens):
+            raise BadRequest("user_args：参数过多或包含换行")
+    elif key == "layer_split":
+        text = value.strip().lower()
+        if text != "auto":
+            parts = [part.strip() for part in text.split(",") if part.strip()]
+            numbers = [parse_int(part) for part in parts]
+            if not parts or any(number is None or number < 2 for number in numbers):
+                raise BadRequest("layer_split：必须是 auto 或每张后续卡的首层号（如 24,36）")
+    elif key == "lookup_sizes":
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        numbers = [parse_int(part) for part in parts]
+        if not parts or any(number is None or number < 1 or number > 64 for number in numbers):
+            raise BadRequest("lookup_sizes：必须是逗号分隔的 1..64 的窗口尺寸，如 5,6,12")
     elif key == "prefill":
         text = value
         if text.startswith("auto:"):
@@ -2977,21 +3277,62 @@ def strata_apply_engine_values(
 ) -> list[str]:
     """Write validated Strata options into a model config.
 
-    Edited flags are removed from ``user_args`` (which the server merges over
-    ``args`` at every start) and ``args_written`` is refreshed so the change is
-    not mistaken for a hand edit later.
+    Config-level fields (tokenizer, arch, drafting, the vision block...) are
+    written into the JSON itself.  Flags that serve/server.py rewrites on its
+    own drafter pass (--spec, --draft-conf, --draft-cap) are kept in
+    ``user_args``, which it merges last and never rewrites.  Edited flags are
+    removed from ``user_args`` and ``args_written`` is refreshed so the change
+    is not mistaken for a hand edit later.
     """
-    if "tokenizer" in values:
-        value = values["tokenizer"]
-        if value is None:
-            config.pop("tokenizer", None)
-        else:
-            config["tokenizer"] = value
+    if not values:
+        return []
     args = [str(item) for item in (config.get("args") or [])]
+    # The hand-set option text is the base of "user_args"; the individual
+    # fields below then put their own flags over it.
+    if "user_args" in values:
+        text = values["user_args"]
+        user = shlex.split(str(text)) if text is not None else []
+    else:
+        current = config.get("user_args")
+        user = [str(item) for item in current] if isinstance(current, list) else []
+    # -- config-level fields ----------------------------------------------
+    for key, value in values.items():
+        spec = STRATA_ENGINE_BY_KEY.get(key)
+        if spec is None or not spec.get("config_path"):
+            continue
+        if key in STRATA_VISION_KEYS or key == "user_args":
+            continue
+        if key == "drafting":
+            if value is None:
+                config.pop("drafting", None)
+            else:
+                config["drafting"] = value
+                # "mtp": false is the older draft-layer switch; keep it in
+                # step with the explicit choice (serve/server.py reads both).
+                config["mtp"] = value != "off"
+            continue
+        path = list(spec["config_path"])
+        node: Any = config
+        for part in path[:-1]:
+            child = node.get(part)
+            if not isinstance(child, dict):
+                if value is None:
+                    node = None
+                    break
+                child = {}
+                node[part] = child
+            node = child
+        if node is None:
+            continue
+        if value is None:
+            node.pop(path[-1], None)
+        else:
+            node[path[-1]] = int(value) if key == "replicas" else value
+    # -- engine flags -----------------------------------------------------
     touched: set[str] = set()
     for key, value in values.items():
         spec = STRATA_ENGINE_BY_KEY.get(key)
-        if spec is None or spec.get("config_path"):
+        if spec is None or spec.get("config_path") or spec.get("store") == "user_args":
             continue
         flags = list(spec["flags"])
         touched.update(flags)
@@ -3008,16 +3349,38 @@ def strata_apply_engine_values(
         for flag in flags[1:]:
             args = _config_arg_remove(args, flag)
         args = _config_arg_set(args, spec["flag"], value)
-    config["args"] = args
-    user = config.get("user_args")
-    if isinstance(user, list) and touched:
-        remaining = _strata_strip_user_flags(user, touched)
-        if remaining:
-            config["user_args"] = remaining
+    # -- the launcher's own drafter flags stay in user_args ----------------
+    user_touched: set[str] = set()
+    for key, value in values.items():
+        spec = STRATA_ENGINE_BY_KEY.get(key)
+        if spec is None or spec.get("store") != "user_args":
+            continue
+        flags = list(spec["flags"])
+        user_touched.update(flags)
+        for flag in flags:
+            # A stale copy in "args" would be rewritten by the launcher; drop
+            # it there and keep the person's value where it is honored.
+            if spec["type"] == "boolean":
+                args = _config_switch_remove(args, flag)
+            else:
+                args = _config_arg_remove(args, flag)
+        user = _strata_strip_user_flags(user, set(flags))
+        if value is None:
+            continue
+        if spec["type"] == "boolean":
+            if value is True:
+                user.append(spec["flag"])
         else:
-            config.pop("user_args", None)
+            user.extend([spec["flag"], str(value)])
+    if touched:
+        user = _strata_strip_user_flags(user, touched)
+    config["args"] = args
+    if user:
+        config["user_args"] = user
+    else:
+        config.pop("user_args", None)
     config["args_written"] = list(args)
-    return sorted(touched)
+    return sorted(touched | user_touched)
 
 
 def strata_apply_vision_values(
