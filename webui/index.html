@@ -155,7 +155,16 @@
   .head-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; align-self: center; }
   .manage-panel .auth-panel { background: rgba(255,255,255,.02); }
 
-  .engine-paths { display: flex; flex-direction: column; gap: 14px; }
+  .engine-paths { display: flex; flex-direction: column; gap: 20px; }
+  .engine-group { display: flex; flex-direction: column; gap: 12px; }
+  .engine-group-head { display: flex; align-items: center; gap: 10px; }
+  .engine-group-head h3 { margin: 0; font-size: 13px; letter-spacing: .01em; }
+  .engine-group-head h3::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 2px;
+    margin-right: 8px; vertical-align: 1px; background: var(--accent);
+  }
+  .engine-group-head .rule { flex: 1; height: 1px; background: var(--line); }
+  .engine-cards { display: flex; flex-direction: column; gap: 12px; }
   .engine-path {
     padding: 16px; border-radius: 12px; border: 1px solid var(--line);
     background: rgba(255,255,255,.02);
@@ -544,16 +553,28 @@
   @media (max-width: 520px) { .params-grid, .params-grid.engine-grid { grid-template-columns: 1fr; } }
 
   dialog.add-wide { width: min(680px, calc(100vw - 32px)); }
-  .radio-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-  .radio-card {
-    flex: 1; min-width: 190px; display: flex; gap: 9px; align-items: flex-start;
-    padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px;
-    background: var(--panel); cursor: pointer; transition: border-color .15s, background .15s;
+  .engine-picker { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 10px; margin-top: 14px; }
+  .engine-picker .empty { grid-column: 1 / -1; }
+  .engine-picker-cats {
+    display: flex; flex-direction: column; gap: 6px; padding: 6px; align-self: start;
+    border-radius: 12px; border: 1px solid var(--line); background: rgba(255,255,255,.02);
   }
-  .radio-card.on { border-color: rgba(94,234,212,.4); background: rgba(94,234,212,.07); }
-  .radio-card input { margin: 3px 0 0; accent-color: var(--accent); }
-  .radio-card .title { display: block; font-size: 13px; }
-  .radio-card .desc { display: block; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
+  .engine-cat {
+    width: 100%; text-align: left; padding: 9px 11px; border-radius: 8px;
+    border: 1px solid transparent; background: transparent; color: var(--muted);
+    font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .engine-cat:hover { background: rgba(255,255,255,.03); }
+  .engine-cat.on { color: #b7fff3; background: rgba(94,234,212,.10); border-color: rgba(94,234,212,.28); }
+  .engine-picker-subs { display: flex; flex-direction: column; gap: 8px; }
+  .engine-sub {
+    display: flex; gap: 10px; padding: 11px 12px; border-radius: 11px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.02); cursor: pointer;
+  }
+  .engine-sub.on { border-color: rgba(94,234,212,.4); background: rgba(94,234,212,.07); }
+  .engine-sub input { margin: 3px 0 0; accent-color: var(--accent); }
+  .engine-sub .title { display: block; font-size: 13px; }
+  .engine-sub .desc { display: block; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
   .add-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-top: 14px; }
   .add-fields label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
   .add-fields input, .add-fields textarea {
@@ -584,7 +605,12 @@
   .progress-step.warn .sdot { background: var(--amber); }
   .progress-step.fail .sdot { background: var(--red); }
   .progress-step .detail { display: block; color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
-  @media (max-width: 520px) { .add-fields { grid-template-columns: 1fr; } }
+  @media (max-width: 520px) {
+    .add-fields { grid-template-columns: 1fr; }
+    .engine-picker { grid-template-columns: 1fr; }
+    .engine-picker-cats { flex-direction: row; flex-wrap: wrap; }
+    .engine-cat { width: auto; }
+  }
 
   @media (max-width: 820px) {
     .shell { width: calc(100% - 24px); padding-top: 18px; }
@@ -704,15 +730,15 @@
     <div class="manage-layout">
       <aside class="manage-menu" aria-label="管理菜单">
         <p class="menu-label">设置</p>
-        <button class="menu-item on" type="button" data-panel="engines">引擎路径</button>
+        <button class="menu-item on" type="button" data-panel="engines">引擎</button>
         <button class="menu-item" type="button" data-panel="auth">API 密钥管理</button>
         <button class="menu-item" type="button" data-panel="proxy">代理</button>
         <button class="menu-item" type="button" data-panel="downloads">模型下载</button>
       </aside>
       <div class="manage-content">
         <section class="manage-panel" data-panel="engines" aria-labelledby="engine-paths-title">
-          <h2 id="engine-paths-title">引擎路径</h2>
-          <p class="panel-hint">配置 llama.cpp、KVMem、NInfer 与 KVMem + llama.cpp 的启动路径；保存前会轻量探测二进制是否可用，成功后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
+          <h2 id="engine-paths-title">引擎</h2>
+          <p class="panel-hint">按分类配置引擎：llama.cpp 分类下为原生 llama.cpp；kvmem 分类下包含 llama.cpp（KVMem 补丁版）、polystrata 与 ninfer。保存前会轻量探测二进制是否可用，成功后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
           <div class="engine-paths" id="engine-paths">
             <div class="empty">正在读取引擎配置…</div>
           </div>
@@ -942,8 +968,8 @@
   <form id="add-form">
     <div class="dialog-body">
       <h3>新增模型</h3>
-      <p>选择引擎并填写模型路径。网关会写入配置、启动引擎并做一次冒烟测试；不会复制或修改模型文件。</p>
-      <div class="radio-row" id="add-engines" role="radiogroup" aria-label="模型类型"></div>
+      <p>先选引擎分类，再选子引擎并填写模型路径。网关会写入配置、启动引擎并做一次冒烟测试；不会复制或修改模型文件。</p>
+      <div class="engine-picker" id="add-engines" aria-label="模型类型"></div>
       <div class="add-fields">
         <label id="add-model-field">模型路径 <span class="name" id="add-model-hint">.gguf 文件，必填</span>
           <textarea id="add-model" rows="3" spellcheck="false" placeholder="/path/to/model.gguf"></textarea></label>
@@ -2447,47 +2473,35 @@
     }
   }
 
-  function renderEnginePaths() {
-    const host = $("engine-paths");
-    const data = state.paths;
-    if (!data) {
-      host.innerHTML = '<div class="empty">正在读取引擎配置…</div>';
-      return;
-    }
-    const engines = Array.isArray(data.engines) ? data.engines : [];
-    if (!engines.length) {
-      host.innerHTML = '<div class="empty">没有可配置的引擎槽位</div>';
-      return;
-    }
-    host.innerHTML = engines.map((item) => {
-      const schema = PATH_FIELDS[item.engine] || [];
-      const configured = !!item.configured;
-      const fields = item.fields || {};
-      const defaults = item.defaults || {};
-      const tags = [
-        `<span class="tag ${configured ? "green" : "amber"}">${configured ? "已配置" : "未配置"}</span>`,
-      ];
-      if (item.running) tags.push('<span class="tag green">运行中</span>');
-      else if (configured) tags.push('<span class="tag">已停止</span>');
-      if (item.needs_restart) tags.push('<span class="tag amber">需重启</span>');
-      const rows = schema.map((field) => {
-        const placeholder = (!configured && defaults[field.key]) || field.placeholder;
-        return `
+  function enginePathItem(item, data) {
+    const schema = PATH_FIELDS[item.engine] || [];
+    const configured = !!item.configured;
+    const fields = item.fields || {};
+    const defaults = item.defaults || {};
+    const tags = [
+      `<span class="tag ${configured ? "green" : "amber"}">${configured ? "已配置" : "未配置"}</span>`,
+    ];
+    if (item.running) tags.push('<span class="tag green">运行中</span>');
+    else if (configured) tags.push('<span class="tag">已停止</span>');
+    if (item.needs_restart) tags.push('<span class="tag amber">需重启</span>');
+    const rows = schema.map((field) => {
+      const placeholder = (!configured && defaults[field.key]) || field.placeholder;
+      return `
         <label>${esc(field.label)} <span class="name">${esc(field.hint)}</span>
           <input type="text" spellcheck="false" data-path-field="${esc(field.key)}"
             placeholder="${esc(placeholder)}" value="${esc(fields[field.key] || "")}" />
         </label>`;
-      }).join("");
-      const note = configured
-        ? `${esc(data.config_file || "config.json")} 已记录 · 内部地址 ${esc(item.address || "—")}`
-        : "未配置；灰色提示为建议路径，创建时缺失的模型目录会自动创建，保存后写入 config.json。";
-      const prefill = !configured && Object.values(defaults).some(Boolean)
-        ? '<button class="btn ghost" type="button" data-path-action="prefill">填入建议路径</button>'
-        : "";
-      return `
+    }).join("");
+    const note = configured
+      ? `${esc(data.config_file || "config.json")} 已记录 · 内部地址 ${esc(item.address || "—")}`
+      : "未配置；灰色提示为建议路径，创建时缺失的模型目录会自动创建，保存后写入 config.json。";
+    const prefill = !configured && Object.values(defaults).some(Boolean)
+      ? '<button class="btn ghost" type="button" data-path-action="prefill">填入建议路径</button>'
+      : "";
+    return `
         <article class="engine-path" data-engine="${esc(item.engine)}">
           <div class="engine-path-head">
-            <h3>${esc(item.label)}</h3>
+            <h3>${esc(item.name || item.label)}</h3>
             ${tags.join("")}
             <span class="count">${item.models || 0} 个模型</span>
           </div>
@@ -2501,7 +2515,31 @@
           </div>
           <p class="params-error" data-role="error" hidden></p>
         </article>`;
-    }).join("");
+  }
+
+  function renderEnginePaths() {
+    const host = $("engine-paths");
+    const data = state.paths;
+    if (!data) {
+      host.innerHTML = '<div class="empty">正在读取引擎配置…</div>';
+      return;
+    }
+    const engines = Array.isArray(data.engines) ? data.engines : [];
+    if (!engines.length) {
+      host.innerHTML = '<div class="empty">没有可配置的引擎槽位</div>';
+      return;
+    }
+    const groups = new Map();
+    engines.forEach((item) => {
+      const category = String(item.category || "其他");
+      if (!groups.has(category)) groups.set(category, []);
+      groups.get(category).push(item);
+    });
+    host.innerHTML = [...groups.entries()].map(([category, items]) => `
+      <section class="engine-group" data-category="${esc(category)}">
+        <div class="engine-group-head"><h3>${esc(category)}</h3><span class="rule"></span></div>
+        <div class="engine-cards">${items.map((item) => enginePathItem(item, data)).join("")}</div>
+      </section>`).join("");
   }
 
   async function saveEnginePaths(engine, create) {
@@ -3238,25 +3276,55 @@
     row.querySelectorAll("input").forEach((el) => { el.disabled = false; });
   }
 
-  function renderAddEngines() {
+  function addEngineGroups() {
     const engines = Object.values((state.manage && state.manage.engines) || {});
+    const groups = new Map();
+    engines.forEach((engine) => {
+      const category = String(engine.category || engine.label || engine.engine || "其他");
+      if (!groups.has(category)) groups.set(category, []);
+      groups.get(category).push(engine);
+    });
+    return groups;
+  }
+
+  function renderAddEngineSubs(category) {
+    const host = $("add-engine-subs");
+    const engines = addEngineGroups().get(category) || [];
+    if (!host) return;
+    if (!engines.length) {
+      host.innerHTML = '<div class="empty">该分类下没有可新增模型的引擎</div>';
+      return;
+    }
+    host.innerHTML = engines.map((engine, index) => `
+      <label class="engine-sub ${index === 0 ? "on" : ""}">
+        <input type="radio" name="add-engine" value="${esc(engine.engine)}" ${index === 0 ? "checked" : ""} />
+        <span>
+          <span class="title">${esc(engine.name || engine.label || engine.engine)}</span>
+          <span class="desc">${esc(engine.kind)} · ${esc(engine.preset || engine.template || engine.models_dir || "—")}</span>
+        </span>
+      </label>`).join("");
+    fillAddParams(engines[0].engine);
+  }
+
+  function renderAddEngines() {
     const host = $("add-engines");
     const submit = $("add-submit");
-    if (!engines.length) {
+    const groups = addEngineGroups();
+    if (!groups.size) {
       host.innerHTML = '<div class="empty">没有支持新增模型的引擎</div>';
       submit.disabled = true;
       return;
     }
     submit.disabled = false;
-    host.innerHTML = engines.map((engine, index) => `
-      <label class="radio-card ${index === 0 ? "on" : ""}">
-        <input type="radio" name="add-engine" value="${esc(engine.engine)}" ${index === 0 ? "checked" : ""} />
-        <span>
-          <span class="title">${esc(engine.label || engine.engine)}</span>
-          <span class="desc">${esc(engine.kind)} · ${esc(engine.preset || engine.template || engine.models_dir || "—")}</span>
-        </span>
-      </label>`).join("");
-    fillAddParams(engines[0].engine);
+    const categories = [...groups.keys()];
+    host.innerHTML = `
+      <div class="engine-picker-cats" role="tablist" aria-label="引擎分类">
+        ${categories.map((category, index) => `
+          <button type="button" class="engine-cat ${index === 0 ? "on" : ""}"
+            data-add-category="${esc(category)}" role="tab" aria-selected="${index === 0}">${esc(category)}</button>`).join("")}
+      </div>
+      <div class="engine-picker-subs" id="add-engine-subs" role="radiogroup" aria-label="子引擎"></div>`;
+    renderAddEngineSubs(categories[0]);
   }
 
   async function openAddDialog() {
@@ -3601,10 +3669,20 @@
   $("add-form").addEventListener("submit", submitAdd);
   $("add-cancel").addEventListener("click", () => $("add-dialog").close());
   $("add-vision").addEventListener("input", syncVisionDevice);
+  $("add-engines").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-add-category]");
+    if (!button) return;
+    document.querySelectorAll("#add-engines .engine-cat").forEach((cat) => {
+      const on = cat === button;
+      cat.classList.toggle("on", on);
+      cat.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    renderAddEngineSubs(button.dataset.addCategory);
+  });
   $("add-engines").addEventListener("change", (event) => {
     const input = event.target.closest('input[name="add-engine"]');
     if (!input) return;
-    document.querySelectorAll("#add-engines .radio-card").forEach((card) => {
+    document.querySelectorAll("#add-engine-subs .engine-sub").forEach((card) => {
       card.classList.toggle("on", card.contains(input));
     });
     fillAddParams(input.value);

@@ -4121,6 +4121,8 @@ class StatusHub:
 
 ENGINE_SLOTS: dict[str, dict[str, Any]] = {
     "llama": {
+        "category": "llama.cpp",
+        "name": "llama.cpp",
         "label": "llama.cpp",
         "kind": "llama_router",
         "models_kind": "llama_dir",
@@ -4133,6 +4135,8 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "log_path": "logs/llama-engine.log",
     },
     "kvmem": {
+        "category": "kvmem",
+        "name": "polystrata",
         "label": "KVMem（polystrata）",
         "kind": "kvmem",
         "models_kind": "kvmem_dir",
@@ -4145,6 +4149,8 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "log_path": "logs/kvmem-engine.log",
     },
     "ninfer": {
+        "category": "kvmem",
+        "name": "ninfer",
         "label": "NInfer（KVMem）",
         "kind": "ninfer",
         "models_kind": "ninfer_dir",
@@ -4157,6 +4163,8 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "log_path": "logs/ninfer-engine.log",
     },
     "kvmem_llama": {
+        "category": "kvmem",
+        "name": "llama.cpp",
         "label": "KVMem + llama.cpp",
         "kind": "kvmem_llama",
         "models_kind": "kvmem_llama_dir",
@@ -4169,7 +4177,9 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "log_path": "logs/kvmem-llama-engine.log",
     },
 }
-ENGINE_SLOT_ORDER = ("llama", "kvmem", "ninfer", "kvmem_llama")
+# Display order: the management page groups slots by ``category`` and lists
+# them in this order, so the kvmem group shows llama.cpp → polystrata → ninfer.
+ENGINE_SLOT_ORDER = ("llama", "kvmem_llama", "kvmem", "ninfer")
 KV_PROBE_CODE = (
     "import serve.server\n"
     "print('LLM_ROUTER_KVPROBE_' + str(6 * 7))\n"
@@ -6150,6 +6160,8 @@ class Gateway:
                 {
                     "engine": engine_id,
                     "label": spec["label"],
+                    "category": spec["category"],
+                    "name": spec["name"],
                     "kind": engine_id,
                     "configured": configured,
                     "running": running,
@@ -7268,7 +7280,13 @@ class Gateway:
 
     def manage_engines(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
-        for engine_id, engine_cfg in self.config.get("engines", {}).items():
+        engines_cfg = self.config.get("engines")
+        engines_cfg = engines_cfg if isinstance(engines_cfg, dict) else {}
+        # Fixed slots first in display order, then any custom engines.
+        ordered = [engine_id for engine_id in ENGINE_SLOT_ORDER if engine_id in engines_cfg]
+        ordered += [engine_id for engine_id in engines_cfg if engine_id not in ENGINE_SLOT_ORDER]
+        for engine_id in ordered:
+            engine_cfg = engines_cfg.get(engine_id)
             if not isinstance(engine_cfg, dict):
                 continue
             kind = self._engine_kind(engine_id)
@@ -7341,6 +7359,11 @@ class Gateway:
                     },
                     "default_params": self.default_sampling(engine_id),
                 }
+            entry = out.get(engine_id)
+            if entry is not None:
+                spec = ENGINE_SLOTS.get(engine_id) or {}
+                entry["category"] = str(spec.get("category") or "其他")
+                entry["name"] = str(spec.get("name") or entry.get("label") or engine_id)
         return out
 
     def model_manage_view(self) -> dict[str, Any]:
