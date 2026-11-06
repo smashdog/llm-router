@@ -456,6 +456,15 @@ DEFAULT_SAMPLING = {
     # thinking mode per request (e.g. Qwen3.8 Thinking/non-Thinking); writing
     # router defaults would override that, so added models start empty.
     "kvmem_llama": {},
+    "strata": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+    },
 }
 # A llama.cpp preset that encodes the reference defaults (the [*] block plus
 # the LFM3-2B-omni section); KVMem's reference config is Ornith 1.5.
@@ -503,7 +512,7 @@ def _param_spec(
 
 
 def _basic_specs(engine: str) -> list[dict[str, Any]]:
-    kv = engine == "kvmem"
+    kv = engine in ("kvmem", "strata")
     ninfer = engine == "ninfer"
     kvllama = engine == "kvmem_llama"
     return [
@@ -579,12 +588,17 @@ def _llama_more_specs() -> list[dict[str, Any]]:
 def sampling_schema(engine: str) -> list[dict[str, Any]]:
     """Editable parameters for one engine kind, split into basic and more."""
     engine = str(engine or "").strip().lower()
-    if engine not in ("llama", "kvmem", "ninfer", "kvmem_llama"):
+    if engine not in ("llama", "kvmem", "ninfer", "kvmem_llama", "strata"):
         engine = "llama"
     if engine == "kvmem":
         more = [
             _param_spec("seed", "随机种子", "more", kind="integer", low=1, high=2147483647,
                         step=1, note="正整数"),
+        ]
+    elif engine == "strata":
+        more = [
+            _param_spec("seed", "随机种子", "more", kind="integer", low=0,
+                        high=2147483647, step=1, note="0 表示随机"),
         ]
     elif engine == "kvmem_llama":
         more = [
@@ -1488,6 +1502,398 @@ def kvmem_poly_engine_schema() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Strata per-model engine options
+#
+# Strata (serve/server.py --engine strata) serves one model per config and
+# keeps every engine option in the config's "args" list (see the engine's
+# --help and the project docs).  The router copies the gyro-gyro-m template
+# for each new model, so leaving a field empty keeps the template value.
+# Options that the Strata launcher rewrites by itself (--mtp, --draft,
+# --draft-fallback) are intentionally not exposed.
+
+STRATA_ENGINE_GROUPS = (
+    ("model", "模型与包"),
+    ("context", "上下文与 KV"),
+    ("draft", "推测解码（MTP / 查表）"),
+    ("expert", "专家缓存与内存"),
+    ("prefill", "预填充与并发"),
+    ("cache", "提示与会话缓存"),
+    ("runtime", "运行与显存"),
+    ("vision", "视觉（strata-vision）"),
+)
+STRATA_GROUP_LABELS = dict(STRATA_ENGINE_GROUPS)
+
+STRATA_ENGINE_SPECS: list[dict[str, Any]] = [
+    # -- model -------------------------------------------------------------
+    _kv_engine_spec(
+        "pack", "--pack", "专家包目录", "model", "string",
+        note="模型包（专家权重）目录；留空沿用模板",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "native", "--native", "主模型 GGUF", "model", "string",
+        note="注意力/嵌入所在的 GGUF；新增模型时由模型路径覆盖",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "ple_gguf", "--ple-gguf", "PLE 表 GGUF", "model", "string",
+        note="缺少它时第 1 层 PLE 会被静默跳过；新增模型时若与主模型相同会自动替换",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_profile", "--expert-profile", "专家统计文件", "model", "string",
+        note="启动时按统计预装显存专家；留空沿用模板",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "tokenizer", ("tokenizer",), "Tokenizer 目录", "model", "string",
+        config_path=("tokenizer",),
+        note="可选；留空由引擎使用内置模板与模型自带词表",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    # -- context / KV ------------------------------------------------------
+    _kv_engine_spec(
+        "max_context", "--max-context", "上下文长度", "context",
+        low=256, step=1,
+        note="KV/状态容量；KV resident 与专家缓存都会从这里分配预算",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kv", "--kv", "KV 缓存格式", "context", "enum",
+        choices=[
+            {"value": "fp16", "label": "fp16 · 默认"},
+            {"value": "int8", "label": "int8 · 半显存"},
+            {"value": "q4_0", "label": "q4_0 · Hadamard 旋转"},
+            {"value": "k8v4", "label": "k8v4 · INT8 K + Q4 V"},
+        ],
+        note="留空沿用模型配置",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kv_resident", "--kv-resident", "KV 常驻单元", "context",
+        low=0, high=4194304, step=1024,
+        note="每层保留在显存的单元数（≥20480），其余 K/V 流式放在内存；0 关闭",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kv_grow", "--kv-grow", "KV 随上下文增长", "context", "boolean",
+        note="只按请求实际到达的单元占显存，其余留给专家缓存；需单卡与 --expert-profile",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "rope_scaling", "--rope-scaling", "RoPE 扩展", "context", "enum",
+        choices=[
+            {"value": "none", "label": "none · 不扩展"},
+            {"value": "linear", "label": "linear · 位置插值"},
+            {"value": "yarn", "label": "yarn"},
+        ],
+        note="启动后固定；留空使用模型文件里的 rope 设置",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "rope_scale", "--rope-scale", "RoPE 扩展倍数", "context", "number",
+        low=0.0, high=1024.0, step=0.01,
+        note="linear/yarn 的扩展因子；留空使用模型文件，1 表示关闭",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    # -- drafting ----------------------------------------------------------
+    _kv_engine_spec(
+        "spec", "--spec", "MTP 验证窗口", "draft",
+        low=1, high=16, step=1,
+        note="草稿层每次检查提出多少 token；模板写入 4",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "spec_min_p", "--spec-min-p", "验证窗口扩展阈值", "draft", "number",
+        low=0.0, high=1.0, step=0.01,
+        note="草稿层置信度达到该值才再扩展一个猜测；模板写入 0.5",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "suffix_draft", "--suffix-draft", "后缀查表长度", "draft",
+        low=0, high=8, step=1,
+        note="按上下文里重复的末尾 N+ token 起草；0 只用 MTP",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "mtp_max_t", "--mtp-max-t", "MTP 窗口上限", "draft",
+        low=0, high=16, step=1,
+        note="0 表示使用 --spec；更长的窗口交给后缀查表",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "lookup_max_t", "--lookup-max-t", "查表窗口上限", "draft",
+        low=0, high=16, step=1,
+        note="每个窗口大小都会多占约 20–35 MiB 显存",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "lookup_chain", "--lookup-chain", "查表链接数", "draft",
+        low=0, high=16, step=1,
+        note="在 MTP 草稿后继续追加查表草稿；0 关闭",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "lookup_chain_min", "--lookup-chain-min", "查表链接最短匹配", "draft",
+        low=0, high=1024, step=1,
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "mtp_hnorm", "--mtp-hnorm", "草稿层归一化", "draft", "enum",
+        choices=[
+            {"value": "pooled", "label": "pooled · 四路合并 RMS"},
+            {"value": "stream", "label": "stream · 每路独立"},
+        ],
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "mtp_q4", "--mtp-q4", "草稿层 4-bit", "draft", "enum",
+        choices=[
+            {"value": "all", "label": "all · 投影与头"},
+            {"value": "proj", "label": "proj · 仅投影"},
+            {"value": "head", "label": "head · 仅草稿头"},
+        ],
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "draft_conf", "--draft-conf", "DFlash2 置信度阈值", "draft", "number",
+        low=0.0, high=1.0, step=0.01,
+        note="仅 --draft dflash2；0 表示使用 --spec-min-p",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "draft_cap", "--draft-cap", "DFlash2 窗口上限", "draft",
+        low=1, high=16, step=1,
+        note="仅 --draft dflash2；留空按显卡选择",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    # -- experts -----------------------------------------------------------
+    _kv_engine_spec(
+        "expert_cache", "--expert-cache", "显存专家槽位", "expert", "string",
+        note="整数或 auto；0 关闭，留空沿用模板（Gyro 模板为 auto）",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_cache_per_layer", "--expert-cache-per-layer", "每层独立专家槽位",
+        "expert", "boolean",
+        note="默认从共享计数器按到达顺序填充",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "adapt_async", "--adapt-async", "自适应换入异步", "expert", "enum",
+        choices=[
+            {"value": "0", "label": "0 · 阻塞"},
+            {"value": "1", "label": "1 · 窗口间推进"},
+        ],
+        note="留空由引擎在单卡 CUDA 上自动尝试",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "adapt_min_gain", "--adapt-min-gain", "自适应换入增益", "expert", "number",
+        low=0.0, high=100.0, step=0.1,
+        note="默认 1.5；越大换入越少但越确定",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "ram_keep_gib", "--ram-keep-gib", "保留空闲内存（GiB）", "expert",
+        low=0, high=1024, step=1,
+        note="专家驻留模式为系统留下的内存；0 表示不保留",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "resident_experts", "--resident-experts", "内存驻留专家", "expert", "boolean",
+        note="低内存机器的驻留模式，等价 --mmap-experts + --resident-cpu-experts",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "mmap_experts", "--mmap-experts", "专家使用 mmap", "expert", "boolean",
+        note="退出常驻专家 arena，回到文件映射（冷读更慢）",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    # -- prefill / batching ------------------------------------------------
+    _kv_engine_spec(
+        "prefill", "--prefill", "预填充块大小", "prefill", "string",
+        note="auto、auto:32768 或正整数；留空沿用模板",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "prefill_pipe", "--prefill-pipe", "预填充流水（token）", "prefill",
+        low=0, high=1048576, step=1,
+        note="仅层拆分时有效；0 关闭",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "short_read", "--short-read", "短读 token 数", "prefill",
+        low=0, high=1048576, step=1,
+        note="新文本 token 走解码窗口的上限；0 关闭",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "batch", ("--batch", "--slots"), "并发槽位", "prefill",
+        low=0, high=8, step=1,
+        note="0 表示一次一个请求；2..8 为并发槽位",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "batch_mtp", "--batch-mtp", "并发 MTP", "prefill", "boolean",
+        note="需要 --batch、--mtp 与 --spec",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "batch_groups", "--batch-groups", "并发分组", "prefill",
+        low=0, high=8, step=1,
+        note="层拆分时把槽位分成 G 组流水",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "no_pool", "--no-pool", "关闭 CPU 专家池", "prefill", "boolean",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "pool_workers", "--pool-workers", "CPU 专家线程", "prefill",
+        low=0, high=1024, step=1,
+        note="0 表示每个物理核一个（主机线程所在核除外）",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "pool_cores", "--pool-cores", "CPU 线程绑定", "prefill", "string",
+        note="如 0,2,4,6 或 2-14:2；留空按默认每核一个",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "host_core", "--host-core", "主机线程核", "prefill", "enum",
+        choices=[
+            {"value": "first", "label": "first"},
+            {"value": "last", "label": "last"},
+            {"value": "sibling", "label": "sibling"},
+        ],
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    # -- prompt / conversation cache --------------------------------------
+    _kv_engine_spec(
+        "prompt_cache", "--prompt-cache", "提示检查点", "cache",
+        low=0, high=64, step=1,
+        note="每个检查点约占 118 MB 内存；0 表示每次从头读提示",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "prompt_cache_every", "--prompt-cache-every", "检查点间隔（token）", "cache",
+        low=0, high=1048576, step=1024,
+        note="0 表示关闭周期性检查点",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "prompt_cache_tail", "--prompt-cache-tail", "末尾额外检查点", "cache", "boolean",
+        note="需要 --prompt-cache 且 --prompt-cache-every > 0",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "prompt_cache_spread", "--prompt-cache-spread", "检查点向后铺开", "cache", "boolean",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "conversation_cache_mib", "--conversation-cache-mib", "会话停放内存（MiB）", "cache",
+        low=0, high=1048576, step=256,
+        note="0 关闭；留空按空闲内存自动（最多 8192）",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "conversation_cache_slots", "--conversation-cache-slots", "会话停放槽位", "cache",
+        low=0, high=64, step=1,
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "conversation_cache_min_free_mib", "--conversation-cache-min-free-mib",
+        "会话停放内存下限（MiB）", "cache", low=0, high=1048576, step=256,
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "conversation_cache_min_tokens", "--conversation-cache-min-tokens",
+        "停放最小 token", "cache", low=0, high=1048576, step=1,
+        note="0 表示任何会话都可停放",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "conversation_cache_park_gain", "--conversation-cache-park-gain",
+        "停放增长阈值", "cache", low=0, high=1048576, step=1,
+        note="0 表示每轮都停放",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "memory_limit_mib", "--memory-limit-mib", "内存上限（MiB）", "cache",
+        low=0, high=4194304, step=256,
+        note="0 表示不限制；容器看不到真实限制时使用",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    # -- runtime / VRAM ----------------------------------------------------
+    _kv_engine_spec(
+        "vram_reserve_mib", "--vram-reserve-mib", "VRAM 预留（MiB）", "runtime",
+        low=0, high=8192, step=64,
+        note="留给系统的显存；0 表示不预留，留空由服务器按视觉加减",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "vram_elastic", "--vram-elastic", "弹性显存", "runtime", "boolean",
+        note="专家缓存分段，可在请求间把显存让给其它程序",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "gpu", "--gpu", "GPU 列表", "runtime", "string",
+        note="逗号分隔的 nvidia-smi/PCI 序号；留空使用全部可见 GPU",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "layer_split", "--layer-split", "多卡层划分", "runtime", "string",
+        note="auto 或后续每张卡的首层，如 18 或 16,32",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "trim_stage_weights", "--trim-stage-weights", "按卡裁剪密集权重", "runtime",
+        "boolean",
+        note="显式层拆分时每张卡只加载自己的层",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    # -- vision ------------------------------------------------------------
+    _kv_engine_spec(
+        "vision_threads", "vision.threads", "编码线程", "vision",
+        low=0, high=256, step=1,
+        config_path=("vision", "threads"), vision_only=True,
+        note="strata-vision 的 CPU 线程数；0 或留空由编码器选择",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "vision_max_tokens", "vision.max_tokens", "图片最大 token", "vision",
+        low=1, high=1048576, step=1,
+        config_path=("vision", "max_tokens"), vision_only=True,
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "vision_min_tokens", "vision.min_tokens", "图片最小 token", "vision",
+        low=0, high=1048576, step=1,
+        config_path=("vision", "min_tokens"), vision_only=True,
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "vision_elastic", "vision.elastic", "视觉编码器按需启动", "vision",
+        "boolean", config_path=("vision", "elastic"), vision_only=True,
+        note="首张图片时才加载编码器",
+        group_labels=STRATA_GROUP_LABELS,
+    ),
+]
+STRATA_ENGINE_BY_KEY = {spec["key"]: spec for spec in STRATA_ENGINE_SPECS}
+STRATA_VISION_KEYS = {
+    "vision_threads": "threads",
+    "vision_max_tokens": "max_tokens",
+    "vision_min_tokens": "min_tokens",
+    "vision_elastic": "elastic",
+}
+
+
+def strata_engine_schema() -> list[dict[str, Any]]:
+    return [dict(spec) for spec in STRATA_ENGINE_SPECS]
+
+
+# ---------------------------------------------------------------------------
 # NInfer per-model engine options
 #
 # These are the serve-process flags of ninfer-serve (see serve_options.cpp),
@@ -2384,6 +2790,268 @@ def kvmem_poly_apply_vision_values(
     config["vision"] = vision
 
 
+def strata_visible_vision_values(values: dict[str, Any] | None) -> dict[str, Any]:
+    """The vision_* entries of an engine_params payload."""
+    if not isinstance(values, dict):
+        return {}
+    return {key: value for key, value in values.items() if key in STRATA_VISION_KEYS}
+
+
+def _strata_effective_args(args: list[str], user: Any) -> list[str]:
+    """Apply Strata's user_args over the base args for display.
+
+    serve/server.py merges ``user_args`` over ``args`` at every start, so a
+    flag that only appears in ``user_args`` is still the effective value.
+    """
+    out = [str(item) for item in args]
+    if not isinstance(user, list) or not user:
+        return out
+    tokens = [str(item) for item in user]
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not token.startswith("-"):
+            out.append(token)
+            index += 1
+            continue
+        if "=" in token:
+            out = _config_switch_remove(out, token.split("=", 1)[0])
+            out.append(token)
+            index += 1
+            continue
+        nxt = tokens[index + 1] if index + 1 < len(tokens) else None
+        if nxt is not None and not nxt.startswith("-"):
+            out = _config_arg_remove(out, token)
+            out.extend([token, nxt])
+            index += 2
+            continue
+        out = _config_switch_remove(out, token)
+        out.append(token)
+        index += 1
+    return out
+
+
+def strata_engine_values(
+    args: list[str], config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Read the whitelisted Strata engine options from one model's config.
+
+    Nearly every option lives in ``args`` (plus the launcher's ``user_args``
+    overrides); the tokenizer and the ``vision`` block live in the JSON config
+    itself.
+    """
+    user = config.get("user_args") if isinstance(config, dict) else None
+    tokens = _strata_effective_args([str(item) for item in args], user)
+    out: dict[str, Any] = {}
+    for spec in STRATA_ENGINE_SPECS:
+        key = spec["key"]
+        if spec.get("config_path"):
+            raw = _config_path_value(config, spec["config_path"])
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                continue
+            if isinstance(raw, bool):
+                out[key] = raw
+            elif spec["type"] == "integer":
+                value = parse_int(raw)
+                if value is not None:
+                    out[key] = value
+            elif spec["type"] == "number":
+                try:
+                    out[key] = float(raw)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                out[key] = str(raw)
+            continue
+        if spec["type"] == "boolean":
+            out[key] = any(
+                _config_switch_present(tokens, flag) for flag in spec["flags"]
+            )
+            continue
+        raw = _config_arg_value(tokens, *spec["flags"])
+        if raw is None:
+            continue
+        if spec["type"] == "integer":
+            value = parse_int(raw)
+            if value is None:
+                continue
+        elif spec["type"] == "number":
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+        else:
+            value = raw
+        out[key] = value
+    return out
+
+
+def _strata_check_string_value(key: str, value: str) -> None:
+    """Reject option strings the engine would parse differently or reject."""
+    if key == "expert_cache":
+        if value != "auto":
+            number = parse_int(value)
+            if number is None or number < 0:
+                raise BadRequest("expert_cache：必须是 auto 或非负整数")
+    elif key == "prefill":
+        text = value
+        if text.startswith("auto:"):
+            text = text[len("auto:"):]
+            number = parse_int(text)
+            if number is None or number < 1:
+                raise BadRequest("prefill：auto 后缀必须是正整数")
+        elif value != "auto":
+            number = parse_int(value)
+            if number is None or number < 1:
+                raise BadRequest("prefill：必须是 auto、auto:N 或正整数")
+
+
+def normalize_strata_engine(values: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate Strata engine options; None explicitly clears a flag."""
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise BadRequest("engine_params must be an object")
+    out: dict[str, Any] = {}
+    for key, raw in values.items():
+        spec = STRATA_ENGINE_BY_KEY.get(key)
+        if spec is None:
+            raise BadRequest(f"unknown engine parameter {key!r}")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            out[key] = None
+            continue
+        kind = spec["type"]
+        if kind == "boolean":
+            if isinstance(raw, bool):
+                value = raw
+            elif raw in (0, 1):
+                value = bool(raw)
+            else:
+                raise BadRequest(f"{key}: expected true or false")
+        elif kind in ("enum", "string"):
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool) and kind == "string":
+                raw = str(raw)
+            if not isinstance(raw, str):
+                raise BadRequest(f"{key}: expected a string")
+            value = raw.strip()
+            if len(value) > 4096:
+                raise BadRequest(f"{key}: too long")
+            choices = spec.get("choices")
+            if choices and value not in [choice["value"] for choice in choices]:
+                allowed = ", ".join(str(choice["value"]) for choice in choices)
+                raise BadRequest(f"{key}: expected one of {allowed}")
+            if kind == "string":
+                _strata_check_string_value(key, value)
+        else:
+            value = _sampling_number(
+                key, raw, spec.get("min", 0), spec.get("max"),
+                integer=(kind == "integer"),
+                low_exclusive=bool(spec.get("exclusive_min")),
+            )
+        if key == "kv_resident" and value not in (0,) and int(value) < 20480:
+            raise BadRequest("kv_resident：0 表示关闭，否则至少 20480")
+        out[key] = value
+    return out
+
+
+def _strata_strip_user_flags(user: list[Any], flags: set[str]) -> list[str]:
+    """Remove every group of the given flags from a user_args list."""
+    out: list[str] = []
+    skip = False
+    for item in user:
+        text = str(item)
+        if skip:
+            skip = False
+            continue
+        if text in flags:
+            skip = True
+            continue
+        if any(text.startswith(flag + "=") for flag in flags):
+            continue
+        out.append(text)
+    return out
+
+
+def strata_apply_engine_values(
+    config: dict[str, Any], values: dict[str, Any]
+) -> list[str]:
+    """Write validated Strata options into a model config.
+
+    Edited flags are removed from ``user_args`` (which the server merges over
+    ``args`` at every start) and ``args_written`` is refreshed so the change is
+    not mistaken for a hand edit later.
+    """
+    if "tokenizer" in values:
+        value = values["tokenizer"]
+        if value is None:
+            config.pop("tokenizer", None)
+        else:
+            config["tokenizer"] = value
+    args = [str(item) for item in (config.get("args") or [])]
+    touched: set[str] = set()
+    for key, value in values.items():
+        spec = STRATA_ENGINE_BY_KEY.get(key)
+        if spec is None or spec.get("config_path"):
+            continue
+        flags = list(spec["flags"])
+        touched.update(flags)
+        if spec["type"] == "boolean":
+            for flag in flags:
+                args = _config_switch_remove(args, flag)
+            if value is True:
+                args.append(spec["flag"])
+            continue
+        if value is None:
+            for flag in flags:
+                args = _config_arg_remove(args, flag)
+            continue
+        for flag in flags[1:]:
+            args = _config_arg_remove(args, flag)
+        args = _config_arg_set(args, spec["flag"], value)
+    config["args"] = args
+    user = config.get("user_args")
+    if isinstance(user, list) and touched:
+        remaining = _strata_strip_user_flags(user, touched)
+        if remaining:
+            config["user_args"] = remaining
+        else:
+            config.pop("user_args", None)
+    config["args_written"] = list(args)
+    return sorted(touched)
+
+
+def strata_apply_vision_values(
+    config: dict[str, Any], values: dict[str, Any]
+) -> None:
+    """Write vision_* engine parameters into the model's "vision" object."""
+    wanted = strata_visible_vision_values(values)
+    if not wanted:
+        return
+    vision = config.get("vision")
+    if not isinstance(vision, dict):
+        if any(value is not None for value in wanted.values()):
+            raise BadRequest("该模型的配置没有 vision 段，无法设置视觉参数")
+        return
+    for key, value in wanted.items():
+        field = STRATA_VISION_KEYS[key]
+        if value is None:
+            vision.pop(field, None)
+        else:
+            vision[field] = value
+    maximum = parse_int(vision.get("max_tokens"))
+    minimum = parse_int(vision.get("min_tokens"))
+    if maximum is not None and maximum < 1:
+        raise BadRequest("vision_max_tokens（vision.max_tokens）必须大于 0")
+    if minimum is not None and minimum < 0:
+        raise BadRequest("vision_min_tokens（vision.min_tokens）不能为负数")
+    if maximum is not None and minimum is not None and minimum > maximum:
+        raise BadRequest("vision_min_tokens 不能大于 vision_max_tokens")
+    elastic = vision.get("elastic")
+    if elastic is not None and not isinstance(elastic, bool):
+        raise BadRequest("vision_elastic（vision.elastic）必须是 true 或 false")
+    config["vision"] = vision
+
+
 def kvmem_poly_fit_tuning(
     args: list[str],
     context: int,
@@ -2704,7 +3372,7 @@ class SamplingStore:
                 continue
             if engine == "llama" and key == "repetition_penalty":
                 target = "repeat_penalty"
-            elif engine == "kvmem" and key == "repeat_last_n":
+            elif engine in ("kvmem", "strata") and key == "repeat_last_n":
                 target = "penalty_last_n"
             elif engine == "ninfer" and key in ("repetition_penalty", "repeat_last_n"):
                 # NInfer has no repeat-window sampler and only accepts the
@@ -2869,6 +3537,7 @@ class Model:
                 "kvmem": "KVMem",
                 "ninfer": "NInfer",
                 "kvmem_llama": "KVMem + llama.cpp",
+                "strata": "Strata",
             }.get(self.engine, self.engine),
             # llama.cpp router UI reads model/name/status/architecture/meta/tags.
             "model": self.id,
@@ -3341,6 +4010,32 @@ def kvmem_llama_reference_config(
         config_dir = Path(str(models.get("dir") or ""))
         try:
             candidates = sorted(config_dir.glob("kvmem-llama-*.json"))
+        except OSError:
+            candidates = []
+    for path in candidates:
+        cfg = read_json(path)
+        if isinstance(cfg, dict) and isinstance(cfg.get("args"), list):
+            return path, cfg
+    return None, None
+
+
+def strata_reference_config(
+    engine_cfg: dict[str, Any],
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """The per-model JSON whose args seed a newly added Strata model."""
+    models = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+    engine_cwd = Path(str(engine_cfg.get("cwd") or "."))
+    raw = str(models.get("template") or "").strip()
+    candidates: list[Path] = []
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = engine_cwd / path
+        candidates.append(path)
+    else:
+        config_dir = Path(str(models.get("dir") or ""))
+        try:
+            candidates = sorted(config_dir.glob("strata-*.json"))
         except OSError:
             candidates = []
     for path in candidates:
@@ -3886,6 +4581,123 @@ def discover_kvmem_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
     return models
 
 
+STRATA_FAMILY_MODEL_NAMES = {
+    "qwen4exp": "qwen3.8-flash-next",
+    "qwen35moe": "qwen3.6-35b-a3b",
+    "deepseek41": "deepseek-v4.1-flash",
+}
+
+
+def strata_default_model_name(cfg: dict[str, Any], stem: str) -> str:
+    """Mirror serve/server.py's default_model_name() so readiness matches /v1/models."""
+    name = str(cfg.get("model_name") or "").strip()
+    if name:
+        return name
+    arch = str(cfg.get("arch") or "qwen4exp")
+    return str(STRATA_FAMILY_MODEL_NAMES.get(arch, "qwen3.8-flash-next")) or stem
+
+
+def discover_strata_models(engine_cfg: dict[str, Any]) -> list[Model]:
+    """Models of the standalone Strata server (one process per config)."""
+    models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+    config_dir = Path(str(models_cfg.get("dir") or ""))
+    engine_cwd = Path(str(engine_cfg.get("cwd") or "."))
+    engine_command = engine_cfg.get("command")
+    engine_binary = str(engine_command[0]) if isinstance(engine_command, list) and engine_command else ""
+    candidates = []
+    try:
+        for path in config_dir.glob("strata-*.json"):
+            try:
+                candidates.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+    except OSError:
+        candidates = []
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    models: list[Model] = []
+    seen: set[str] = set()
+    for _, path in candidates:
+        cfg = read_json(path)
+        if not isinstance(cfg, dict):
+            continue
+        args = cfg.get("args")
+        if not isinstance(args, list):
+            continue
+        args = [str(item) for item in args]
+        native_raw = _config_arg_value(args, "--native", "--model") or ""
+        if not native_raw:
+            continue
+        model_id = strata_default_model_name(cfg, path.stem.removeprefix("strata-"))
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        ctx = parse_int(cfg.get("context_length"))
+        if ctx is None:
+            ctx = parse_int(_config_arg_value(args, "--max-context", "--ctx"))
+        max_out = parse_int(cfg.get("default_max_tokens"))
+        if max_out is not None and max_out <= 0:
+            max_out = None
+        aliases_raw = cfg.get("aliases")
+        if isinstance(aliases_raw, str):
+            aliases = [x.strip() for x in aliases_raw.split(",") if x.strip()]
+        elif isinstance(aliases_raw, list):
+            aliases = [str(x).strip() for x in aliases_raw if str(x).strip()]
+        else:
+            aliases = []
+        cwd = Path(str(cfg.get("cwd") or engine_cwd))
+        if not cwd.is_absolute():
+            cwd = engine_cwd / cwd
+        exe_raw = str(cfg.get("exe") or engine_binary)
+        exe = Path(exe_raw)
+        if not exe.is_absolute():
+            exe = cwd / exe
+        native = Path(native_raw)
+        if not native.is_absolute():
+            native = cwd / native
+        tokenizer_raw = str(cfg.get("tokenizer") or "").strip()
+        tokenizer = Path(tokenizer_raw) if tokenizer_raw else None
+        if tokenizer is not None and not tokenizer.is_absolute():
+            tokenizer = cwd / tokenizer
+        vision_cfg = cfg.get("vision") if isinstance(cfg.get("vision"), dict) else {}
+        mmproj_raw = str(vision_cfg.get("mmproj") or "").strip()
+        mmproj = Path(mmproj_raw) if mmproj_raw else None
+        if mmproj is not None and not mmproj.is_absolute():
+            mmproj = cwd / mmproj
+        problem = None
+        if not exe.is_file() or not os.access(exe, os.X_OK):
+            problem = f"引擎可执行文件不存在或不可执行（{exe}）"
+        elif not native.is_file():
+            problem = f"模型文件不存在（{native}）"
+        elif tokenizer is not None and not tokenizer.exists():
+            problem = f"tokenizer 不存在（{tokenizer}）"
+        elif mmproj is not None and not mmproj.is_file():
+            problem = f"视觉编码器不存在（{mmproj}）"
+        vision = bool(vision_cfg)
+        if vision and mmproj is None:
+            problem = problem or "vision 段缺少 mmproj"
+        models.append(
+            Model(
+                id=model_id,
+                engine="strata",
+                engine_model=model_id,
+                config_path=str(path),
+                display_name=str(cfg.get("display_name") or model_id),
+                aliases=aliases,
+                context_length=ctx,
+                max_output_tokens=max_out,
+                multimodal=vision,
+                vision_gpu=bool(vision_cfg.get("gpu")) if vision else False,
+                video=bool(vision_cfg.get("video")) if vision else False,
+                notes=cfg.get("notes"),
+                quantization=cfg.get("quantization"),
+                source="strata",
+                available=problem is None,
+                problem=problem,
+            )
+        )
+    return models
+
+
 class Registry:
     def __init__(self, config: dict[str, Any], base_dir: Path, log: logging.Logger):
         self.config = config
@@ -3933,6 +4745,8 @@ class Registry:
                     all_models.extend(discover_ninfer_models(engine_cfg))
                 elif kind == "kvmem_llama_dir":
                     all_models.extend(discover_kvmem_llama_models(engine_cfg))
+                elif kind == "strata_dir":
+                    all_models.extend(discover_strata_models(engine_cfg))
             except Exception:
                 self.log.exception("cannot scan models for engine %s", engine_id)
         counts: dict[str, int] = {}
@@ -4134,6 +4948,20 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "probe_timeout_s": 15,
         "log_path": "logs/llama-engine.log",
     },
+    "strata": {
+        "category": "Strata",
+        "name": "Strata",
+        "label": "Strata",
+        "kind": "strata",
+        "models_kind": "strata_dir",
+        "fields": ("binary", "cwd", "models_dir", "template"),
+        "model_key": "template",
+        "host": "127.0.0.1",
+        "port": 18084,
+        "start_timeout_s": 900,
+        "probe_timeout_s": 30,
+        "log_path": "logs/strata-engine.log",
+    },
     "kvmem": {
         "category": "kvmem",
         "name": "polystrata",
@@ -4179,7 +5007,7 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
 }
 # Display order: the management page groups slots by ``category`` and lists
 # them in this order, so the kvmem group shows llama.cpp → polystrata → ninfer.
-ENGINE_SLOT_ORDER = ("llama", "kvmem_llama", "kvmem", "ninfer")
+ENGINE_SLOT_ORDER = ("llama", "strata", "kvmem_llama", "kvmem", "ninfer")
 KV_PROBE_CODE = (
     "import serve.server\n"
     "print('LLM_ROUTER_KVPROBE_' + str(6 * 7))\n"
@@ -4197,6 +5025,15 @@ def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
             "cwd": str(cwd),
             "models_dir": str(base_dir / "models"),
             "preset": str(base_dir / "models.ini"),
+        }
+    if engine_id == "strata":
+        home = root / "Strata"
+        models_dir = home / "config"
+        return {
+            "binary": str(home / ".venv" / "bin" / "python"),
+            "cwd": str(home),
+            "models_dir": str(models_dir),
+            "template": str(models_dir / "strata-gyro-gyro-m.json"),
         }
     if engine_id == "kvmem":
         home = root / "kvmem"
@@ -4265,6 +5102,17 @@ def _slot_command(engine_id: str, fields: dict[str, str]) -> list[str]:
         # JSON; the manager inserts them after the executable.
         return [
             fields["binary"],
+            "--host", "{host}",
+            "--port", "{port}",
+        ]
+    if engine_id == "strata":
+        # Strata serves one model per process; the config names its artifact
+        # and every engine option, and there is no --switch-on-request.
+        return [
+            fields["binary"],
+            "-m", "serve.server",
+            "--engine", "strata",
+            "--config", "{config}",
             "--host", "{host}",
             "--port", "{port}",
         ]
@@ -4500,7 +5348,7 @@ def probe_engine_binary(
     """
     spec = ENGINE_SLOTS[engine_id]
     binary = fields["binary"]
-    if engine_id == "kvmem":
+    if engine_id in ("kvmem", "strata"):
         command = [binary, "-c", KV_PROBE_CODE]
     elif engine_id == "kvmem_llama":
         # --version is unsupported; the model-free capability dump identifies
@@ -4531,7 +5379,7 @@ def probe_engine_binary(
     stdout = proc.stdout.decode("utf-8", "replace") if proc.stdout else ""
     stderr = proc.stderr.decode("utf-8", "replace") if proc.stderr else ""
     output = (stdout + "\n" + stderr).strip()
-    if engine_id == "kvmem":
+    if engine_id in ("kvmem", "strata"):
         if proc.returncode != 0 or KV_PROBE_MARKER not in stdout:
             detail = _probe_tail(output)
             message = "binary：无法导入 serve.server"
@@ -5086,6 +5934,8 @@ def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
             return discover_ninfer_models(cfg)
         if engine_id == "kvmem_llama":
             return discover_kvmem_llama_models(cfg)
+        if engine_id == "strata":
+            return discover_strata_models(cfg)
         return discover_kvmem_models(cfg)
     except Exception as exc:
         raise BadRequest(f"无法扫描模型目录：{exc}") from exc
@@ -5269,7 +6119,7 @@ class EngineManager:
         command = self.cfg.get("command")
         if not isinstance(command, list) or not command:
             raise EngineFailure(f"{self.engine_id}: no command in config")
-        if self.kind == "kvmem" and not entry.config_path:
+        if self.kind in ("kvmem", "strata") and not entry.config_path:
             raise EngineFailure(f"{self.engine_id}: {entry.id} has no config path")
         if self.kind == "ninfer":
             model_cfg, artifact, args = self._single_model_config(entry)
@@ -5294,7 +6144,7 @@ class EngineManager:
         extra = self.cfg.get("env")
         if isinstance(extra, dict):
             env.update({str(k): str(v) for k, v in extra.items()})
-        if self.kind in ("kvmem", "ninfer", "kvmem_llama") and entry.config_path:
+        if self.kind in ("kvmem", "ninfer", "kvmem_llama", "strata") and entry.config_path:
             cfg = read_json(Path(entry.config_path))
             if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict):
                 env.update({str(k): str(v) for k, v in cfg["env"].items()})
@@ -5342,7 +6192,7 @@ class EngineManager:
         self.started_at = now()
         self.current_model = (
             entry.engine_model
-            if self.kind in ("kvmem", "ninfer", "kvmem_llama")
+            if self.kind in ("kvmem", "ninfer", "kvmem_llama", "strata")
             else None
         )
         self._write_state()
@@ -5353,6 +6203,8 @@ class EngineManager:
                 self._wait_ninfer_ready(entry)
             elif self.kind == "kvmem_llama":
                 self._wait_kvmem_llama_ready(entry)
+            elif self.kind == "strata":
+                self._wait_single_model_ready(entry, "Strata", "engines.strata.api_key")
             else:
                 self._wait_kvmem_ready(entry)
         except Exception:
@@ -5552,7 +6404,7 @@ class EngineManager:
             # An engine that just started reports itself healthy before its models
             # are loaded; always confirm the router's per-model state.
             self._load_llama_model(entry)
-        elif self.kind in ("ninfer", "kvmem_llama"):
+        elif self.kind in ("ninfer", "kvmem_llama", "strata"):
             # These engines run one artifact per process; switching models
             # means a restart, which the gateway already does when it switches
             # engines.
@@ -5676,7 +6528,7 @@ class EngineManager:
             self.current_entry = None
             self._clear_state()
             return
-        if self.kind in ("ninfer", "kvmem_llama"):
+        if self.kind in ("ninfer", "kvmem_llama", "strata"):
             # Single-model engines have no unload endpoint; stopping the
             # engine is the unload, and the next request starts it again.
             self.stop()
@@ -5728,11 +6580,11 @@ class EngineManager:
         pgid = self.pgid or pid
         self.log.info("stopping engine %s (pid=%s, pgid=%s)", self.engine_id, pid, pgid)
         if proc.poll() is None:
-            if self.kind in ("ninfer", "kvmem_llama"):
+            if self.kind in ("ninfer", "kvmem_llama", "strata"):
                 # The first SIGINT only asks NInfer to confirm ("press Ctrl+C
                 # again"), so a plain SIGINT would burn the full stop timeout.
-                # llama-kvmem-server has no unload path either. SIGTERM stops
-                # both directly.
+                # llama-kvmem-server has no unload path either, and Strata
+                # takes SIGTERM as its graceful Ctrl+C. SIGTERM stops all three.
                 kill_group(pgid, signal.SIGTERM)
                 timeout = min(float(self.timeouts.get("stop_timeout_s") or 90), 15.0)
                 try:
@@ -6610,6 +7462,7 @@ class Gateway:
             "kvmem_dir": "kvmem",
             "ninfer_dir": "ninfer",
             "kvmem_llama_dir": "kvmem_llama",
+            "strata_dir": "strata",
         }.get(str(kind), "")
 
     def _engine_config_label(self) -> str:
@@ -6690,7 +7543,7 @@ class Gateway:
         self, engine_id: str, paths: Any, create: bool = False
     ) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama、kvmem、ninfer 或 kvmem_llama")
+            raise BadRequest("engine 必须是 llama、strata、kvmem、ninfer 或 kvmem_llama")
         engines_cfg = self.config.get("engines")
         if engines_cfg is None:
             engines_cfg = {}
@@ -6787,7 +7640,7 @@ class Gateway:
 
     def restart_engine_paths(self, engine_id: str) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama、kvmem、ninfer 或 kvmem_llama")
+            raise BadRequest("engine 必须是 llama、strata、kvmem、ninfer 或 kvmem_llama")
         engines_cfg = self.config.get("engines")
         if not isinstance(engines_cfg, dict) or not isinstance(
             engines_cfg.get(engine_id), dict
@@ -6830,7 +7683,7 @@ class Gateway:
 
     def _engine_update_config(self, engine_id: str) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama、kvmem、ninfer 或 kvmem_llama")
+            raise BadRequest("engine 必须是 llama、strata、kvmem、ninfer 或 kvmem_llama")
         engines_cfg = self.config.get("engines")
         if not isinstance(engines_cfg, dict) or not isinstance(
             engines_cfg.get(engine_id), dict
@@ -7967,6 +8820,26 @@ class Gateway:
                     },
                     "default_params": self.default_sampling(engine_id),
                 }
+            elif kind == "strata_dir":
+                template_path, template = strata_reference_config(engine_cfg)
+                template_args = [str(item) for item in (template or {}).get("args") or []]
+                template_vision = (
+                    template.get("vision") if isinstance((template or {}).get("vision"), dict) else {}
+                )
+                out[engine_id] = {
+                    "engine": engine_id,
+                    "kind": "strata",
+                    "label": "Strata",
+                    "models_dir": models_cfg.get("dir"),
+                    "template": str(template_path) if template_path else None,
+                    "engine_params": strata_engine_values(template_args, template),
+                    "defaults": {
+                        "args": template_args,
+                        "vision": bool(template_vision),
+                        "vision_gpu": bool(template_vision.get("gpu")),
+                    },
+                    "default_params": self.default_sampling(engine_id),
+                }
             elif kind == "kvmem_llama_dir":
                 template_path, template = kvmem_llama_reference_config(engine_cfg)
                 out[engine_id] = {
@@ -7999,11 +8872,12 @@ class Gateway:
             "engines": self.manage_engines(),
             "param_schema": {
                 kind: sampling_schema(kind)
-                for kind in ("llama", "kvmem", "ninfer", "kvmem_llama")
+                for kind in ("llama", "kvmem", "ninfer", "kvmem_llama", "strata")
             },
             "kvmem_engine_schema": kvmem_llama_engine_schema(),
             "kvmem_poly_engine_schema": kvmem_poly_engine_schema(),
             "ninfer_engine_schema": ninfer_engine_schema(),
+            "strata_engine_schema": strata_engine_schema(),
             "smoke_image": str(self.smoke_image_path),
             "engine_defaults": {
                 "kv": {"method": "q8_0/q8_0 (k8v8)", "fallback": "engine default"},
@@ -8094,7 +8968,7 @@ class Gateway:
         if not engine_id or engine_id not in self.config.get("engines", {}):
             raise BadRequest("engine must name a configured engine")
         kind = self._engine_kind(engine_id)
-        if kind not in ("llama_dir", "kvmem_dir", "ninfer_dir", "kvmem_llama_dir"):
+        if kind not in ("llama_dir", "kvmem_dir", "ninfer_dir", "kvmem_llama_dir", "strata_dir"):
             raise BadRequest(f"engine {engine_id!r} cannot add models")
         model = payload.get("model")
         if not isinstance(model, str) or not model.strip():
@@ -8136,6 +9010,8 @@ class Gateway:
                 raise BadRequest(f"{label} must be a string")
         if kind == "kvmem_dir" and (cache_type_k is not None or cache_type_v is not None):
             raise BadRequest("KVMem 引擎 KV 精度固定 q8_0，不能设置 K/V 精度")
+        if kind == "strata_dir" and (cache_type_k is not None or cache_type_v is not None):
+            raise BadRequest("Strata 的 KV 精度通过引擎参数 --kv 设置")
         if kind == "ninfer_dir":
             if vision_path:
                 raise BadRequest("NInfer 的视觉塔内嵌在 .ninfer 模型里，不需要 mmproj 路径")
@@ -8163,6 +9039,8 @@ class Gateway:
             engine_values = normalize_kvmem_poly_engine(raw_engine_params)
         elif kind == "ninfer_dir":
             engine_values = normalize_ninfer_engine(raw_engine_params)
+        elif kind == "strata_dir":
+            engine_values = normalize_strata_engine(raw_engine_params)
         else:
             if raw_engine_params:
                 raise BadRequest("只有 KVMem 引擎接受 engine_params")
@@ -8193,6 +9071,8 @@ class Gateway:
             steps[2]["label"] = "选择 KV 精度与 KVMem 参数"
         if kind == "kvmem_dir":
             steps[2]["label"] = "选择 KV 精度、MTP 与 KVMem 参数"
+        if kind == "strata_dir":
+            steps[2]["label"] = "复制模板并应用 Strata 参数"
         job = {
             "id": uuid.uuid4().hex[:12],
             "kind": "add",
@@ -8821,6 +9701,261 @@ class Gateway:
                 job["status"] = job.get("status") if job.get("status") != "running" else "failed"
                 job["finished_at"] = job.get("finished_at") or iso_now()
 
+    def _model_add_strata_worker(
+        self,
+        job: dict[str, Any],
+        engine_id: str,
+        model: Path,
+        vision: Path | None,
+        smoke: bool,
+        vision_gpu: bool,
+    ) -> None:
+        """Add a model to the standalone Strata server.
+
+        Strata serves one model per config, so each model gets its own
+        strata-*.json cloned from the slot template: the template's pack,
+        expert profile and engine options stay, while --native (and the PLE
+        shard when it pointed at the same file) move to the new model.
+        """
+        engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
+        config_file: Path | None = None
+        name: str | None = None
+        try:
+            self._job_step(job, "paths", "running")
+            source_is_dir = model.is_dir()
+            auto_vision = None
+            if source_is_dir:
+                picked_model, auto_vision = self._pick_gguf_files(model)
+                if picked_model is None:
+                    raise BadRequest(f"目录中没有 .gguf 模型文件：{model}")
+                model = picked_model
+            elif not model.is_file():
+                raise BadRequest(f"模型路径不存在：{model}")
+            if model.suffix.lower() != ".gguf":
+                raise BadRequest("模型路径不是 .gguf 文件")
+            if vision is None and auto_vision is not None:
+                vision = auto_vision
+            if vision is not None:
+                if not vision.is_file():
+                    raise BadRequest(f"视觉路径不存在：{vision}")
+                if vision.suffix.lower() != ".gguf":
+                    raise BadRequest("视觉路径不是 .gguf 文件")
+                with self.model_jobs_lock:
+                    if not any(
+                        step.get("key") == "vision_smoke"
+                        for step in job.get("steps") or []
+                    ):
+                        job.setdefault("steps", []).append({
+                            "key": "vision_smoke",
+                            "label": "视觉冒烟测试",
+                            "status": "pending",
+                            "detail": "",
+                        })
+            path_note = (
+                f"目录 {model.parent} → {model.name}" if source_is_dir else str(model)
+            )
+            self._job_step(
+                job, "paths", "ok",
+                path_note + (f"；视觉 {vision.name}" if vision is not None else "；无视觉"),
+            )
+
+            self._job_step(job, "metadata", "running")
+            info = gguf_model_info(model)
+            if info is None:
+                raise BadRequest("无法读取 GGUF 头：文件不是有效的 GGUF 模型")
+            context, context_note = resolve_add_context(info, job.get("context_length"))
+            base_name = job.get("name") or (
+                model.parent.name if source_is_dir else model.stem
+            )
+            name = slugify_model_id(base_name)
+            if self.registry.resolve(name) is not None:
+                raise BadRequest(f"模型 ID {name} 已存在")
+            vision_flags = None
+            if vision is not None:
+                vision_flags = gguf_bool_metadata(
+                    vision, {"clip.has_vision_encoder", "clip.has_audio_encoder"}
+                )
+                if vision_flags is None:
+                    raise BadRequest("无法读取视觉文件头")
+                if not vision_flags.get("clip.has_vision_encoder"):
+                    raise BadRequest("视觉文件没有 clip.has_vision_encoder（不是视觉 mmproj）")
+            job["name"] = name
+            self._job_step(
+                job, "metadata", "ok",
+                f"架构 {info.get('architecture') or '未知'}；{context_note}；ID {name}"
+                + ("；视觉 mmproj 有效" if vision is not None else ""),
+            )
+
+            self._job_step(job, "kv", "running")
+            template_path, template = strata_reference_config(engine_cfg)
+            if template is None:
+                raise BadRequest(
+                    "Strata 引擎没有可用的模板配置；请先在引擎设置中指定 template"
+                )
+            old_args = [str(item) for item in (template.get("args") or [])]
+            old_native = _config_arg_value(old_args, "--native", "--model") or ""
+            old_ple = _config_arg_value(old_args, "--ple-gguf") or ""
+            requested_engine = {
+                key: value
+                for key, value in (job.get("engine_params") or {}).items()
+                if value is not None
+            }
+            # The form's model path is authoritative for --native.
+            requested_engine.pop("native", None)
+            new_cfg = json.loads(json.dumps(template))
+            strata_apply_engine_values(new_cfg, requested_engine)
+            args = [str(item) for item in (new_cfg.get("args") or [])]
+            args = _config_arg_set(args, "--native", str(model))
+            args = _config_arg_remove(args, "--model")
+            same_ple = bool(old_ple) and (
+                not old_native or os.path.abspath(old_ple) == os.path.abspath(old_native)
+            )
+            if same_ple:
+                args = _config_arg_set(args, "--ple-gguf", str(model))
+            # Clamp the template's context to the new model's GGUF unless the
+            # form explicitly asked for a value.
+            if "max_context" not in requested_engine:
+                template_ctx = parse_int(_config_arg_value(old_args, "--max-context", "--ctx"))
+                gguf_ctx = int(info.get("context_length") or 0)
+                clamped = template_ctx
+                if gguf_ctx > 0 and (clamped is None or clamped <= 0 or clamped > gguf_ctx):
+                    clamped = gguf_ctx
+                if clamped:
+                    args = _config_arg_set(args, "--max-context", clamped)
+                    args = _config_arg_remove(args, "--ctx")
+            if vision is not None:
+                if "--vision" not in args:
+                    args.append("--vision")
+            else:
+                args = _config_switch_remove(args, "--vision")
+            # The model path, context clamp and --vision edits must win over
+            # the template's user_args as well.
+            touched = {"--native", "--model", "--ple-gguf", "--max-context", "--ctx", "--vision"}
+            user = new_cfg.get("user_args")
+            if isinstance(user, list):
+                remaining = _strata_strip_user_flags(user, touched)
+                if remaining:
+                    new_cfg["user_args"] = remaining
+                else:
+                    new_cfg.pop("user_args", None)
+            new_cfg["args"] = args
+            new_cfg["args_written"] = list(args)
+            kv_value = _config_arg_value(args, "--kv") or "fp16"
+            spec_value = _config_arg_value(args, "--spec")
+            ctx_value = parse_int(_config_arg_value(args, "--max-context", "--ctx"))
+            self._job_step(
+                job, "kv", "ok",
+                f"KV {kv_value}"
+                + (f"；上下文 {ctx_value:,}" if ctx_value else "")
+                + (f"；MTP 窗口 {spec_value}" if spec_value else "")
+                + (f"；模板 {template_path.name}" if template_path else ""),
+            )
+
+            self._job_step(job, "config", "running")
+            params = job.get("params") or self.default_sampling(engine_id)
+            self.params.replace(name, params, "strata")
+            models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+            config_dir = Path(str(models_cfg.get("dir") or ""))
+            config_file = config_dir / f"strata-{slugify_model_id(name).lower()}.json"
+            if config_file.exists():
+                raise BadRequest(f"配置已存在：{config_file}")
+            new_cfg["model_name"] = name
+            new_cfg["display_name"] = str(info.get("name") or model.stem)
+            new_cfg["aliases"] = []
+            new_cfg["notes"] = (
+                "Strata 单模型；参数"
+                + (f"复制自 {template_path.name}" if template_path else "使用模板")
+            )
+            old_log = str(new_cfg.get("log") or "").strip()
+            if old_log:
+                new_cfg["log"] = str(Path(old_log).with_name(f"strata-{name}.log"))
+            if vision is not None:
+                vision_cfg = new_cfg.get("vision")
+                vision_cfg = dict(vision_cfg) if isinstance(vision_cfg, dict) else {}
+                vision_cfg["mmproj"] = str(vision)
+                vision_cfg["model"] = str(model)
+                vision_cfg["gpu"] = bool(vision_gpu)
+                new_cfg["vision"] = vision_cfg
+                # vision_* options only make sense once a mmproj is attached.
+                strata_apply_vision_values(new_cfg, requested_engine)
+            else:
+                new_cfg.pop("vision", None)
+            if not new_cfg.get("exe"):
+                command = engine_cfg.get("command")
+                if isinstance(command, list) and command:
+                    new_cfg["exe"] = str(command[0])
+            if not new_cfg.get("cwd"):
+                new_cfg["cwd"] = str(engine_cfg.get("cwd") or "")
+            write_json_atomic(config_file, new_cfg)
+            job["config_path"] = str(config_file)
+            self._job_step(
+                job, "config", "ok",
+                f"已写入 {config_file}"
+                + (
+                    f"；视觉走 {'GPU' if vision_gpu else 'CPU'}"
+                    if vision is not None else "；无视觉"
+                ),
+            )
+
+            self._apply_job_display_name(job, name)
+            self._job_step(job, "start", "running", "正在停止当前引擎…")
+            self.ensure_no_async()
+            with self.cond:
+                engine_alive = bool(self.engine is not None and self.engine.alive())
+            if engine_alive:
+                self.stop_engine()
+            self.registry.reload()
+            entry = self.registry.resolve(name)
+            if entry is None:
+                raise EngineFailure("写入配置后注册表仍未发现该模型")
+            if not entry.available:
+                raise EngineFailure(f"引擎配置不可用：{entry.problem}")
+            self._job_step(job, "start", "running", "正在启动引擎并加载模型…")
+            self.preload(name)
+            self._job_step(
+                job, "start", "ok",
+                f"{entry.engine} 已加载 {entry.id}（引擎模型 {entry.engine_model}）",
+            )
+
+            if smoke:
+                self._job_step(job, "smoke", "running", "发送文本请求…")
+                text, text_tokens = self._smoke_completion(
+                    entry, [{"role": "user", "content": SMOKE_PROMPT}], job
+                )
+                self._job_step(
+                    job, "smoke", "ok",
+                    f"文本正常（prompt {text_tokens} tokens）：{text[:80]}",
+                )
+                if vision is not None:
+                    self._vision_smoke(entry, job, text_tokens)
+            else:
+                self._job_step(job, "smoke", "ok", "跳过（未勾选冒烟测试）")
+                if vision is not None:
+                    self._job_step(job, "vision_smoke", "ok", "跳过（未勾选冒烟测试）")
+
+            self._job_finish(job, "ok")
+            self.log.info("Strata model add %s (%s) finished", job["id"], name)
+        except Exception as exc:
+            message = exc.message if isinstance(exc, GatewayError) else str(exc)
+            self.log.exception("Strata model add %s failed", job["id"])
+            with self.model_jobs_lock:
+                for step in job.get("steps") or []:
+                    if step.get("status") == "running":
+                        step["status"] = "fail"
+                        if message:
+                            step["detail"] = message[:300]
+                if not any(step.get("status") == "fail" for step in job.get("steps") or []):
+                    for step in job.get("steps") or []:
+                        if step.get("status") == "pending":
+                            step["status"] = "fail"
+                            break
+            self._rollback_model_add(job, "strata", name, None, config_file)
+            self._job_finish(job, "failed", message)
+        finally:
+            with self.model_jobs_lock:
+                job["status"] = job.get("status") if job.get("status") != "running" else "failed"
+                job["finished_at"] = job.get("finished_at") or iso_now()
+
     def _model_add_worker(
         self,
         job: dict[str, Any],
@@ -8839,6 +9974,11 @@ class Gateway:
             return
         if kind == "kvmem_llama_dir":
             self._model_add_kvmem_llama_worker(
+                job, engine_id, model, vision, smoke, vision_gpu
+            )
+            return
+        if kind == "strata_dir":
+            self._model_add_strata_worker(
                 job, engine_id, model, vision, smoke, vision_gpu
             )
             return
@@ -9283,26 +10423,22 @@ class Gateway:
             if not preset_path.is_file() or not remove_llama_preset(preset_path, entry.engine_model):
                 raise BadRequest(f"models.ini 中找不到 [{entry.engine_model}] 段")
             removed.append(str(preset_path))
-        elif entry.source in ("ninfer", "kvmem_llama"):
-            config_file = Path(str(entry.config_path or ""))
-            if not config_file.is_file():
-                raise BadRequest(f"配置文件不存在：{config_file}")
-            config_file.unlink()
-            removed.append(str(config_file))
         else:
             config_file = Path(str(entry.config_path or ""))
             if not config_file.is_file():
                 raise BadRequest(f"配置文件不存在：{config_file}")
             config_file.unlink()
             removed.append(str(config_file))
-            engine_cfg = self.config.get("engines", {}).get(entry.engine) or {}
-            models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
-            meta_path = Path(str(models_cfg.get("meta") or Path(str(models_cfg.get("dir") or "")) / "models.json"))
-            meta = read_json(meta_path, {})
-            if isinstance(meta, dict) and entry.id in meta:
-                meta.pop(entry.id, None)
-                write_json_atomic(meta_path, meta)
-                removed.append(str(meta_path))
+            if entry.engine == "kvmem":
+                # KVMem keeps a models.json next to the per-model strata-*.json files.
+                engine_cfg = self.config.get("engines", {}).get(entry.engine) or {}
+                models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+                meta_path = Path(str(models_cfg.get("meta") or Path(str(models_cfg.get("dir") or "")) / "models.json"))
+                meta = read_json(meta_path, {})
+                if isinstance(meta, dict) and entry.id in meta:
+                    meta.pop(entry.id, None)
+                    write_json_atomic(meta_path, meta)
+                    removed.append(str(meta_path))
         try:
             self.set_model_display_name(entry.id, None)
         except Exception:
@@ -9364,6 +10500,8 @@ class Gateway:
             return normalize_ninfer_engine(raw)
         if entry.engine == "kvmem_llama":
             return normalize_kvmem_llama_engine(raw)
+        if entry.engine == "strata":
+            return normalize_strata_engine(raw)
         if entry.engine != "llama":
             raise BadRequest(f"引擎 {entry.engine!r} 不支持修改上下文或 K/V 精度")
         preset_path = Path(str(entry.config_path or ""))
@@ -9442,7 +10580,7 @@ class Gateway:
             preset_path = Path(str(entry.config_path or ""))
             if entry.source != "preset" or not preset_path.is_file():
                 raise BadRequest("该模型由目录扫描发现，没有可编辑的 models.ini 预设段")
-        elif entry.engine in ("kvmem", "kvmem_llama"):
+        elif entry.engine in ("kvmem", "kvmem_llama", "strata"):
             config_path = Path(str(entry.config_path or ""))
             if not config_path.is_file():
                 raise BadRequest("找不到该模型的配置文件")
@@ -9591,6 +10729,38 @@ class Gateway:
             write_json_atomic(config_path, config)
             if fresh_values is not None:
                 result["engine_params"] = fresh_values
+        elif entry.engine == "strata":
+            config_path = Path(str(entry.config_path or ""))
+            config = read_json(config_path, {})
+            if not isinstance(config, dict):
+                raise BadRequest("找不到该模型的配置文件")
+            if engine_values and engine_values.get("max_context") is not None:
+                current_args = [str(item) for item in (config.get("args") or [])]
+                scaling = engine_values.get("rope_scaling")
+                if scaling is None:
+                    scaling = _config_arg_value(current_args, "--rope-scaling")
+                if str(scaling or "none").strip().lower() in ("", "none"):
+                    native_raw = _config_arg_value(current_args, "--native", "--model")
+                    native = Path(native_raw) if native_raw else None
+                    cwd = Path(str(config.get("cwd") or ""))
+                    if native is not None and not native.is_absolute() and str(cwd):
+                        native = cwd / native
+                    info = gguf_model_info(native) if native is not None else None
+                    limit = int((info or {}).get("context_length") or 0)
+                    requested = int(engine_values["max_context"])
+                    if limit and requested > limit:
+                        raise BadRequest(
+                            f"上下文长度 {requested:,} 超过 GGUF 上限 {limit:,}；"
+                            "如需更大上下文请同时设置 RoPE 扩展"
+                        )
+            if engine_values:
+                strata_apply_engine_values(config, engine_values)
+                strata_apply_vision_values(config, engine_values)
+            if changed_vision:
+                if not isinstance(config.get("vision"), dict):
+                    raise BadRequest("该模型的配置没有 vision 段，无法设置视觉运行位置")
+                config["vision"]["gpu"] = bool(vision_gpu)
+            write_json_atomic(config_path, config)
         if display_name is not None:
             self.set_model_display_name(entry.id, display_name)
         self.registry.reload()
@@ -9610,6 +10780,8 @@ class Gateway:
             result["engine_params"] = self._kvmem_llama_engine_values(fresh or entry)
         elif entry.engine == "ninfer":
             result["engine_params"] = self._ninfer_engine_values(fresh or entry)
+        elif entry.engine == "strata":
+            result["engine_params"] = self._strata_engine_values(fresh or entry)
         result["vision_gpu"] = (
             fresh.vision_gpu if fresh is not None else bool(vision_gpu)
         )
@@ -9779,6 +10951,19 @@ class Gateway:
             return {}
         return ninfer_engine_values([str(item) for item in args])
 
+    def _strata_engine_values(self, entry: Model) -> dict[str, Any]:
+        """Whitelisted Strata engine options from one strata-*.json."""
+        if entry.engine != "strata":
+            return {}
+        config_path = Path(str(entry.config_path or ""))
+        config = read_json(config_path, {})
+        args = config.get("args") if isinstance(config, dict) else None
+        if not isinstance(args, list):
+            return {}
+        return strata_engine_values(
+            [str(item) for item in args], config if isinstance(config, dict) else None
+        )
+
     def model_list(self) -> dict[str, Any]:
         with self.cond:
             active = self.active
@@ -9800,6 +10985,8 @@ class Gateway:
                 item["engine_params"] = self._kvmem_llama_engine_values(model)
             elif model.engine == "ninfer":
                 item["engine_params"] = self._ninfer_engine_values(model)
+            elif model.engine == "strata":
+                item["engine_params"] = self._strata_engine_values(model)
             if status == "failed" and last_error and target is not None and target.id == model.id:
                 item["error"] = last_error
             data.append(item)
@@ -9816,6 +11003,8 @@ class Gateway:
             item["engine_params"] = self._kvmem_llama_engine_values(model)
         elif model.engine == "ninfer":
             item["engine_params"] = self._ninfer_engine_values(model)
+        elif model.engine == "strata":
+            item["engine_params"] = self._strata_engine_values(model)
         return item
 
     def params_view(self) -> dict[str, Any]:
@@ -9832,6 +11021,8 @@ class Gateway:
                 row["engine_params"] = self._kvmem_llama_engine_values(entry)
             elif entry.engine == "ninfer":
                 row["engine_params"] = self._ninfer_engine_values(entry)
+            elif entry.engine == "strata":
+                row["engine_params"] = self._strata_engine_values(entry)
             data.append(row)
         return {"object": "list", "data": data}
 

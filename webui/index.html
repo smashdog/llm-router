@@ -652,7 +652,7 @@
       <div class="mark" aria-hidden="true">LR</div>
       <div>
         <h1>LLM Router</h1>
-        <p>llama.cpp、KVMem、NInfer 与 KVMem + llama.cpp 的统一网关</p>
+        <p>llama.cpp、Strata、KVMem、NInfer 与 KVMem + llama.cpp 的统一网关</p>
       </div>
     </div>
     <div class="top-right">
@@ -714,6 +714,7 @@
       <div class="chips" id="engine-filter" role="group" aria-label="按引擎筛选">
         <button class="chip on" data-engine="all" type="button">全部</button>
         <button class="chip" data-engine="llama" type="button">llama.cpp</button>
+        <button class="chip" data-engine="strata" type="button">Strata</button>
         <button class="chip" data-engine="kvmem" type="button">KVMem</button>
         <button class="chip" data-engine="ninfer" type="button">NInfer</button>
         <button class="chip" data-engine="kvmem_llama" type="button">KVMem + llama.cpp</button>
@@ -734,7 +735,7 @@
       <div class="mark" aria-hidden="true">LR</div>
       <span class="tag amber">未配置引擎</span>
       <h2>还没有可用的推理引擎</h2>
-      <p>控制台只展示引擎和模型。请先在管理页填写 llama.cpp、KVMem、NInfer 或 KVMem + llama.cpp 的启动路径并创建引擎，模型列表随后会自动出现。</p>
+      <p>控制台只展示引擎和模型。请先在管理页填写 llama.cpp、Strata、KVMem、NInfer 或 KVMem + llama.cpp 的启动路径并创建引擎，模型列表随后会自动出现。</p>
       <button class="btn primary" id="btn-setup-engines" type="button">去管理页配置引擎</button>
     </section>
   </div>
@@ -756,7 +757,7 @@
       <div class="manage-content">
         <section class="manage-panel" data-panel="engines" aria-labelledby="engine-paths-title">
           <h2 id="engine-paths-title">引擎</h2>
-          <p class="panel-hint">按分类配置引擎：llama.cpp 分类下为原生 llama.cpp；kvmem 分类下包含 llama.cpp（KVMem 补丁版）、polystrata 与 ninfer。保存前会轻量探测二进制是否可用，成功后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
+          <p class="panel-hint">按分类配置引擎：llama.cpp 分类下为原生 llama.cpp；Strata 分类下为独立 Strata 服务；kvmem 分类下包含 llama.cpp（KVMem 补丁版）、polystrata 与 ninfer。保存前会轻量探测二进制是否可用，成功后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
           <div class="engine-update-bar">
             <button class="btn" type="button" id="engine-check-update">检查更新</button>
             <label class="check" id="engine-proxy-field" hidden><input id="engine-use-proxy" type="checkbox" /> 使用代理</label>
@@ -1124,6 +1125,7 @@
   ];
   const ENGINE_LABELS = {
     llama: "llama.cpp",
+    strata: "Strata",
     kvmem: "KVMem",
     ninfer: "NInfer",
     kvmem_llama: "KVMem + llama.cpp",
@@ -1137,6 +1139,12 @@
       { key: "cwd", label: "工作目录", hint: "cwd", placeholder: "/path/to/llama.cpp" },
       { key: "models_dir", label: "模型目录", hint: "models_dir", placeholder: "/path/to/llm-router/models" },
       { key: "preset", label: "models.ini 预设", hint: "preset", placeholder: "/path/to/llm-router/models.ini" },
+    ],
+    strata: [
+      { key: "binary", label: "Python 解释器", hint: "binary", placeholder: "/path/to/Strata/.venv/bin/python" },
+      { key: "cwd", label: "工作目录", hint: "cwd", placeholder: "/path/to/Strata" },
+      { key: "models_dir", label: "模型配置目录", hint: "models_dir", placeholder: "/path/to/Strata/config" },
+      { key: "template", label: "模板配置", hint: "template", placeholder: "/path/to/Strata/config/strata-gyro-gyro-m.json" },
     ],
     kvmem: [
       { key: "binary", label: "Python 解释器", hint: "binary", placeholder: "/path/to/kvmem/.venv/bin/python" },
@@ -1281,11 +1289,13 @@
 
   function kvmemEngineSpecs(kind) {
     const manage = state.manage || {};
-    const schema = kind === "kvmem"
-      ? manage.kvmem_poly_engine_schema
-      : kind === "ninfer"
-        ? manage.ninfer_engine_schema
-        : manage.kvmem_engine_schema;
+    const schema = kind === "strata"
+      ? manage.strata_engine_schema
+      : kind === "kvmem"
+        ? manage.kvmem_poly_engine_schema
+        : kind === "ninfer"
+          ? manage.ninfer_engine_schema
+          : manage.kvmem_engine_schema;
     return Array.isArray(schema) ? schema : [];
   }
 
@@ -1298,10 +1308,11 @@
   }
 
   function kvmemFamily(kind) {
-    return kind === "kvmem" || kind === "ninfer" || kind === "kvmem_llama";
+    return kind === "strata" || kind === "kvmem" || kind === "ninfer" || kind === "kvmem_llama";
   }
 
   function kvmemEngineTitle(kind) {
+    if (kind === "strata") return "Strata";
     if (kind === "kvmem") return "strata-poly";
     if (kind === "ninfer") return "ninfer-serve";
     return "llama-kvmem-server";
@@ -1364,8 +1375,11 @@
     const total = sampling.length + specs.length;
     if (countHost) countHost.textContent = total ? String(total) : "";
     if (hintHost) {
+      const tabNote = kind === "strata"
+        ? "请求级采样参数在“基本参数”页。"
+        : "KVMem 扩展参数在“kvmem参数”页，请求级采样参数在“基本参数”页。";
       hintHost.textContent = total
-        ? `这些是 ${kvmemEngineTitle(kind)} 自身的参数，写入模型自己的引擎配置（视觉组写入 vision 段）；留空表示沿用模板或引擎默认。KVMem 扩展参数在“kvmem参数”页，请求级采样参数在“基本参数”页。保存后按需重启引擎。`
+        ? `这些是 ${kvmemEngineTitle(kind)} 自身的参数，写入模型自己的引擎配置（视觉组写入 vision 段）；留空表示沿用模板或引擎默认。${tabNote}保存后按需重启引擎。`
         : "";
     }
   }
@@ -2842,6 +2856,9 @@
       if ((m.engine === "llama" || m.engine === "kvmem_llama") && (m.cache_type_k || m.cache_type_v)) {
         facts.push(`KV ${m.cache_type_k || "—"}/${m.cache_type_v || "—"}`);
       }
+      if (m.engine === "strata" && m.engine_params && m.engine_params.kv) {
+        facts.push(`KV ${m.engine_params.kv}`);
+      }
       if (m.quantization) facts.push(m.quantization);
       if (m.multimodal) facts.push("视觉");
       if (m.reasoning) facts.push("思考");
@@ -3033,7 +3050,7 @@
 
   async function unloadModel(id) {
     const model = state.models.find((m) => m.id === id) || {};
-    const single = model.engine === "ninfer" || model.engine === "kvmem_llama";
+    const single = model.engine === "ninfer" || model.engine === "kvmem_llama" || model.engine === "strata";
     const ok = await askConfirm(
       "卸载模型",
       single
@@ -3076,26 +3093,29 @@
       if (input && params[key] != null) input.value = params[key];
     }
     const kv = model.engine === "kvmem";
+    const strata = model.engine === "strata";
     const ninfer = model.engine === "ninfer";
     const kvllama = model.engine === "kvmem_llama";
+    const kvlike = kv || strata;
     renderEngineMore(
       $("params-more"), $("params-more-count"), $("params-more-hint"),
       model.engine, params, engineParams, model.multimodal === true,
     );
     renderKvmemEngine(
       $("params-kvmem"), $("params-kvmem-count"), $("params-kvmem-hint"),
-      engineParams, kv ? "kvmem" : ninfer ? "ninfer" : "kvmem_llama",
+      engineParams, kv ? "kvmem" : strata ? "strata" : ninfer ? "ninfer" : "kvmem_llama",
     );
     showParamTab(dialog, "basic");
     setKvmemTabVisible(dialog, kvllama || kv || ninfer);
     const editable = model.engine === "llama" && model.source === "preset";
     const visionEditable = editable
       || (kv && model.source === "strata")
+      || (strata && model.source === "strata")
       || (kvllama && model.source === "kvmem_llama")
       || (ninfer && model.source === "ninfer");
-    form.elements.top_k.min = kv ? 1 : 0;
-    form.elements.top_k.max = kv ? 64 : 1000;
-    form.elements.repeat_last_n.min = kv ? 1 : -1;
+    form.elements.top_k.min = kvlike ? 1 : 0;
+    form.elements.top_k.max = kvlike ? 64 : 1000;
+    form.elements.repeat_last_n.min = kvlike ? 1 : -1;
     form.elements.repetition_penalty.disabled = ninfer;
     form.elements.repeat_last_n.disabled = ninfer || kvllama;
     if (ninfer) {
@@ -3108,11 +3128,13 @@
     $("params-engine-caption").textContent = "llama.cpp · 保存后自动重启引擎生效";
     $("params-more-caption").textContent = kvllama
       ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
-      : kv
-        ? "strata-poly 原生进程 / 视觉参数 · 留空沿用模板"
-        : ninfer
-          ? "ninfer-serve 原生进程参数 · 留空沿用模板"
-          : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
+      : strata
+        ? "Strata 原生进程 / 视觉参数 · 留空沿用模板"
+        : kv
+          ? "strata-poly 原生进程 / 视觉参数 · 留空沿用模板"
+          : ninfer
+            ? "ninfer-serve 原生进程参数 · 留空沿用模板"
+            : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
     if (editable) {
       const manageEngine = llamaManageEngine();
       $("params-context").value = model.context_length == null ? "" : model.context_length;
@@ -3134,9 +3156,11 @@
       $("params-vision-hint").textContent = visionEditable
         ? (ninfer
             ? "写入 ninfer-*.json 的 args：GPU 使用 --vision --vision-residency，CPU 使用 --vision-cpu；视觉塔内嵌在 .ninfer 中，主模型仍按引擎参数加载。"
-            : kv
-              ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
-              : kvllama
+            : strata
+              ? "写入模型配置的 vision.gpu；Strata 用独立进程运行视觉编码器，CPU 与 GPU 共用同一份 mmproj。"
+              : kv
+                ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
+                : kvllama
                 ? "写入模型配置的 vision.gpu；llama-kvmem-server 按 --mmproj-offload / --no-mmproj-offload 切换，CPU 与 GPU 共用同一份 mmproj；主模型仍按 --device 与 GPU 层数加载。"
                 : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off，主模型仍按 n-gpu-layers 加载。")
         : "当前模型没有可编辑的引擎配置，无法修改视觉运行位置。";
@@ -3148,11 +3172,13 @@
       ? "NInfer 限制：repetition_penalty 只能为 1（已禁用），不支持 repeat_last_n；ninfer-serve 自身的进程参数在“更多参数”，KVMem 扩展在“kvmem参数”，视觉运行位置在“视觉编码器”，保存后自动重启引擎。"
       : kvllama
         ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；上下文与 K/V 精度在新增模型时固定；llama-kvmem-server 自身的进程参数在“更多参数”，KVMem 扩展（预算等）在“kvmem参数”，保存后自动重启引擎。"
-        : kv
-          ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；strata-poly 自身的进程参数（上下文、MTP、KV 格式等）在“更多参数”，KVMem 扩展（预算、检索、SSD 等）在“kvmem参数”，保存后自动重启引擎。"
-          : editable
-            ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。修改上下文或 KV 精度会自动重启引擎。"
-            : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。该模型由目录扫描发现，无法修改上下文与 KV 精度。";
+        : strata
+          ? "Strata 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文、KV 精度、MTP/查表、专家缓存等引擎参数在“更多参数”（写入模型自己的 strata-*.json），保存后自动重启引擎。"
+          : kv
+            ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；strata-poly 自身的进程参数（上下文、MTP、KV 格式等）在“更多参数”，KVMem 扩展（预算、检索、SSD 等）在“kvmem参数”，保存后自动重启引擎。"
+            : editable
+              ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。修改上下文或 KV 精度会自动重启引擎。"
+              : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。该模型由目录扫描发现，无法修改上下文与 KV 精度。";
     $("params-error").textContent = "";
     $("params-error").hidden = true;
     $("params-save").disabled = false;
@@ -3271,6 +3297,17 @@
       }
       body.engine_params = kvParams;
     }
+    if (model && model.engine === "strata") {
+      let engineParams;
+      try {
+        engineParams = readKvmemEngine($("params-more"), "strata", "engine");
+      } catch (error) {
+        $("params-error").textContent = error.message;
+        $("params-error").hidden = false;
+        return;
+      }
+      body.engine_params = engineParams;
+    }
     const visionRow = $("params-vision");
     if (model && !visionRow.hidden && !$("params-vision-device").classList.contains("disabled")) {
       const picked = (document.querySelector('input[name="params-vision-device"]:checked') || {}).value;
@@ -3292,7 +3329,7 @@
           model.cache_type_k = payload.engine_params.cache_type_k;
           model.cache_type_v = payload.engine_params.cache_type_v;
         }
-        if ((model.engine === "kvmem_llama" || model.engine === "kvmem" || model.engine === "ninfer") && payload.engine_params) {
+        if ((model.engine === "kvmem_llama" || model.engine === "kvmem" || model.engine === "ninfer" || model.engine === "strata") && payload.engine_params) {
           model.engine_params = payload.engine_params;
         }
         if (payload.vision_gpu != null) model.vision_gpu = payload.vision_gpu;
@@ -3361,11 +3398,13 @@
     }
     const kind = engine ? engine.kind : "";
     const kv = kind === "kvmem";
+    const strata = kind === "strata";
     const ninfer = kind === "ninfer";
     const kvllama = kind === "kvmem_llama";
-    form.elements.top_k.min = kv ? 1 : 0;
-    form.elements.top_k.max = kv ? 64 : 1000;
-    form.elements.repeat_last_n.min = kv ? 1 : -1;
+    const kvlike = kv || strata;
+    form.elements.top_k.min = kvlike ? 1 : 0;
+    form.elements.top_k.max = kvlike ? 64 : 1000;
+    form.elements.repeat_last_n.min = kvlike ? 1 : -1;
     form.elements.repetition_penalty.disabled = ninfer;
     form.elements.repeat_last_n.disabled = ninfer || kvllama;
     if (ninfer) {
@@ -3389,19 +3428,21 @@
       : "llama.cpp · 上下文留空读取 GGUF";
     $("add-more-caption").textContent = kvllama
       ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
-      : kv
-        ? "strata-poly 原生进程 / 视觉参数 · 留空沿用模板"
-        : ninfer
-          ? "ninfer-serve 原生进程参数 · 留空沿用模板"
-          : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
+      : strata
+        ? "Strata 原生进程 / 视觉参数 · 留空沿用模板"
+        : kv
+          ? "strata-poly 原生进程 / 视觉参数 · 留空沿用模板"
+          : ninfer
+            ? "ninfer-serve 原生进程参数 · 留空沿用模板"
+            : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
     $("add-model-hint").textContent = ninfer
       ? ".ninfer 文件，必填"
-      : kvllama || kv
+      : kvllama || kv || strata
         ? "模型目录或 .gguf 文件，必填（目录自动挑选最大 GGUF 与 mmproj）"
         : ".gguf 文件，必填";
     $("add-model").placeholder = ninfer
       ? "/path/to/model.ninfer"
-      : kvllama || kv
+      : kvllama || kv || strata
         ? "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf"
         : "/path/to/model.gguf";
     $("add-vision-field").hidden = ninfer;
@@ -3415,13 +3456,15 @@
     if (ninfer) $("add-vision").value = "";
     $("add-vision-hint").textContent = ninfer
       ? "视觉塔内嵌在 .ninfer 模型中，无需 mmproj。GPU 使用 --vision --vision-residency resident（模板为 overlay 时保留 overlay），CPU 使用 --vision-cpu。"
-      : "只控制视觉编码器（mmproj）；主模型和 KV cache 仍按 n-gpu-layers 与上下文加载到 GPU。";
+      : strata
+        ? "填写后写入新配置的 vision.mmproj 与 --vision；视觉组参数只有填写 mmproj 时才生效。主模型、专家与 KV 仍按“更多参数”加载到 GPU/内存。"
+        : "只控制视觉编码器（mmproj）；主模型和 KV cache 仍按 n-gpu-layers 与上下文加载到 GPU。";
     syncVisionDevice();
     setKvmemTabVisible($("add-dialog"), kvllama || kv || ninfer);
     renderKvmemEngine(
       $("add-kvmem"), $("add-kvmem-count"), $("add-kvmem-hint"),
       engine ? engine.engine_params || null : null,
-      kv ? "kvmem" : ninfer ? "ninfer" : "kvmem_llama",
+      kv ? "kvmem" : strata ? "strata" : ninfer ? "ninfer" : "kvmem_llama",
     );
     renderEngineMore(
       $("add-more"), $("add-more-count"), $("add-more-hint"),
@@ -3431,9 +3474,11 @@
       ? "NInfer 单模型模式：每份配置只服务一个 .ninfer 模型，参数继承选定模板；视觉塔内嵌在模型中，可选择 CPU/GPU；上下文、KV 精度等 ninfer-serve 自身参数在“更多参数”按需覆盖模板，KVMem 扩展在“kvmem参数”；repetition_penalty 只能为 1，且没有 repeat_last_n。"
       : kvllama
         ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；上下文与 KV 精度在“基本参数”设置；KVMem 预算等扩展在“kvmem参数”，其余 llama-kvmem-server 自身参数在“更多参数”按需覆盖模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
-        : kv
-          ? "strata-poly 单模型模式：上下文（--max-context）等引擎自身参数在“更多参数”，KVMem 预算/检索/SSD 等扩展在“kvmem参数”；上下文留空读取 GGUF 上限，GGUF 缺少该字段时必须手动填写；视觉可选 CPU/GPU（默认 CPU）；采样默认来自 ornith 模板，MTP 留空时按模型 GGUF 自动判断。"
-          : "上下文留空读取 GGUF 上限，可填更小值（GGUF 无该字段时必须填写）；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
+        : strata
+          ? "Strata 单模型模式：每份配置服务一个 GGUF，packs、专家缓存等参数复制选定模板；上下文（--max-context）、KV 精度（--kv）、MTP/查表与视觉参数在“更多参数”按需覆盖模板；模型路径会写入 --native，PLE 与主模型相同时一并替换；上下文留空时按 GGUF 上限收敛；视觉可选 CPU/GPU（模板默认跟随）；视觉组参数只有填写 mmproj 时才生效。"
+          : kv
+            ? "strata-poly 单模型模式：上下文（--max-context）等引擎自身参数在“更多参数”，KVMem 预算/检索/SSD 等扩展在“kvmem参数”；上下文留空读取 GGUF 上限，GGUF 缺少该字段时必须手动填写；视觉可选 CPU/GPU（默认 CPU）；采样默认来自 ornith 模板，MTP 留空时按模型 GGUF 自动判断。"
+            : "上下文留空读取 GGUF 上限，可填更小值（GGUF 无该字段时必须填写）；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
   }
 
   function syncVisionDevice() {
@@ -3675,6 +3720,20 @@
       if (diskPath && !(diskMib > 0)) {
         showAddError("填写 SSD 目录时必须同时把 SSD 额度设为大于 0。");
         return;
+      }
+      if (Object.keys(advanced).length) body.engine_params = advanced;
+    }
+    if (engineInfo.kind === "strata") {
+      let engineParams;
+      try {
+        engineParams = readKvmemEngine($("add-more"), "strata", "engine");
+      } catch (error) {
+        showAddError(error.message);
+        return;
+      }
+      const advanced = {};
+      for (const [key, value] of Object.entries(engineParams)) {
+        if (value !== null) advanced[key] = value;
       }
       if (Object.keys(advanced).length) body.engine_params = advanced;
     }
