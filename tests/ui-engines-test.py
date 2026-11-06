@@ -104,6 +104,41 @@ def click(selector):
     """)
 
 
+def mock_state():
+    return requests.get(MOCK + "mock/state", timeout=5).json()
+
+
+def mock_config(**values):
+    return requests.post(MOCK + "mock/config", json=values, timeout=5).json()
+
+
+def wait_mock(predicate, timeout=20, message=""):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = mock_state()
+        if predicate(last):
+            return last
+        time.sleep(0.15)
+    raise SystemExit(f"wait failed: {message}: {last}")
+
+
+def check_updates():
+    before = mock_state()["last"]["check_count"]
+    click("#engine-check-update")
+    wait_mock(lambda s: s["last"]["check_count"] > before, message="update check request")
+    wait("return document.getElementById('engine-check-update').disabled === false",
+         message="update check finished")
+    return mock_state()
+
+
+def card_text(engine):
+    return js(f"""
+      return document.querySelector('.engine-path[data-engine={json.dumps(engine)}]')
+        .textContent;
+    """)
+
+
 def add_subs():
     return js("""
       return [...document.querySelectorAll('#add-engine-subs .engine-sub')].map(card => ({
@@ -173,6 +208,85 @@ try:
     shot("engines-manage-mobile.png")
     rect(1440, 1200)
     time.sleep(0.3)
+
+    # -- engine update check / install --------------------------------
+    assert not js("return document.getElementById('engine-proxy-field').hidden"), "proxy field"
+    assert not js("return document.getElementById('engine-use-proxy').checked"), "proxy default"
+
+    click("#engine-use-proxy")
+    assert js("return document.getElementById('engine-use-proxy').checked")
+    state = check_updates()
+    assert state["last"]["check"] == {"use_proxy": True}, state
+
+    tags = js("""
+      return Object.fromEntries([...document.querySelectorAll('.engine-path')].map(card => [
+        card.dataset.engine,
+        [...card.querySelectorAll('.engine-path-head .tag')].map(t => t.textContent.trim()),
+      ]));
+    """)
+    assert tags["llama"] == ["已配置", "运行中", "有新版本"], tags
+    assert tags["kvmem_llama"] == ["已配置", "运行中", "需重启"], tags
+    assert tags["kvmem"] == ["已配置", "已停止", "检查失败"], tags
+
+    text = card_text("llama")
+    assert "落后 12 个提交" in text and "origin/master" in text, text
+    assert "上游最新：common : restrict HF token" in text, text
+    assert js("""return !!document.querySelector(
+      '.engine-path[data-engine="llama"] [data-path-action="update"]')""")
+    assert not js("""return !!document.querySelector(
+      '.engine-path[data-engine="kvmem_llama"] [data-path-action="update"]')""")
+    text = card_text("kvmem")
+    assert "检查失败" in text and "不是 git 仓库" in text, text
+    status = js("return document.getElementById('engine-update-status').textContent")
+    assert "1 个引擎有更新" in status and "1 个检查失败" in status, status
+    shot("engines-update-check.png")
+
+    click('.engine-path[data-engine="llama"] [data-path-action="update"]')
+    wait("return document.getElementById('confirm-dialog').open", message="install confirm")
+    click("#confirm-ok")
+    wait("""return document.querySelector('.engine-path[data-engine="llama"]')
+      .textContent.includes('已安装更新')""", message="installed update")
+    state = mock_state()
+    assert state["last"]["install"] == {"engine": "llama", "use_proxy": True}, state
+    assert state["installed"]["llama"] is True, state
+    text = card_text("llama")
+    assert "已从 origin/master 快进" in text, text
+    assert "llama-server.bak-20261106-160000" in text, text
+    assert "运行中的引擎需重启后生效" in text, text
+    assert not js("""return !!document.querySelector(
+      '.engine-path[data-engine="llama"] [data-path-action="update"]')""")
+    status = js("return document.getElementById('engine-update-status').textContent")
+    assert "更新完成" in status, status
+    shot("engines-update-installed.png")
+
+    # -- failed build stops and shows the error ------------------------
+    mock_config(install_fails=True, reset_updates=True)
+    check_updates()
+    click('.engine-path[data-engine="llama"] [data-path-action="update"]')
+    wait("return document.getElementById('confirm-dialog').open", message="install confirm")
+    click("#confirm-ok")
+    wait("""return document.querySelector('.engine-path[data-engine="llama"]')
+      .querySelector('.engine-update-error') !== null""", message="install error")
+    text = card_text("llama")
+    assert "安装失败" in text and "编译失败" in text, text
+    assert "已恢复原二进制" in text and "已回滚源码" in text, text
+    assert js("""return !!document.querySelector(
+      '.engine-path[data-engine="llama"] [data-path-action="update"]')""")
+    status = js("return document.getElementById('engine-update-status').textContent")
+    assert "更新失败" in status, status
+    shot("engines-update-error.png")
+
+    # -- no proxy configured: checkbox hidden and forced off -----------
+    mock_config(proxy_configured=False, install_fails=False, reset_updates=True)
+    click("#btn-manage")
+    wait("return document.getElementById('manage-view').hidden", message="console view")
+    click("#btn-manage")
+    wait("return !document.getElementById('manage-view').hidden", message="manage view")
+    wait("return document.getElementById('engine-proxy-field').hidden === true",
+         message="proxy field hidden")
+    assert not js("return document.getElementById('engine-use-proxy').checked")
+    state = check_updates()
+    assert state["last"]["check"] == {"use_proxy": False}, state
 
     # -- two-column engine picker in the add dialog ---------------------
     click("#btn-manage")

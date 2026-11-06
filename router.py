@@ -4573,6 +4573,511 @@ def probe_engine_binary(
         raise BadRequest(message)
 
 
+# ---------------------------------------------------------------------------
+# engine source updates (git upstream + local build)
+
+ENGINE_UPDATE_GIT_TIMEOUT_S = 180
+ENGINE_UPDATE_BUILD_TIMEOUT_S = 3600
+ENGINE_UPDATE_OUTPUT_TAIL = 6000
+
+
+class EngineUpdateError(RuntimeError):
+    """A recoverable failure while checking or installing an engine update."""
+
+
+def _tail_output(text: str, limit: int = ENGINE_UPDATE_OUTPUT_TAIL) -> str:
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    return "…\n" + text[-limit:]
+
+
+def _run_engine_command(
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+    what: str,
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise EngineUpdateError(f"未找到命令 {command[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise EngineUpdateError(f"{what}超时（{int(timeout)} 秒）") from exc
+    except OSError as exc:
+        raise EngineUpdateError(f"无法执行{what}：{exc}") from exc
+    output = ((proc.stderr or "") + (proc.stdout or "")).strip()
+    return proc, output
+
+
+def _git_update_env(
+    proxy_cfg: dict[str, Any] | None, use_proxy: bool
+) -> dict[str, str]:
+    env = os.environ.copy()
+    # No proxy really means direct: inherited proxy variables are removed too.
+    apply_proxy_env(env, proxy_cfg, use_proxy)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    return env
+
+
+def _git_update(root: Path, args: list[str], env: dict[str, str], what: str) -> str:
+    proc, output = _run_engine_command(
+        ["git", "-C", str(root), *args],
+        root,
+        env,
+        ENGINE_UPDATE_GIT_TIMEOUT_S,
+        what,
+    )
+    if proc.returncode != 0:
+        detail = _tail_output(output)
+        message = f"{what}失败"
+        if proc.returncode:
+            message += f"（退出码 {proc.returncode}）"
+        if detail:
+            message += f"：{detail}"
+        raise EngineUpdateError(message)
+    return (proc.stdout or "").strip()
+
+
+def _git_probe(root: Path, args: list[str], env: dict[str, str]) -> tuple[int, str]:
+    proc, output = _run_engine_command(
+        ["git", "-C", str(root), *args],
+        root,
+        env,
+        30,
+        "git 探测",
+    )
+    return proc.returncode, (proc.stdout or "").strip() or output
+
+
+def _engine_update_repo(cwd: Path) -> tuple[Path, str, str | None]:
+    """Find the git worktree and branch that owns an engine working directory."""
+    if not cwd.is_dir():
+        raise EngineUpdateError(f"工作目录不存在：{cwd}")
+    env = _git_update_env(None, False)
+    code, output = _git_probe(cwd, ["rev-parse", "--show-toplevel"], env)
+    if code != 0:
+        raise EngineUpdateError(f"工作目录不是 git 仓库：{cwd}")
+    root = Path(output.splitlines()[0].strip())
+    code, branch = _git_probe(root, ["rev-parse", "--abbrev-ref", "HEAD"], env)
+    note = None
+    if code != 0:
+        branch = ""
+    branch = branch.strip()
+    if not branch or branch == "HEAD":
+        # KVMem's engine cwd is a checked-out submodule; update the parent repo.
+        code, superroot = _git_probe(root, ["rev-parse", "--show-superproject-working-tree"], env)
+        superroot = superroot.strip() if code == 0 else ""
+        if superroot:
+            candidate = Path(superroot)
+            code, branch = _git_probe(candidate, ["rev-parse", "--abbrev-ref", "HEAD"], env)
+            branch = branch.strip() if code == 0 else ""
+            if branch and branch != "HEAD":
+                root = candidate
+                note = "工作目录是子模块，改用父仓库检查更新"
+        if not branch or branch == "HEAD":
+            raise EngineUpdateError(f"工作目录处于游离 HEAD，无法检查上游分支：{root}")
+    return root, branch, note
+
+
+def _engine_update_upstream(
+    root: Path, branch: str, env: dict[str, str]
+) -> tuple[str, str | None]:
+    code, upstream = _git_probe(
+        root, ["for-each-ref", "--format=%(upstream:short)", f"refs/heads/{branch}"], env
+    )
+    upstream = upstream.strip() if code == 0 else ""
+    if upstream and "/" in upstream:
+        return upstream, None
+    code, refs = _git_probe(
+        root, ["for-each-ref", "--format=%(refname:short)", "refs/remotes"], env
+    )
+    candidates = []
+    if code == 0:
+        for ref in refs.splitlines():
+            ref = ref.strip()
+            if not ref or ref.endswith("/HEAD"):
+                continue
+            if ref.split("/", 1)[-1] == branch:
+                candidates.append(ref)
+    for prefix in ("origin/", "fork/"):
+        for ref in candidates:
+            if ref.startswith(prefix):
+                return ref, f"分支未设置上游，使用同名远程分支 {ref}"
+    if len(candidates) == 1:
+        return candidates[0], f"分支未设置上游，使用同名远程分支 {candidates[0]}"
+    if len(candidates) > 1:
+        raise EngineUpdateError(
+            f"分支 {branch} 有多个同名远程分支（{', '.join(candidates)}），请先设置上游"
+        )
+    raise EngineUpdateError(f"分支 {branch} 未设置上游分支，且没有同名远程分支")
+
+
+def _engine_update_remote(
+    root: Path, upstream: str, env: dict[str, str]
+) -> tuple[str, str]:
+    code, output = _git_probe(root, ["remote"], env)
+    remotes = output.splitlines() if code == 0 else []
+    for name in sorted((item.strip() for item in remotes if item.strip()), key=len, reverse=True):
+        if upstream.startswith(name + "/"):
+            return name, upstream[len(name) + 1 :]
+    raise EngineUpdateError(f"上游 {upstream} 不是可识别的远程分支")
+
+
+def _cmake_cache_home(cache: Path) -> Path | None:
+    try:
+        lines = cache.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.startswith("CMAKE_HOME_DIRECTORY:"):
+            _key, _, value = line.partition("=")
+            value = value.strip()
+            if value:
+                return Path(value)
+    return None
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def find_engine_build(
+    engine_id: str, fields: dict[str, str], repo_root: Path
+) -> dict[str, Any] | None:
+    """Locate the CMake build directory that produced the configured binary."""
+    binary = Path(fields.get("binary") or "")
+    if engine_id == "kvmem":
+        return {
+            "required": False,
+            "ready": True,
+            "dir": None,
+            "target": None,
+            "source": None,
+            "cmake": None,
+            "note": "KVMem 是 Python 引擎，更新源码后无需编译",
+        }
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for parent in (binary.parent, *binary.parent.parents):
+        key = str(parent)
+        if key in seen:
+            continue
+        seen.add(key)
+        if (parent / "CMakeCache.txt").is_file():
+            candidates.append(parent)
+    for cache in sorted(repo_root.glob("build*/CMakeCache.txt")):
+        parent = cache.parent
+        if str(parent) not in seen:
+            seen.add(str(parent))
+            candidates.append(parent)
+    root_resolved = Path(os.path.realpath(repo_root))
+    chosen: Path | None = None
+    source: Path | None = None
+    for candidate in candidates:
+        home = _cmake_cache_home(candidate / "CMakeCache.txt")
+        if home is None:
+            continue
+        home_resolved = Path(os.path.realpath(home))
+        if home_resolved == root_resolved or _path_within(home_resolved, root_resolved):
+            chosen = candidate
+            source = home_resolved
+            break
+    if chosen is None:
+        return None
+    cmake = shutil.which("cmake")
+    return {
+        "required": True,
+        "ready": bool(cmake),
+        "dir": str(chosen),
+        "target": binary.name,
+        "source": str(source) if source else None,
+        "cmake": cmake,
+        "note": None if cmake else "未找到 cmake 命令",
+    }
+
+
+def _backup_engine_binary(binary: Path) -> Path:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = binary.with_name(f"{binary.name}.bak-{stamp}")
+    index = 1
+    while backup.exists():
+        backup = binary.with_name(f"{binary.name}.bak-{stamp}-{index}")
+        index += 1
+    try:
+        shutil.copy2(binary, backup)
+    except OSError as exc:
+        raise EngineUpdateError(f"无法备份二进制 {binary}：{exc}") from exc
+    return backup
+
+
+def _restore_engine_binary(binary: Path, backup: Path) -> str | None:
+    try:
+        shutil.copy2(backup, binary)
+        return None
+    except OSError as exc:
+        return str(exc)
+
+
+def _rollback_engine_repo(root: Path, head: str, env: dict[str, str]) -> str | None:
+    try:
+        _git_update(root, ["reset", "--hard", head], env, "git 回滚")
+        return None
+    except EngineUpdateError as exc:
+        return str(exc)
+
+
+def engine_update_check(
+    engine_id: str,
+    engine_cfg: dict[str, Any],
+    proxy_cfg: dict[str, Any] | None = None,
+    use_proxy: bool = False,
+) -> dict[str, Any]:
+    """Fetch the engine's upstream and compare it with the checked-out branch."""
+    fields = engine_path_fields(engine_id, engine_cfg)
+    cwd = Path(fields.get("cwd") or "")
+    env = _git_update_env(proxy_cfg, use_proxy)
+    root, branch, note = _engine_update_repo(cwd)
+    upstream, upstream_note = _engine_update_upstream(root, branch, env)
+    remote, remote_branch = _engine_update_remote(root, upstream, env)
+    _git_update(
+        root,
+        [
+            "fetch",
+            "--no-tags",
+            remote,
+            f"+refs/heads/{remote_branch}:refs/remotes/{remote}/{remote_branch}",
+        ],
+        env,
+        "git fetch",
+    )
+    head = _git_update(root, ["rev-parse", "HEAD"], env, "git rev-parse")
+    latest = _git_update(root, ["rev-parse", upstream], env, "git rev-parse")
+    counts = _git_update(
+        root, ["rev-list", "--left-right", "--count", f"HEAD...{upstream}"], env, "git rev-list"
+    )
+    ahead = behind = 0
+    numbers = counts.split()
+    if len(numbers) >= 2:
+        try:
+            ahead, behind = int(numbers[0]), int(numbers[1])
+        except ValueError:
+            ahead = behind = 0
+    dirty_output = _git_update(
+        root, ["status", "--porcelain", "--untracked-files=no"], env, "git status"
+    )
+    dirty_files = len([line for line in dirty_output.splitlines() if line.strip()])
+    latest_subject = _git_update(
+        root, ["log", "-1", "--format=%s", upstream], env, "git log"
+    )
+    latest_date = _git_update(
+        root, ["log", "-1", "--format=%cI", upstream], env, "git log"
+    )
+    binary = Path(fields.get("binary") or "")
+    binary_exists = bool(fields.get("binary")) and binary.is_file()
+    build = find_engine_build(engine_id, fields, root)
+    build_ready = bool(build and build.get("ready"))
+    blockers: list[str] = []
+    if ahead > 0 and behind > 0:
+        blockers.append(f"本地与上游已分叉（领先 {ahead}，落后 {behind} 个提交）")
+    elif ahead > 0:
+        blockers.append(f"本地领先上游 {ahead} 个提交，无法快进更新")
+    if dirty_files:
+        blockers.append(f"工作目录有 {dirty_files} 个未提交的修改")
+    if build is None:
+        blockers.append("未找到与该引擎源码匹配的 CMake 构建目录")
+    elif not build.get("ready"):
+        blockers.append(str(build.get("note") or "CMake 构建环境不可用"))
+    if not binary_exists:
+        blockers.append(f"当前二进制不存在：{binary}")
+    update_available = behind > 0
+    notes = [item for item in (note, upstream_note) if item]
+    if behind > 0:
+        message = f"落后上游 {behind} 个提交（{head[:9]} → {latest[:9]}）"
+    elif ahead > 0:
+        message = f"本地领先上游 {ahead} 个提交（{head[:9]}）"
+    else:
+        message = f"已是最新（{branch}，{head[:9]}）"
+    return {
+        "engine": engine_id,
+        "checked": True,
+        "repo": str(root),
+        "branch": branch,
+        "upstream": upstream,
+        "remote": remote,
+        "remote_branch": remote_branch,
+        "head": head[:9],
+        "head_full": head,
+        "latest": latest[:9],
+        "latest_full": latest,
+        "latest_subject": latest_subject,
+        "latest_date": latest_date,
+        "ahead": ahead,
+        "behind": behind,
+        "dirty": bool(dirty_files),
+        "dirty_files": dirty_files,
+        "update_available": update_available,
+        "diverged": ahead > 0 and behind > 0,
+        "up_to_date": ahead == 0 and behind == 0,
+        "can_install": bool(update_available and not blockers),
+        "blockers": blockers,
+        "build": build,
+        "binary": str(binary),
+        "binary_exists": binary_exists,
+        "message": message,
+        "note": "；".join(notes) or None,
+    }
+
+
+def install_engine_update(
+    engine_id: str,
+    engine_cfg: dict[str, Any],
+    proxy_cfg: dict[str, Any] | None = None,
+    use_proxy: bool = False,
+) -> dict[str, Any]:
+    """Fast-forward the engine repo, back up its binary and rebuild it.
+
+    Any failure stops the sequence immediately. If the source has already been
+    fast-forwarded, it is rolled back, and a partially rebuilt binary is
+    replaced with the backup so the engine keeps a runnable install.
+    """
+    fields = engine_path_fields(engine_id, engine_cfg)
+    env = _git_update_env(proxy_cfg, use_proxy)
+    state = engine_update_check(engine_id, engine_cfg, proxy_cfg, use_proxy)
+    if not state.get("update_available"):
+        raise EngineUpdateError(str(state.get("message") or "当前已是最新版本"))
+    if state.get("diverged"):
+        raise EngineUpdateError(
+            f"本地分支与上游已分叉（领先 {state.get('ahead')}，落后 {state.get('behind')} 个提交），已停止更新"
+        )
+    if int(state.get("ahead") or 0) > 0:
+        raise EngineUpdateError(
+            f"本地分支领先上游 {state.get('ahead')} 个提交，无法快进，已停止更新"
+        )
+    if int(state.get("dirty_files") or 0) > 0:
+        raise EngineUpdateError(
+            f"工作目录有 {state.get('dirty_files')} 个未提交的修改，已停止更新；请先提交或清理后再试"
+        )
+    build = state.get("build")
+    if not isinstance(build, dict):
+        raise EngineUpdateError("未找到与该引擎源码匹配的 CMake 构建目录，已停止更新")
+    if build.get("required") and not build.get("ready"):
+        raise EngineUpdateError(str(build.get("note") or "CMake 构建环境不可用"))
+    binary = Path(fields.get("binary") or "")
+    if not binary.is_file():
+        raise EngineUpdateError(f"当前二进制不存在：{binary}")
+    root = Path(str(state["repo"]))
+    old_head = str(state["head_full"])
+    upstream = str(state["upstream"])
+    _git_update(root, ["merge", "--ff-only", upstream], env, "git 快进")
+    new_head = _git_update(root, ["rev-parse", "HEAD"], env, "git rev-parse")
+    try:
+        backup = _backup_engine_binary(binary)
+    except EngineUpdateError as exc:
+        rollback_error = _rollback_engine_repo(root, old_head, env)
+        message = str(exc)
+        if rollback_error:
+            message += f"\n回滚源码失败：{rollback_error}"
+        else:
+            message += "\n已回滚源码到更新前提交"
+        raise EngineUpdateError(message) from exc
+    compiled = bool(build.get("required"))
+    if compiled:
+        cmake_env = os.environ.copy()
+        extra = (engine_cfg or {}).get("env")
+        if isinstance(extra, dict):
+            cmake_env.update({str(key): str(value) for key, value in extra.items()})
+        command = [
+            str(build.get("cmake") or "cmake"),
+            "--build",
+            str(build["dir"]),
+            "--config",
+            "Release",
+            "--target",
+            str(build["target"]),
+            "--parallel",
+        ]
+        proc, output = _run_engine_command(
+            command, root, cmake_env, ENGINE_UPDATE_BUILD_TIMEOUT_S, "编译"
+        )
+        if proc.returncode != 0:
+            detail = _tail_output(output)
+            restore_error = _restore_engine_binary(binary, backup)
+            rollback_error = _rollback_engine_repo(root, old_head, env)
+            message = f"编译失败（退出码 {proc.returncode}），已停止更新"
+            if detail:
+                message += f"：\n{detail}"
+            message += f"\n备份：{backup}"
+            if restore_error:
+                message += f"\n恢复二进制失败：{restore_error}"
+            else:
+                message += "\n已恢复原二进制"
+            if rollback_error:
+                message += f"\n回滚源码失败：{rollback_error}"
+            else:
+                message += "\n已回滚源码到更新前提交"
+            raise EngineUpdateError(message)
+    problems: list[str] = []
+    if not binary.is_file():
+        problems.append(f"编译后二进制不存在：{binary}")
+    elif not os.access(binary, os.X_OK):
+        problems.append(f"编译后二进制不可执行：{binary}")
+    if not problems:
+        try:
+            probe_engine_binary(engine_id, fields, engine_cfg)
+        except BadRequest as exc:
+            problems.append(str(exc))
+    if problems:
+        restore_error = _restore_engine_binary(binary, backup)
+        rollback_error = _rollback_engine_repo(root, old_head, env)
+        message = "更新后校验失败，已停止更新：\n" + "\n".join(problems)
+        message += f"\n备份：{backup}"
+        if restore_error:
+            message += f"\n恢复二进制失败：{restore_error}"
+        else:
+            message += "\n已恢复原二进制"
+        if rollback_error:
+            message += f"\n回滚源码失败：{rollback_error}"
+        else:
+            message += "\n已回滚源码到更新前提交"
+        raise EngineUpdateError(message)
+    return {
+        "engine": engine_id,
+        "installed": True,
+        "repo": str(root),
+        "branch": str(state["branch"]),
+        "upstream": upstream,
+        "previous_head": old_head[:9],
+        "head": new_head[:9],
+        "head_full": new_head,
+        "backup": str(backup),
+        "compiled": compiled,
+        "build": build,
+        "message": (
+            f"已从 {upstream} 快进到 {new_head[:9]}"
+            + ("，并完成编译" if compiled else "，Python 源码无需编译")
+            + f"；原二进制备份在 {backup}"
+        ),
+    }
+
+
 def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
     try:
         if engine_id == "llama":
@@ -5538,6 +6043,7 @@ class Gateway:
         self.download_jobs: dict[str, dict[str, Any]] = {}
         self.download_procs: dict[str, subprocess.Popen[Any]] = {}
         self.download_logs: dict[str, Path] = {}
+        self.engine_update_lock = threading.Lock()
         self.smoke_image_path = resolve_path(
             base_dir, config.get("smoke_image") or "smoke.png"
         )
@@ -6176,6 +6682,7 @@ class Gateway:
         return {
             "object": "list",
             "config_file": self._engine_config_label(),
+            "proxy_configured": self._proxy_configured(),
             "engines": items,
         }
 
@@ -6303,6 +6810,125 @@ class Gateway:
             "note": note,
             "view": self.engine_paths_view(),
         }
+
+    # -- engine source updates ---------------------------------------------
+
+    def _proxy_configured(self) -> bool:
+        proxy = self._proxy_config()
+        kind = str(proxy.get("type") or "http").strip().lower()
+        host = str(proxy.get("host") or "").strip()
+        port = parse_int(proxy.get("port")) or 0
+        return bool(
+            proxy.get("enabled")
+            and host
+            and 1 <= port <= 65535
+            and kind in PROXY_TYPES
+        )
+
+    def engine_update_settings(self) -> dict[str, Any]:
+        return {"proxy_configured": self._proxy_configured()}
+
+    def _engine_update_config(self, engine_id: str) -> dict[str, Any]:
+        if engine_id not in ENGINE_SLOTS:
+            raise BadRequest("engine 必须是 llama、kvmem、ninfer 或 kvmem_llama")
+        engines_cfg = self.config.get("engines")
+        if not isinstance(engines_cfg, dict) or not isinstance(
+            engines_cfg.get(engine_id), dict
+        ):
+            raise BadRequest("引擎尚未配置")
+        return engines_cfg[engine_id]
+
+    def _check_update_proxy(self, use_proxy: Any) -> tuple[bool, dict[str, Any]]:
+        if not isinstance(use_proxy, bool):
+            raise BadRequest("use_proxy 必须是布尔值")
+        proxy = self._proxy_config()
+        if use_proxy and not self._proxy_configured():
+            raise BadRequest("尚未配置可用的代理，无法使用代理检查或安装更新")
+        return use_proxy, proxy
+
+    def check_engine_updates(self, use_proxy: Any = False) -> dict[str, Any]:
+        use_proxy, proxy = self._check_update_proxy(use_proxy)
+        if not self.engine_update_lock.acquire(blocking=False):
+            raise BadRequest("已有引擎更新任务在运行，请稍后再试")
+        try:
+            engines_cfg = self.config.get("engines")
+            engines_cfg = engines_cfg if isinstance(engines_cfg, dict) else {}
+            items: list[dict[str, Any]] = []
+            for engine_id in ENGINE_SLOT_ORDER:
+                engine_cfg = engines_cfg.get(engine_id)
+                if not isinstance(engine_cfg, dict):
+                    continue
+                spec = ENGINE_SLOTS[engine_id]
+                item: dict[str, Any] = {
+                    "engine": engine_id,
+                    "label": spec["label"],
+                    "name": spec["name"],
+                    "category": spec["category"],
+                }
+                try:
+                    item.update(
+                        engine_update_check(engine_id, engine_cfg, proxy, use_proxy)
+                    )
+                except EngineUpdateError as exc:
+                    self.log.warning("engine update check failed for %s: %s", engine_id, exc)
+                    item.update(
+                        {
+                            "checked": False,
+                            "error": str(exc),
+                            "update_available": False,
+                            "message": "检查失败",
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.log.exception("engine update check crashed for %s", engine_id)
+                    item.update(
+                        {
+                            "checked": False,
+                            "error": str(exc) or exc.__class__.__name__,
+                            "update_available": False,
+                            "message": "检查失败",
+                        }
+                    )
+                items.append(item)
+            return {
+                "object": "list",
+                "use_proxy": use_proxy,
+                "proxy_configured": self._proxy_configured(),
+                "updates": sum(1 for item in items if item.get("update_available")),
+                "engines": items,
+            }
+        finally:
+            self.engine_update_lock.release()
+
+    def install_engine_update(self, engine_id: str, use_proxy: Any = False) -> dict[str, Any]:
+        use_proxy, proxy = self._check_update_proxy(use_proxy)
+        engine_cfg = self._engine_update_config(engine_id)
+        if not self.engine_update_lock.acquire(blocking=False):
+            raise BadRequest("已有引擎更新任务在运行，请稍后再试")
+        try:
+            try:
+                result = install_engine_update(engine_id, engine_cfg, proxy, use_proxy)
+            except EngineUpdateError as exc:
+                raise BadRequest(str(exc)) from exc
+            manager = self.engines.get(engine_id)
+            result["restart_required"] = bool(manager is not None and manager.alive())
+            result["label"] = ENGINE_SLOTS[engine_id]["label"]
+            result["name"] = ENGINE_SLOTS[engine_id]["name"]
+            self.log.info(
+                "engine %s updated %s -> %s; backup %s",
+                engine_id,
+                result.get("previous_head"),
+                result.get("head"),
+                result.get("backup"),
+            )
+            return {
+                "status": "ok",
+                "engine": engine_id,
+                "result": result,
+                "proxy_configured": self._proxy_configured(),
+            }
+        finally:
+            self.engine_update_lock.release()
 
     # -- proxy / model search and download ---------------------------------
 
@@ -9971,6 +10597,25 @@ class Handler(BaseHTTPRequestHandler):
                 raise BadRequest('send {"engine": "llama"}')
             result = self.gateway.restart_engine_paths(engine.strip())
             self._json(202 if result.get("restarting") else 200, result)
+            return
+        if normalized == "/router/engines/update/check":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            result = self.gateway.check_engine_updates(payload.get("use_proxy", False))
+            self._json(200, result)
+            return
+        if normalized == "/router/engines/update/install":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            engine = payload.get("engine")
+            if not isinstance(engine, str) or not engine.strip():
+                raise BadRequest('send {"engine": "llama", "use_proxy": false}')
+            result = self.gateway.install_engine_update(
+                engine.strip(), payload.get("use_proxy", False)
+            )
+            self._json(200, result)
             return
         if normalized == "/router/proxy":
             if method in ("GET", "HEAD"):

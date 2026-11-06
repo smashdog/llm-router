@@ -123,6 +123,64 @@ STATUS = {
     "async_operation": None,
 }
 
+CONFIG = {"proxy_configured": True, "install_fails": False}
+LAST = {"check": None, "install": None, "check_count": 0, "install_count": 0}
+INSTALLED = {"llama": False}
+
+
+def update_items() -> list[dict]:
+    llama = {
+        "engine": "llama", "label": "llama.cpp", "name": "llama.cpp",
+        "category": "llama.cpp", "checked": True,
+        "repo": "/mnt/ai/llm/llama.cpp", "branch": "master",
+        "upstream": "origin/master", "remote": "origin", "remote_branch": "master",
+        "head": "4e910a86e", "head_full": "4e910a86e" + "0" * 31,
+        "latest": "240d68fcf", "latest_full": "240d68fcf" + "0" * 31,
+        "latest_subject": "common : restrict HF token to huggingface.co hosts (#31730)",
+        "latest_date": "2026-11-06T07:30:00Z",
+        "ahead": 0, "behind": 12, "dirty": False, "dirty_files": 0,
+        "update_available": True, "diverged": False, "up_to_date": False,
+        "can_install": True, "blockers": [],
+        "build": {"required": True, "ready": True, "dir": "/mnt/ai/llm/llama.cpp/build",
+                  "target": "llama-server", "cmake": "/usr/bin/cmake"},
+        "binary": FIELDS["llama"]["binary"], "binary_exists": True,
+        "message": "落后上游 12 个提交（4e910a86e → 240d68fcf）", "note": None,
+    }
+    kvllama = {
+        "engine": "kvmem_llama", "label": "KVMem + llama.cpp", "name": "llama.cpp",
+        "category": "kvmem", "checked": True,
+        "repo": "/mnt/ai/llm/kvmem-llamacpp090", "branch": "llamacpp-v0.9.0",
+        "upstream": "fork/llamacpp-v0.9.0", "remote": "fork",
+        "remote_branch": "llamacpp-v0.9.0",
+        "head": "598555029", "head_full": "598555029" + "0" * 31,
+        "latest": "598555029", "latest_full": "598555029" + "0" * 31,
+        "latest_subject": "docs: update backend notes", "latest_date": "2026-11-05T12:00:00Z",
+        "ahead": 0, "behind": 0, "dirty": False, "dirty_files": 0,
+        "update_available": False, "diverged": False, "up_to_date": True,
+        "can_install": False, "blockers": [],
+        "build": {"required": True, "ready": True,
+                  "dir": "/mnt/ai/llm/kvmem-llamacpp090/build-hip",
+                  "target": "llama-kvmem-server", "cmake": "/usr/bin/cmake"},
+        "binary": FIELDS["kvmem_llama"]["binary"], "binary_exists": True,
+        "message": "已是最新（llamacpp-v0.9.0，598555029）", "note": None,
+    }
+    kvmem = {
+        "engine": "kvmem", "label": "KVMem（polystrata）", "name": "polystrata",
+        "category": "kvmem", "checked": False,
+        "error": "工作目录不是 git 仓库：/mnt/ai/llm/kvmem/backends/polystrata",
+        "update_available": False, "message": "检查失败",
+    }
+    if INSTALLED["llama"]:
+        llama.update({
+            "installed": True, "compiled": True, "previous_head": "4e910a86e",
+            "head": "240d68fcf",
+            "backup": "/mnt/ai/llm/llama.cpp/build/bin/llama-server.bak-20261106-160000",
+            "restart_required": True,
+            "message": "已从 origin/master 快进到 240d68fcf，并完成编译；原二进制备份在 llama-server.bak-20261106-160000",
+            "update_available": False,
+        })
+    return [llama, kvllama, kvmem]
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -138,6 +196,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    def read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def do_GET(self):
         path = urlsplit(self.path).path
@@ -158,6 +225,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({
                 "object": "list",
                 "config_file": "config.json",
+                "proxy_configured": bool(CONFIG["proxy_configured"]),
                 "engines": path_items(),
             })
         if path == "/router/models/manage":
@@ -174,6 +242,56 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/router/auth":
             return self.send_json({"configured": False, "source": None, "hint": None,
                                    "key_file": "api-key", "protected": ["/v1/*", "/props"]})
+        if path == "/mock/state":
+            return self.send_json({
+                "config": CONFIG,
+                "last": LAST,
+                "installed": INSTALLED,
+            })
+        return self.send_json({"error": {"message": "not found"}}, 404)
+
+    def do_POST(self):
+        path = urlsplit(self.path).path
+        payload = self.read_json()
+        if path == "/mock/config":
+            if "proxy_configured" in payload:
+                CONFIG["proxy_configured"] = bool(payload["proxy_configured"])
+            if "install_fails" in payload:
+                CONFIG["install_fails"] = bool(payload["install_fails"])
+            if payload.get("reset_updates"):
+                INSTALLED["llama"] = False
+                LAST["check"] = None
+                LAST["install"] = None
+            return self.send_json({"status": "ok", "config": CONFIG})
+        if path == "/router/engines/update/check":
+            LAST["check"] = payload
+            LAST["check_count"] += 1
+            items = update_items()
+            return self.send_json({
+                "object": "list",
+                "use_proxy": payload.get("use_proxy") is True,
+                "proxy_configured": bool(CONFIG["proxy_configured"]),
+                "updates": sum(1 for item in items if item.get("update_available")),
+                "engines": items,
+            })
+        if path == "/router/engines/update/install":
+            LAST["install"] = payload
+            LAST["install_count"] += 1
+            if CONFIG["install_fails"]:
+                return self.send_json(
+                    {"error": {"message": "编译失败（退出码 1）：\nmain.cpp:1: error: broken\n"
+                                          "已恢复原二进制\n已回滚源码到更新前提交"}},
+                    400,
+                )
+            if payload.get("engine") != "llama":
+                return self.send_json({"error": {"message": "未找到更新"}}, 400)
+            INSTALLED["llama"] = True
+            return self.send_json({
+                "status": "ok",
+                "engine": "llama",
+                "proxy_configured": bool(CONFIG["proxy_configured"]),
+                "result": update_items()[0],
+            })
         return self.send_json({"error": {"message": "not found"}}, 404)
 
 

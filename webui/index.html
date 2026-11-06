@@ -185,6 +185,24 @@
   .engine-path-actions .hint { margin-right: auto; color: var(--faint); font-size: 11.5px; }
   .engine-path .params-error { margin-top: 10px !important; }
   .engine-path .path-warning { margin: 10px 0 0; color: #ffe5a3; font-size: 12px; }
+  .engine-update-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; }
+  .engine-update-bar .hint { color: var(--faint); font-size: 11.5px; }
+  .engine-update-bar .check { margin-top: 0; }
+  .engine-update {
+    margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+    background: #0c121a; border: 1px solid var(--line-soft);
+  }
+  .engine-update-line {
+    display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+    margin: 0; color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere;
+  }
+  .engine-update-commit { margin: 5px 0 0; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
+  .engine-update-warn { margin: 5px 0 0; color: #ffe5a3; font-size: 11.5px; overflow-wrap: anywhere; }
+  .engine-update-error {
+    margin: 6px 0 0; color: #ffc1ca; font-size: 11.5px; white-space: pre-wrap;
+    overflow-wrap: anywhere; max-height: 190px; overflow: auto;
+  }
+  .engine-update-ok { color: #b9f6cb; }
   @media (max-width: 620px) { .engine-path-fields { grid-template-columns: 1fr; } }
 
   .setup-card {
@@ -739,6 +757,11 @@
         <section class="manage-panel" data-panel="engines" aria-labelledby="engine-paths-title">
           <h2 id="engine-paths-title">引擎</h2>
           <p class="panel-hint">按分类配置引擎：llama.cpp 分类下为原生 llama.cpp；kvmem 分类下包含 llama.cpp（KVMem 补丁版）、polystrata 与 ninfer。保存前会轻量探测二进制是否可用，成功后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
+          <div class="engine-update-bar">
+            <button class="btn" type="button" id="engine-check-update">检查更新</button>
+            <label class="check" id="engine-proxy-field" hidden><input id="engine-use-proxy" type="checkbox" /> 使用代理</label>
+            <span class="hint" id="engine-update-status">通过 git 检查各引擎工作目录的上游版本；安装更新前会备份二进制并重新编译，任一步失败即停止。</span>
+          </div>
           <div class="engine-paths" id="engine-paths">
             <div class="empty">正在读取引擎配置…</div>
           </div>
@@ -1063,6 +1086,10 @@
     paths: null,
     pathsLoading: false,
     pathsBusy: false,
+    engineUpdates: {},
+    engineUpdateBusy: false,
+    engineUpdateNote: "",
+    engineUseProxy: false,
     addJob: null,
     addTimer: null,
     proxy: null,
@@ -1130,6 +1157,7 @@
       { key: "template", label: "模板配置", hint: "template", placeholder: "/path/to/llm-router/models-kvmem-llama/kvmem-llama.template.json" },
     ],
   };
+  const ENGINE_UPDATE_HINT = "通过 git 检查各引擎工作目录的上游版本；安装更新前会备份二进制并重新编译，任一步失败即停止。";
   let paramsModel = null;
 
   function samplingSummary(params) {
@@ -2459,6 +2487,53 @@
     card.querySelectorAll("button, input").forEach((node) => { node.disabled = busy; });
   }
 
+  function engineUpdateBlock(item) {
+    const result = (state.engineUpdates || {})[item.engine];
+    if (!result) return "";
+    if (result.installed) {
+      const restart = result.restart_required ? "；运行中的引擎需重启后生效" : "";
+      return `
+        <div class="engine-update">
+          <p class="engine-update-line engine-update-ok">
+            <span class="tag green">已安装更新</span>
+            <span>${esc(result.message || "")}${esc(restart)}</span>
+          </p>
+        </div>`;
+    }
+    if (result.error) {
+      return `<div class="engine-update">
+        <p class="engine-update-error">检查失败：${esc(result.error)}</p>
+      </div>`;
+    }
+    const ahead = Number(result.ahead) || 0;
+    const behind = Number(result.behind) || 0;
+    let tag = '<span class="tag green">已是最新</span>';
+    if (result.update_available) tag = '<span class="tag amber">有新版本</span>';
+    else if (ahead > 0) tag = '<span class="tag">本地领先上游</span>';
+    let line = `${tag}<span>${esc(result.branch || "—")} · ${esc(result.head || "—")}`;
+    if (result.update_available) {
+      line += ` → ${esc(result.latest || "—")} · 落后 ${behind} 个提交`;
+    } else if (ahead > 0) {
+      line += ` · 领先 ${ahead} 个提交`;
+    }
+    line += ` · ${esc(result.upstream || "—")}</span>`;
+    let html = `<div class="engine-update"><p class="engine-update-line">${line}</p>`;
+    if (result.update_available && result.latest_subject) {
+      html += `<p class="engine-update-commit">上游最新：${esc(result.latest_subject)}</p>`;
+    }
+    if (result.note) {
+      html += `<p class="engine-update-commit">${esc(result.note)}</p>`;
+    }
+    if (Array.isArray(result.blockers) && result.blockers.length) {
+      html += `<p class="engine-update-warn">${esc(result.blockers.join("；"))}</p>`;
+    }
+    if (result.install_error) {
+      html += `<p class="engine-update-error">安装失败：${esc(result.install_error)}</p>`;
+    }
+    html += "</div>";
+    return html;
+  }
+
   async function loadEnginePaths() {
     if (state.pathsLoading || state.pathsBusy) return;
     state.pathsLoading = true;
@@ -2478,12 +2553,16 @@
     const configured = !!item.configured;
     const fields = item.fields || {};
     const defaults = item.defaults || {};
+    const update = (state.engineUpdates || {})[item.engine];
     const tags = [
       `<span class="tag ${configured ? "green" : "amber"}">${configured ? "已配置" : "未配置"}</span>`,
     ];
     if (item.running) tags.push('<span class="tag green">运行中</span>');
     else if (configured) tags.push('<span class="tag">已停止</span>');
     if (item.needs_restart) tags.push('<span class="tag amber">需重启</span>');
+    if (update && update.installed) tags.push('<span class="tag green">已更新</span>');
+    else if (update && update.update_available) tags.push('<span class="tag amber">有新版本</span>');
+    else if (update && update.error) tags.push('<span class="tag red">检查失败</span>');
     const rows = schema.map((field) => {
       const placeholder = (!configured && defaults[field.key]) || field.placeholder;
       return `
@@ -2507,10 +2586,12 @@
           </div>
           <div class="engine-path-fields">${rows}</div>
           ${item.warning ? `<p class="path-warning">${esc(item.warning)}</p>` : ""}
+          ${engineUpdateBlock(item)}
           <div class="engine-path-actions">
             <span class="hint">${note}</span>
             ${prefill}
             <button class="btn primary" type="button" data-path-action="${configured ? "save" : "create"}">${configured ? "保存路径" : "创建引擎"}</button>
+            ${update && update.update_available && !update.installed ? '<button class="btn primary" type="button" data-path-action="update">安装更新</button>' : ""}
             ${item.running ? '<button class="btn" type="button" data-path-action="restart">重启引擎</button>' : ""}
           </div>
           <p class="params-error" data-role="error" hidden></p>
@@ -2520,6 +2601,13 @@
   function renderEnginePaths() {
     const host = $("engine-paths");
     const data = state.paths;
+    const proxyConfigured = !!(data && data.proxy_configured);
+    $("engine-proxy-field").hidden = !proxyConfigured;
+    $("engine-use-proxy").checked = proxyConfigured && !!state.engineUseProxy;
+    if (!proxyConfigured) state.engineUseProxy = false;
+    $("engine-use-proxy").disabled = state.engineUpdateBusy;
+    $("engine-check-update").disabled = state.engineUpdateBusy;
+    $("engine-update-status").textContent = state.engineUpdateNote || ENGINE_UPDATE_HINT;
     if (!data) {
       host.innerHTML = '<div class="empty">正在读取引擎配置…</div>';
       return;
@@ -2573,6 +2661,8 @@
     }
     state.paths = payload;
     state.manage = null;
+    state.engineUpdates = {};
+    state.engineUpdateNote = "";
     renderEnginePaths();
     const item = (payload.engines || []).find((entry) => entry.engine === engine);
     toast(`${item ? item.label : engine} ${create ? "引擎已创建" : "路径已保存"}`, "ok");
@@ -2616,6 +2706,84 @@
       setTimeout(refresh, 3600);
       setTimeout(() => { loadEnginePaths(); }, 1600);
       setTimeout(() => { loadEnginePaths(); }, 4200);
+    }
+  }
+
+  function setEngineUpdateBusy(busy, note) {
+    state.engineUpdateBusy = busy;
+    $("engine-check-update").disabled = busy;
+    $("engine-use-proxy").disabled = busy;
+    document.querySelectorAll("#engine-paths button, #engine-paths input").forEach((node) => {
+      node.disabled = busy;
+    });
+    $("engine-update-status").textContent = note || state.engineUpdateNote || ENGINE_UPDATE_HINT;
+  }
+
+  function engineUseProxy() {
+    if ($("engine-proxy-field").hidden) return false;
+    return !!$("engine-use-proxy").checked;
+  }
+
+  async function checkEngineUpdates() {
+    if (state.engineUpdateBusy) return;
+    const useProxy = engineUseProxy();
+    state.engineUseProxy = useProxy;
+    setEngineUpdateBusy(true, useProxy ? "正在通过代理检查各引擎上游…" : "正在检查各引擎上游…");
+    try {
+      const payload = await api("/router/engines/update/check", {
+        method: "POST",
+        body: JSON.stringify({ use_proxy: useProxy }),
+      });
+      const updates = {};
+      (payload.engines || []).forEach((item) => { updates[item.engine] = item; });
+      state.engineUpdates = updates;
+      const total = Number(payload.updates) || 0;
+      const failed = (payload.engines || []).filter((item) => item.error).length;
+      state.engineUpdateNote = `检查完成：${total} 个引擎有更新` + (failed ? `，${failed} 个检查失败` : "");
+      toast(state.engineUpdateNote, failed ? "bad" : (total ? "ok" : ""));
+    } catch (error) {
+      state.engineUpdateNote = "检查更新失败：" + error.message;
+      toast(state.engineUpdateNote, "bad");
+    } finally {
+      state.engineUpdateBusy = false;
+      renderEnginePaths();
+    }
+  }
+
+  async function installEngineUpdate(engine) {
+    if (state.engineUpdateBusy) return;
+    const card = enginePathCard(engine);
+    if (!card) return;
+    const update = (state.engineUpdates || {})[engine] || {};
+    const item = (state.paths?.engines || []).find((entry) => entry.engine === engine) || {};
+    const label = item.name || item.label || engine;
+    const binary = (item.fields && item.fields.binary) || "二进制";
+    const useProxy = engineUseProxy();
+    state.engineUseProxy = useProxy;
+    const ok = await askConfirm(
+      "安装更新",
+      `将更新 ${label}：从 ${update.upstream || "上游"} 快进分支，备份 ${binary} 后重新编译。编译或校验失败会自动恢复备份并回滚源码；运行中的引擎需要重启后才会使用新二进制。`,
+      "安装更新",
+      false,
+    );
+    if (!ok) return;
+    setEngineUpdateBusy(true, `正在安装 ${label} 更新，编译可能需要几分钟…`);
+    try {
+      const payload = await api("/router/engines/update/install", {
+        method: "POST",
+        body: JSON.stringify({ engine, use_proxy: useProxy }),
+      });
+      const result = payload.result || {};
+      state.engineUpdates[engine] = result;
+      state.engineUpdateNote = `${label} 更新完成` + (result.restart_required ? "；请重启该引擎" : "");
+      toast(`${label} 更新完成，原二进制已备份`, "ok");
+    } catch (error) {
+      state.engineUpdates[engine] = { ...update, install_error: error.message };
+      state.engineUpdateNote = `${label} 更新失败`;
+      toast(`${label} 更新失败，详见引擎卡片里的错误信息`, "bad");
+    } finally {
+      state.engineUpdateBusy = false;
+      renderEnginePaths();
     }
   }
 
@@ -3658,9 +3826,17 @@
     }
     if (action === "restart") {
       restartEnginePaths(engine).catch((error) => toast(error.message, "bad"));
+    } else if (action === "update") {
+      installEngineUpdate(engine).catch((error) => toast(error.message, "bad"));
     } else {
       saveEnginePaths(engine, action === "create").catch((error) => toast(error.message, "bad"));
     }
+  });
+  $("engine-check-update").addEventListener("click", () => {
+    checkEngineUpdates().catch((error) => toast(error.message, "bad"));
+  });
+  $("engine-use-proxy").addEventListener("change", () => {
+    state.engineUseProxy = engineUseProxy();
   });
   $("btn-reload").addEventListener("click", reloadRegistry);
   $("btn-stop").addEventListener("click", stopEngine);
