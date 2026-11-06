@@ -394,7 +394,16 @@
   .section-head .hint { color: var(--muted); font-size: 12px; }
   .section-head .spacer { margin-left: auto; }
 
-  .stats-block { margin-top: 0; }
+  .overview { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 12px; align-items: stretch; }
+  .overview-pane { display: flex; flex-direction: column; min-width: 0; }
+  .overview-pane > .section-head { align-items: center; min-height: 34px; }
+  .overview .head-actions { width: auto; margin-left: auto; }
+  .overview .engines { flex: 1; grid-template-columns: 1fr; }
+  .overview .engines > .empty { height: 100%; display: grid; place-items: center; }
+  .overview .engine { height: 100%; }
+  .overview .stats-grid { flex: 1; }
+  .overview .stats-placeholder { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; }
+  @media (max-width: 900px) { .overview { grid-template-columns: 1fr; } }
   .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
   .stat-card {
     padding: 14px 16px; border-radius: 14px; background: var(--panel);
@@ -488,7 +497,6 @@
   .model-title { min-width: 0; flex: 1; }
   .model-title h3 { margin: 0; font-size: 14.5px; line-height: 1.35; overflow-wrap: anywhere; }
   .model-title .id { display: block; margin-top: 3px; color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
-  .status-pill { flex: 0 0 auto; }
   .model .facts { display: flex; flex-wrap: wrap; gap: 5px 8px; color: var(--faint); font-size: 11.5px; }
   .model .facts span { white-space: nowrap; }
   .model .problem { margin: 0; color: #ffc1ca; font-size: 12px; }
@@ -677,23 +685,24 @@
 
   <main id="console-view">
   <div id="console-content" hidden>
-  <section class="block stats-block" aria-labelledby="stats-title" id="stats-section" hidden>
-    <div class="section-head">
-      <h2 id="stats-title">运行统计</h2>
-      <span class="hint" id="stats-meta">最近一次生成</span>
-    </div>
-    <div class="stats-grid" id="stats"></div>
-  </section>
-
-  <section class="block" aria-labelledby="engines-title">
-    <div class="section-head">
-      <h2 id="engines-title">引擎</h2>
-      <span class="hint">同一时间只运行一个引擎；切换模型时由网关自动停启。</span>
-      <div class="head-actions">
-        <button class="btn danger" id="btn-stop" type="button">停止引擎</button>
+  <section class="block overview" aria-label="引擎与运行状态">
+    <div class="overview-pane" aria-labelledby="engines-title">
+      <div class="section-head">
+        <h2 id="engines-title">引擎</h2>
+        <span class="hint">只显示当前运行的引擎</span>
       </div>
+      <div class="engines" id="engines"></div>
     </div>
-    <div class="engines" id="engines"></div>
+    <div class="overview-pane" aria-labelledby="stats-title" id="stats-section">
+      <div class="section-head">
+        <h2 id="stats-title">运行状态</h2>
+        <span class="hint" id="stats-meta">最近一次生成</span>
+        <div class="head-actions">
+          <button class="btn danger" id="btn-stop" type="button">停止引擎</button>
+        </div>
+      </div>
+      <div class="stats-grid" id="stats"></div>
+    </div>
   </section>
 
   <section class="block" aria-labelledby="models-title">
@@ -1115,12 +1124,6 @@
     progressTimer: null,
   };
 
-  const MODEL_STATES = {
-    loaded: { label: "已加载", cls: "green" },
-    loading: { label: "加载中", cls: "amber" },
-    failed: { label: "失败", cls: "red" },
-    unloaded: { label: "未加载", cls: "" },
-  };
   const PARAM_FIELDS = [
     "temperature", "top_p", "top_k", "min_p",
     "repetition_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty",
@@ -2808,29 +2811,25 @@
     const host = $("engines");
     if (!status) { host.innerHTML = '<div class="empty">等待网关状态…</div>'; return; }
     const engines = status.engines || {};
-    const ids = Object.keys(engines);
-    if (!ids.length) { host.innerHTML = '<div class="empty">未配置引擎</div>'; return; }
-    host.innerHTML = ids.map((id) => {
-      const e = engines[id] || {};
-      const active = status.active_engine === id;
-      const dotClass = e.alive ? "ok" : "bad";
-      return `
-        <article class="engine ${active ? "active" : ""}">
-          <div class="engine-head">
-            <span class="dot ${dotClass}"></span>
-            <h3>${esc(ENGINE_LABELS[id] || id)}</h3>
-            ${active ? '<span class="tag blue">活动引擎</span>' : ""}
-            <span class="tag ${e.alive ? "green" : "red"}">${e.alive ? "运行中" : "已停止"}</span>
-          </div>
-          <div class="kv">
-            <span class="k">类型</span><span class="v">${esc(e.kind || "—")}</span>
-            <span class="k">内部地址</span><span class="v code">${esc(e.host || "—")}:${esc(e.port || "—")}</span>
-            <span class="k">PID</span><span class="v code">${esc(e.pid || "—")}</span>
-            <span class="k">已加载模型</span><span class="v code">${esc(e.model || "—")}</span>
-            <span class="k">启动时间</span><span class="v">${esc(fmtTime(e.started_at))}</span>
-          </div>
-        </article>`;
-    }).join("");
+    const runningIds = Object.keys(engines).filter((id) => engines[id] && engines[id].alive);
+    if (!runningIds.length) { host.innerHTML = '<div class="empty">无引擎运行</div>'; return; }
+    const id = runningIds.includes(status.active_engine) ? status.active_engine : runningIds[0];
+    const e = engines[id] || {};
+    host.innerHTML = `
+      <article class="engine active">
+        <div class="engine-head">
+          <span class="dot ok"></span>
+          <h3>${esc(ENGINE_LABELS[id] || id)}</h3>
+          <span class="tag green">运行中</span>
+        </div>
+        <div class="kv">
+          <span class="k">类型</span><span class="v">${esc(e.kind || "—")}</span>
+          <span class="k">内部地址</span><span class="v code">${esc(e.host || "—")}:${esc(e.port || "—")}</span>
+          <span class="k">PID</span><span class="v code">${esc(e.pid || "—")}</span>
+          <span class="k">已加载模型</span><span class="v code">${esc(e.model || "—")}</span>
+          <span class="k">启动时间</span><span class="v">${esc(fmtTime(e.started_at))}</span>
+        </div>
+      </article>`;
   }
 
   function renderModels() {
@@ -2852,7 +2851,6 @@
     const busy = state.busy || status.async_operation != null || status.switching;
     host.innerHTML = models.map((m) => {
       const value = modelState(m);
-      const meta = MODEL_STATES[value] || MODEL_STATES.unloaded;
       const facts = [];
       if (m.context_length) facts.push(`上下文 ${Number(m.context_length).toLocaleString()}`);
       if ((m.engine === "llama" || m.engine === "kvmem_llama") && (m.cache_type_k || m.cache_type_v)) {
@@ -2881,7 +2879,6 @@
               <h3>${esc(m.name || m.display_name || m.id)}</h3>
               <code class="id">${esc(m.id)}</code>
             </div>
-            <span class="tag ${meta.cls} status-pill">${esc(meta.label)}</span>
           </div>
           <div class="facts">
             <span class="tag">${esc(ENGINE_LABELS[m.engine] || m.engine)}</span>
@@ -2891,10 +2888,11 @@
           ${m.notes ? `<p class="notes">${esc(m.notes)}</p>` : ""}
           ${showError ? `<p class="problem">${esc(showError)}</p>` : ""}
           <div class="actions">
-            <button class="btn sm ${loaded ? "" : "primary"}" data-action="load" data-id="${esc(m.id)}"
-              ${loaded || loading || unavailable || busy ? "disabled" : ""}>${loaded ? "已加载" : loading ? "加载中…" : "加载"}</button>
-            <button class="btn sm" data-action="unload" data-id="${esc(m.id)}"
-              ${!loaded || busy ? "disabled" : ""}>卸载</button>
+            ${loaded
+              ? `<button class="btn sm" data-action="unload" data-id="${esc(m.id)}"
+                  ${busy ? "disabled" : ""}>卸载</button>`
+              : `<button class="btn sm primary" data-action="load" data-id="${esc(m.id)}"
+                  ${loading || unavailable || busy ? "disabled" : ""}>${loading ? "加载中…" : "加载"}</button>`}
             <button class="btn sm" data-action="params" data-id="${esc(m.id)}">参数</button>
             ${m.deletable ? `<button class="btn sm danger" data-action="delete" data-id="${esc(m.id)}"
               ${busy ? "disabled" : ""}>删除配置</button>` : ""}
@@ -2933,8 +2931,9 @@
     if (!section || !host) return;
     const stats = state.status && state.status.stats && state.status.stats.last;
     if (!stats) {
-      section.hidden = true;
-      host.innerHTML = "";
+      section.hidden = false;
+      $("stats-meta").textContent = "最近一次生成";
+      host.innerHTML = '<div class="empty stats-placeholder">还没有生成数据</div>';
       return;
     }
     section.hidden = false;
