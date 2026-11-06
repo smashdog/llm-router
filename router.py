@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import requests
@@ -4167,6 +4167,79 @@ def resolve_add_context(info: dict[str, Any] | None, requested: Any) -> tuple[in
 def slugify_model_id(stem: str) -> str:
     value = re.sub(r"[^A-Za-z0-9._-]+", "-", str(stem)).strip("-._")
     return value or "model"
+
+
+#: The names strata_control/drafting.py lets DFlash2 start under (mirrors its
+#: _SUPPORTED_NAME): the bare family, a Gyro build, an Unsloth quantization, or
+#: a quant tag.  Any other name silently keeps the MTP.
+STRATA_DFLASH2_NAME = re.compile(
+    r"^qwen3\.8-flash-next(-gyro-[a-z0-9._-]+|-unsloth-[a-z0-9._-]+|-(q|iq|tq)\d[a-z0-9_.]*)?$",
+    re.IGNORECASE,
+)
+_STRATA_FLASH_NEXT = re.compile(r"qwen3\.8[\s_-]*flash[\s_-]*next", re.IGNORECASE)
+
+
+def strata_is_flash_next(info: dict[str, Any] | None) -> bool:
+    """Does this GGUF header describe a Qwen3.8-Flash-Next family model?
+
+    Strata's arch qwen4exp is that family (Flash-Next and its Gyro builds); the
+    general.name check also covers headers that only carry the family name.
+    """
+    if not isinstance(info, dict):
+        return False
+    if str(info.get("architecture") or "").strip().lower() == "qwen4exp":
+        return True
+    return bool(_STRATA_FLASH_NEXT.search(str(info.get("name") or "")))
+
+
+def _model_name_slug(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(text)).strip("-._").lower()
+
+
+def strata_dflash2_model_name(
+    info: dict[str, Any] | None, *candidates: str | None
+) -> str | None:
+    """The model name serve/server.py needs to run DFlash2, from the GGUF.
+
+    strata_control/drafting.py starts DFlash2 only when the config's model_name
+    matches qwen3.8-flash-next[-gyro-…|-unsloth-…|-q/iq/tq…]; setup.py names a
+    model that way.  The router names a model after its file, so a Flash-Next
+    GGUF with any other name would silently keep falling back to the MTP.  Use
+    the first candidate (the add form's name, file stem, folder, GGUF
+    general.name) whose slug already satisfies that gate.  None means: not
+    Flash-Next, or none of the names can be mapped to the supported pattern
+    (leave the person's name).
+    """
+    if not strata_is_flash_next(info):
+        return None
+    for raw in (*candidates, (info or {}).get("name")):
+        slug = _model_name_slug(raw) if raw else ""
+        if slug and STRATA_DFLASH2_NAME.match(slug):
+            return slug
+    return None
+
+
+def strata_add_model_name(
+    info: dict[str, Any] | None,
+    base_name: str,
+    *candidates: str | None,
+    taken: Callable[[str], bool] = lambda _name: False,
+) -> tuple[str, str | None, str | None]:
+    """(model name, alias, dflash2 name) for a model being added.
+
+    The default identifier is the slug of ``base_name``, but a Flash-Next GGUF
+    is renamed to the model_name Strata's DFlash2 gate accepts (see
+    ``strata_dflash2_model_name``); the name it would have had is kept as an
+    alias unless that identifier already belongs to another model.  The
+    candidates are tried in order (form name, file stem, folder) with the GGUF
+    general.name last.
+    """
+    name = slugify_model_id(base_name)
+    dflash2_name = strata_dflash2_model_name(info, *candidates)
+    if not dflash2_name:
+        return name, None, None
+    alias = name if name.lower() != dflash2_name and not taken(name) else None
+    return dflash2_name, alias, dflash2_name
 
 
 def write_text_atomic(path: Path, text: str) -> None:
@@ -10200,10 +10273,22 @@ class Gateway:
             if info is None:
                 raise BadRequest("无法读取 GGUF 头：文件不是有效的 GGUF 模型")
             context, context_note = resolve_add_context(info, job.get("context_length"))
-            base_name = job.get("name") or (
+            form_name = job.get("name")
+            base_name = form_name or (
                 model.parent.name if source_is_dir else model.stem
             )
-            name = slugify_model_id(base_name)
+            # DFlash2 (strata_control/drafting.py) starts only when the config's
+            # model_name is a qwen3.8-flash-next-… name.  Name a Flash-Next GGUF
+            # that way so the params switch works out of the box; keep the
+            # identifier the file would have had as an alias.
+            name, alias, dflash2_name = strata_add_model_name(
+                info,
+                base_name,
+                form_name,
+                model.stem,
+                model.parent.name if source_is_dir else None,
+                taken=lambda value: self.registry.resolve(value) is not None,
+            )
             if self.registry.resolve(name) is not None:
                 raise BadRequest(f"模型 ID {name} 已存在")
             vision_flags = None
@@ -10215,10 +10300,18 @@ class Gateway:
                     raise BadRequest("无法读取视觉文件头")
                 if not vision_flags.get("clip.has_vision_encoder"):
                     raise BadRequest("视觉文件没有 clip.has_vision_encoder（不是视觉 mmproj）")
+            naming_note = ""
+            if dflash2_name:
+                naming_note = f"；DFlash2 兼容名 {name}"
+                if alias:
+                    naming_note += f"（别名 {alias}）"
+            elif strata_is_flash_next(info):
+                naming_note = "；DFlash2 需要 qwen3.8-flash-next-… 模型名，当前名称会退回 MTP"
             job["name"] = name
             self._job_step(
                 job, "metadata", "ok",
                 f"架构 {info.get('architecture') or '未知'}；{context_note}；ID {name}"
+                + naming_note
                 + ("；视觉 mmproj 有效" if vision is not None else ""),
             )
 
@@ -10316,7 +10409,7 @@ class Gateway:
                 raise BadRequest(f"配置已存在：{config_file}")
             new_cfg["model_name"] = name
             new_cfg["display_name"] = str(info.get("name") or model.stem)
-            new_cfg["aliases"] = []
+            new_cfg["aliases"] = [alias] if alias else []
             new_cfg["notes"] = (
                 "Strata 单模型；参数"
                 + (f"复制自 {template_path.name}" if template_path else "使用模板")
