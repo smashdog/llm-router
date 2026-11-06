@@ -510,6 +510,17 @@
     margin: 16px 0 -4px; color: var(--muted); font-size: 12.5px; font-weight: 600;
   }
   .params-group-title span { color: var(--faint); font-weight: 400; margin-left: 6px; }
+  .params-group-title.tabbed {
+    margin: 16px 0 8px; padding: 6px 10px;
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    color: var(--text);
+    background: linear-gradient(180deg, rgba(94,234,212,.11), rgba(94,234,212,.035));
+    border: 1px solid rgba(94,234,212,.18);
+    border-bottom: 2px solid rgba(94,234,212,.42);
+    border-radius: 8px 8px 4px 4px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+  }
+  .params-group-title.tabbed span { margin-left: auto; text-align: right; }
   .params-hint { margin-top: 12px !important; color: var(--faint) !important; font-size: 12px !important; }
   .params-error { margin-top: 10px !important; color: #ffc1ca !important; font-size: 12.5px !important; }
   .param-tabs { display: flex; gap: 4px; margin: 16px 0 0; border-bottom: 1px solid var(--line-soft); }
@@ -1265,7 +1276,7 @@
 
   function specGroupsHtml(groups, title) {
     return groups.map((group) => `
-      <p class="params-group-title">${esc(group.label)} <span>${esc(title)}</span></p>
+      <p class="params-group-title tabbed">${esc(group.label)} <span>${esc(title)}</span></p>
       <div class="params-grid">
         ${group.specs.map(specLabelHtml).join("")}
       </div>`).join("");
@@ -1288,7 +1299,7 @@
     const specs = engineTabSpecs(kind).filter((spec) => !spec.vision_only || multimodal !== false);
     const groups = specGroups(specs);
     const samplingHtml = sampling.length
-      ? `<p class="params-group-title">采样 <span>请求级 · 留空不注入</span></p>
+      ? `<p class="params-group-title tabbed">采样 <span>请求级 · 留空不注入</span></p>
          <div class="params-grid">${sampling.map(specLabelHtml).join("")}</div>`
       : "";
     const engineHtml = groups.length ? specGroupsHtml(groups, kvmemEngineTitle(kind)) : "";
