@@ -420,6 +420,9 @@ def hf_search_item(raw: dict[str, Any], source: str) -> dict[str, Any]:
 
 SAMPLING_GENERATION_PATHS = {"/v1/chat/completions", "/v1/completions"}
 
+# Generation endpoints whose usage/timings feed the console statistics card.
+STATS_PATHS = {"/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/messages"}
+
 # Sampling defaults for a model added from the console: the values the two
 # reference models run with (llama.cpp: LFM3-Omni-2B, KVMem: Ornith 1.5).
 DEFAULT_SAMPLING = {
@@ -907,6 +910,19 @@ KVMEM_LLAMA_ENGINE_SPECS: list[dict[str, Any]] = [
         low=1, step=1, note="留空继承逻辑 batch",
     ),
     _kv_engine_spec(
+        "n_predict", ("-n", "--n-predict"), "默认最大输出", "runtime",
+        default=-1, low=-1, step=1,
+        note="-1 表示不额外限制；请求的 max_tokens 优先",
+    ),
+    _kv_engine_spec(
+        "chat_template_file", "--chat-template-file", "聊天模板文件", "runtime", "string",
+        note="Jinja 模板路径；留空使用 GGUF 内置模板",
+    ),
+    _kv_engine_spec(
+        "chat_template_kwargs", "--chat-template-kwargs", "模板默认参数", "runtime",
+        "string", note="JSON 对象文本，如 {\"enable_thinking\": false}",
+    ),
+    _kv_engine_spec(
         "ngl", ("-ngl", "--n-gpu-layers", "--gpu-layers"), "GPU 层数", "runtime",
         low=0, high=100000, step=1, note="模板默认 999",
     ),
@@ -1073,6 +1089,8 @@ POLYSTRATA_ENGINE_GROUPS = (
     ("memory", "内存与存储"),
     ("runtime", "运行与显存"),
     ("spec", "推测解码（MTP）"),
+    ("engine", "专家与解码"),
+    ("cache", "提示与会话缓存"),
 )
 POLYSTRATA_GROUP_LABELS = dict(POLYSTRATA_ENGINE_GROUPS)
 
@@ -1145,6 +1163,16 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         "kvmem_query_max_tokens", "--kvmem-query-max-tokens", "Query 上限", "retrieval",
         default=8192, low=1, high=8192, step=1,
         note="检索 query 截取的最大 token 数",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_query_begin", "--kvmem-query-begin", "Query 起点", "retrieval",
+        low=0, step=1, note="原始 prompt token 跨度起点",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_query_end", "--kvmem-query-end", "Query 终点", "retrieval",
+        low=0, step=1, note="原始 prompt token 跨度终点",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
@@ -1241,12 +1269,472 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         note="主模型没有内嵌 nextn 块时，可从同一模型的另一份 GGUF 读取草稿块",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
+    # -- engine / experts --------------------------------------------------
+    _kv_engine_spec(
+        "expert_profile", "--expert-profile", "专家使用统计文件", "engine", "string",
+        note="读取以挑选缓存专家，退出或服务时写回",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "no_gpu_experts", "--no-gpu-experts", "专家全部留在 CPU", "engine", "boolean",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "elastic_experts", "--elastic-experts", "弹性借用专家显存", "engine", "boolean",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "elastic_experts_headroom", "--elastic-experts-headroom",
+        "弹性借用（含 Windows headroom）", "engine", "boolean",
+        note="隐含 --elastic-experts；仅 Windows",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "elastic_headroom_mib", "--elastic-headroom-mib", "弹性 headroom（MiB）", "engine",
+        low=0, high=1024, step=16,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "elastic_physical_reserve_mib", "--elastic-physical-reserve-mib",
+        "弹性物理显存下限（MiB）", "engine", low=256, high=4096, step=64,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "any_node", "--any-node", "允许跨 NUMA 节点", "engine", "boolean",
+        note="默认只在承载大部分专家的节点运行 CPU 线程",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "batch_size", ("--batch", "--slots"), "并发回答数", "engine",
+        default=0, low=0, high=8, step=1,
+        note="0 表示一次一个；--slots 为同义参数",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "draft_vocab", "--draft-vocab", "草稿词表大小", "engine",
+        low=0, step=1, note="0 表示全部词表；部分模型默认 131072",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "no_graphs", "--no-graphs", "禁用 CUDA Graph", "engine", "boolean",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kv_whole", "--kv-whole", "KV 按整段上下文预留", "engine", "boolean",
+        note="加载时一次性给注意力缓存整段上下文的显存",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_swaps", "--expert-swaps", "生成时专家换入数", "engine",
+        default=64, low=0, step=1,
+        note="0 表示缓存保持加载时的状态",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "ram_experts_mib", "--ram-experts-mib", "专家 RAM 预算（MiB）", "engine",
+        low=0, step=256, note="留空表示全部专家可驻留内存",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "stage_mib", "--stage-mib", "专家暂存区（MiB）", "engine",
+        low=0, step=64,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "stage_ahead", "--stage-ahead", "提前路由阈值（token）", "engine",
+        default=1024, low=0, step=1,
+        note="0 表示不提前拷贝专家",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "stage_read_mib", "--stage-read-mib", "多批读取暂存（MiB）", "engine",
+        low=0, step=64,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "cpu_share", "--cpu-share", "CPU 分担比例", "engine", "number",
+        low=0.0, high=1.0, step=0.01,
+        note="0 表示不启用",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "tail_skip", "--tail-skip", "尾部专家跳过位置", "engine",
+        low=0, step=1, note="0 表示不跳过",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "skip_weight", "--skip-weight", "尾部专家权重阈值", "engine", "number",
+        low=0.0, high=1.0, step=0.01,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "cache_bias", "--cache-bias", "缓存专家路由加权", "engine", "number",
+        low=-100.0, high=100.0, step=0.01,
+        note="qwen35moe：给已在显存的专家加权，会改变回答",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "eos_ids", "--eos-ids", "结束 token", "engine", "string",
+        note="逗号分隔；留空使用 GGUF 的 eos/eot/eom",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    # -- prompt / conversation cache --------------------------------------
+    _kv_engine_spec(
+        "prompt_cache_every", "--prompt-cache-every", "检查点间隔（token）", "cache",
+        default=2048, low=0, step=1, note="0 表示只在提示末尾保留检查点",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "conversation_cache_min_tokens", "--conversation-cache-min-tokens",
+        "会话停放最小 token", "cache", default=1024, low=0, step=1,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "conversation_cache_min_free_mib", "--conversation-cache-min-free-mib",
+        "会话停放最低空闲内存（MiB）", "cache", default=2560, low=0, step=256,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
 ]
 POLYSTRATA_ENGINE_BY_KEY = {spec["key"]: spec for spec in POLYSTRATA_ENGINE_SPECS}
 
 
 def kvmem_poly_engine_schema() -> list[dict[str, Any]]:
     return [dict(spec) for spec in POLYSTRATA_ENGINE_SPECS]
+
+
+# ---------------------------------------------------------------------------
+# NInfer per-model engine options
+#
+# These are the serve-process flags of ninfer-serve (see serve_options.cpp),
+# minus what the router owns (artifact path, --model-id, host/port/API keys)
+# and the request-level sampler.  Each new .ninfer model copies the template
+# and then applies the fields the console sends.
+
+NINFER_ENGINE_GROUPS = (
+    ("core", "运行与并发"),
+    ("device", "设备与显存"),
+    ("precision", "精度与内核"),
+    ("kv", "KV 缓存"),
+    ("context", "上下文缓存"),
+    ("spec", "推测解码"),
+    ("thinking", "思考"),
+    ("vision", "视觉"),
+)
+NINFER_GROUP_LABELS = dict(NINFER_ENGINE_GROUPS)
+
+_NINFER_KV_DTYPES = (
+    "bf16", "int8", "fp8", "rk8v4", "rk4v4", "rk4v4-e8", "rk2v4-e8", "nvfp4", "k8v4",
+)
+
+NINFER_ENGINE_SPECS: list[dict[str, Any]] = [
+    # -- core --------------------------------------------------------------
+    _kv_engine_spec(
+        "max_context", "--max-context", "上下文长度", "core",
+        default=8192, low=256, step=1,
+        note="模板默认 8192；可小于模型上限",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "max_concurrency", "--max-concurrency", "最大并发", "core",
+        low=1, high=8, step=1, default=1,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "prefill_chunk", "--prefill-chunk", "Prefill chunk", "core",
+        default=1024, low=128, step=128,
+        note="必须能被 128 整除",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "decode_rounds_per_prefill", "--decode-rounds-per-prefill", "每轮 prefill 的 decode 次数",
+        "core", low=0, high=4096, step=1,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "default_max_tokens", "--default-max-tokens", "默认最大输出", "core",
+        low=-1, step=1, note="-1 表示不额外限制",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    # -- device ------------------------------------------------------------
+    _kv_engine_spec(
+        "device", "--device", "主设备序号", "device",
+        low=0, step=1, note="单卡序号；多卡用 --devices",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "devices", "--devices", "设备列表", "device", "string",
+        note="如 CUDA0,CUDA1",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "stage_layers", "--stage-layers", "流水线层划分", "device", "string",
+        note="每张卡的层数，如 30,34",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "tensor_parallel", "--tensor-parallel", "张量并行", "device", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "tensor_split", "--tensor-split", "多卡比例", "device", "string",
+        note="每张卡一个相对权重，如 3,1",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_residency", "--expert-residency", "专家驻留位置", "device", "enum",
+        choices=[
+            {"value": "device", "label": "device · 显存"},
+            {"value": "host", "label": "host · 内存"},
+            {"value": "disk", "label": "disk · 磁盘"},
+        ],
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "embedding_residency", "--embedding-residency", "嵌入层驻留位置", "device", "enum",
+        choices=[
+            {"value": "device", "label": "device"},
+            {"value": "host", "label": "host"},
+        ],
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "expert_cache_mib", "--expert-cache-mib", "专家缓存（MiB）", "device", "string",
+        note="正数或 auto",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "no_cuda_graph", "--no-cuda-graph", "禁用 CUDA Graph", "device", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "cuda_graph_allowance_mib", "--cuda-graph-allowance-mib", "CUDA Graph 预留（MiB）",
+        "device", low=0, step=16,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "device_profile", "--device-profile", "设备校准", "device", "enum",
+        choices=[
+            {"value": "auto", "label": "auto"},
+            {"value": "off", "label": "off"},
+            {"value": "calibrate", "label": "calibrate"},
+        ],
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    # -- precision ---------------------------------------------------------
+    _kv_engine_spec(
+        "fast_prefill_kernel", "--fast-prefill-kernel", "快速 prefill 内核", "precision",
+        "boolean", group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "prefill_cublas", "--prefill-cublas", "Prefill 使用 cuBLAS", "precision", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "no_prefill_cublas_projections", "--no-prefill-cublas-projections",
+        "投影不用 cuBLAS", "precision", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "no_prefill_a8", "--no-prefill-a8", "Prefill 禁用 A8", "precision", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "mlp_a8_decode", "--mlp-a8-decode", "Decode MLP A8", "precision", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "mtp_experts_q4", "--mtp-experts-q4", "MTP 专家 Q4", "precision", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "gdn_state_fp16", "--gdn-state-fp16", "GDN 状态 FP16", "precision", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "rope_yarn", "--rope-yarn", "RoPE YaRN", "precision", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "rope_yarn_factor", "--rope-yarn-factor", "YaRN 系数", "precision", "number",
+        low=1.0, high=4.0, step=0.01,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "rope_scaling_factor", "--rope-scaling-factor", "RoPE 缩放", "precision", "number",
+        low=1.0, high=32.0, step=0.01,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "rope_scaling_original_context", "--rope-scaling-original-context",
+        "RoPE 原始上下文", "precision", low=256, step=1,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    # -- kv ----------------------------------------------------------------
+    _kv_engine_spec(
+        "kv_capacity", "--kv-capacity", "KV 容量", "kv", "string",
+        note="token 数或 auto",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kv_headroom_mib", "--kv-headroom-mib", "KV 显存预留（MiB）", "kv",
+        low=0, step=64,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kv_dtype", "--kv-dtype", "KV 精度", "kv", "enum",
+        choices=[{"value": value, "label": value} for value in _NINFER_KV_DTYPES],
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    # -- context cache -----------------------------------------------------
+    _kv_engine_spec(
+        "no_prefix_reuse", "--no-prefix-reuse", "禁用前缀复用", "context", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "device_state_slots", "--device-state-slots", "显存状态槽位", "context",
+        low=0, step=1, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "host_state_slots", "--host-state-slots", "内存状态槽位", "context",
+        low=0, step=1, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "host_kv_mib", "--host-kv-mib", "Host KV（MiB）", "context",
+        low=0, step=256, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "host_cache_mib", "--host-cache-mib", "Host 缓存（MiB）", "context",
+        low=0, step=256, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "host_cache_percent", "--host-cache-percent", "Host 缓存比例（%）", "context",
+        low=1, high=100, step=1, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "context_cache_policy", "--context-cache-policy", "上下文缓存策略", "context", "enum",
+        choices=[
+            {"value": "default", "label": "default"},
+            {"value": "rolling", "label": "rolling"},
+        ],
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "recency_eviction", "--recency-eviction", "按最近使用淘汰", "context", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "disk_kv_path", "--disk-kv-path", "磁盘 KV 目录", "context", "string",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "disk_kv_gib", "--disk-kv-gib", "磁盘 KV 额度（GiB）", "context", "number",
+        low=0.0, step=1, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "disk_kv_restore", "--disk-kv-restore", "磁盘 KV 恢复", "context", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "concurrent_prefill", "--concurrent-prefill", "并发 prefill", "context", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    # -- speculative -------------------------------------------------------
+    _kv_engine_spec(
+        "spec", "--spec", "推测解码后端", "spec", "enum",
+        choices=[
+            {"value": "none", "label": "none"},
+            {"value": "mtp", "label": "mtp"},
+            {"value": "dflash", "label": "dflash"},
+            {"value": "dflash2", "label": "dflash2"},
+            {"value": "dspark", "label": "dspark"},
+        ],
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "draft_tokens", "--draft-tokens", "草稿长度", "spec",
+        low=1, high=15, step=1, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "draft_min_p", "--draft-min-p", "最小草稿概率", "spec", "number",
+        low=0.0, high=1.0, step=0.01, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "draft_confidence", "--draft-confidence", "草稿置信度", "spec", "number",
+        low=0.0, high=1.0, step=0.01, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "adaptive_mtp", "--adaptive-mtp", "自适应 MTP", "spec", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "mtp_attention_window", "--mtp-attention-window", "MTP 注意力窗口", "spec",
+        low=1, step=1, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "ngram_draft_tokens", "--ngram-draft-tokens", "N-gram 草稿长度", "spec",
+        low=1, high=63, step=1, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "ngram_min_match", "--ngram-min-match", "N-gram 最小匹配", "spec",
+        low=4, high=64, step=1, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "lookup_ngram", "--lookup-ngram", "N-gram 查表", "spec", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    # -- thinking ----------------------------------------------------------
+    _kv_engine_spec(
+        "no_thinking", "--no-thinking", "默认关闭思考", "thinking", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "preserve_thinking", "--preserve-thinking", "保留思考历史", "thinking", "boolean",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "default_thinking_budget", "--default-thinking-budget", "思考预算", "thinking",
+        low=-1, step=1, note="-1 不限",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "reasoning_loop", "--reasoning-loop", "推理循环处理", "thinking", "enum",
+        choices=[
+            {"value": "off", "label": "off"},
+            {"value": "stop", "label": "stop"},
+            {"value": "conclude", "label": "conclude"},
+        ],
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "default_reasoning_effort", "--default-reasoning-effort", "默认 reasoning effort",
+        "thinking", "string", group_labels=NINFER_GROUP_LABELS,
+    ),
+    # -- vision ------------------------------------------------------------
+    _kv_engine_spec(
+        "vision_max_merged", "--vision-max-merged", "视觉最大合并 token", "vision",
+        low=64, high=16384, step=64,
+        note="CPU 模式未显式设置时会自动降到 256",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "media_cache_mib", "--media-cache-mib", "媒体缓存（MiB）", "vision",
+        low=0, step=64, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "media_live_mib", "--media-live-mib", "媒体活动区（MiB）", "vision",
+        low=0, step=64, group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "media_preprocess_threads", "--media-preprocess-threads", "媒体预处理线程", "vision",
+        low=0, high=16, step=1, note="0 自动，最多 16",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+]
+NINFER_ENGINE_BY_KEY = {spec["key"]: spec for spec in NINFER_ENGINE_SPECS}
+
+
+def ninfer_engine_schema() -> list[dict[str, Any]]:
+    return [dict(spec) for spec in NINFER_ENGINE_SPECS]
 
 
 def _config_switch_present(args: list[str], flag: str) -> bool:
@@ -1353,6 +1841,14 @@ def normalize_kvmem_llama_engine(values: dict[str, Any] | None) -> dict[str, Any
     image_max = out.get("image_max_tokens")
     if isinstance(image_min, int) and isinstance(image_max, int) and image_max < image_min:
         raise BadRequest("image_max_tokens 不能小于 image_min_tokens")
+    kwargs = out.get("chat_template_kwargs")
+    if isinstance(kwargs, str):
+        try:
+            parsed = json.loads(kwargs)
+        except ValueError as exc:
+            raise BadRequest(f"chat_template_kwargs 不是有效 JSON：{exc}") from exc
+        if not isinstance(parsed, dict):
+            raise BadRequest("chat_template_kwargs 必须是 JSON 对象")
     return out
 
 
@@ -1729,6 +2225,148 @@ def kvmem_poly_validate_args(args: list[str], context: int) -> None:
         raise BadRequest("KVMem 关闭 MTP 时需要 --window 1 --no-draft")
     if lookup != 0:
         raise BadRequest("KVMem 不接受非零 --lookup")
+
+
+def ninfer_vision_state(args: list[str]) -> tuple[bool, bool]:
+    """Return (vision enabled, vision on GPU) for one ninfer-serve arg list."""
+    tokens = [str(item) for item in args]
+    residency = (_config_arg_value(tokens, "--vision-residency") or "").strip().lower()
+    cpu_flag = _config_switch_present(tokens, "--vision-cpu")
+    enabled = (
+        cpu_flag
+        or _config_switch_present(tokens, "--vision")
+        or residency in ("resident", "overlay", "cpu")
+    )
+    gpu = enabled and not cpu_flag and residency != "cpu"
+    return enabled, gpu
+
+
+def ninfer_set_vision(args: list[str], enabled: bool, gpu: bool) -> list[str]:
+    """Enable/disable the embedded vision tower and pick CPU or GPU residency."""
+    out = [str(item) for item in args]
+    residency = (_config_arg_value(out, "--vision-residency") or "").strip().lower()
+    out = _config_switch_remove(out, "--vision-cpu")
+    out = _config_arg_remove(out, "--vision-residency")
+    out = _config_switch_remove(out, "--vision")
+    if not enabled:
+        return out
+    if gpu:
+        keep = residency if residency in ("resident", "overlay") else "resident"
+        out.extend(["--vision", "--vision-residency", keep])
+    else:
+        out.append("--vision-cpu")
+    return out
+
+
+def ninfer_engine_values(args: list[str]) -> dict[str, Any]:
+    """Read the whitelisted ninfer-serve options present in one model's args."""
+    tokens = [str(item) for item in args]
+    out: dict[str, Any] = {}
+    for spec in NINFER_ENGINE_SPECS:
+        key = spec["key"]
+        if spec["type"] == "boolean":
+            if any(_config_switch_present(tokens, flag) for flag in spec["flags"]):
+                out[key] = True
+            continue
+        raw = _config_arg_value(tokens, *spec["flags"])
+        if raw is None:
+            continue
+        if spec["type"] == "integer":
+            value = parse_int(raw)
+            if value is None:
+                continue
+        elif spec["type"] == "number":
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+        else:
+            value = raw
+        out[key] = value
+    return out
+
+
+def normalize_ninfer_engine(values: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate ninfer-serve process options; None explicitly clears a flag."""
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise BadRequest("engine_params must be an object")
+    out: dict[str, Any] = {}
+    for key, raw in values.items():
+        spec = NINFER_ENGINE_BY_KEY.get(key)
+        if spec is None:
+            raise BadRequest(f"unknown engine parameter {key!r}")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            out[key] = None
+            continue
+        kind = spec["type"]
+        if kind == "boolean":
+            if isinstance(raw, bool):
+                value = raw
+            elif raw in (0, 1):
+                value = bool(raw)
+            else:
+                raise BadRequest(f"{key}: expected true or false")
+        elif kind in ("enum", "string"):
+            if not isinstance(raw, str):
+                raise BadRequest(f"{key}: expected a string")
+            value = raw.strip()
+            if len(value) > 4096:
+                raise BadRequest(f"{key}: too long")
+            choices = spec.get("choices")
+            if choices and value not in [choice["value"] for choice in choices]:
+                allowed = ", ".join(str(choice["value"]) for choice in choices)
+                raise BadRequest(f"{key}: expected one of {allowed}")
+        else:
+            value = _sampling_number(
+                key, raw, spec.get("min", 0), spec.get("max"),
+                integer=(kind == "integer"),
+                low_exclusive=bool(spec.get("exclusive_min")),
+            )
+        out[key] = value
+    if isinstance(out.get("prefill_chunk"), int) and out["prefill_chunk"] % 128:
+        raise BadRequest("prefill_chunk 必须是 128 的倍数")
+    capacity = out.get("kv_capacity")
+    if isinstance(capacity, str) and capacity != "auto" and not capacity.isdigit():
+        raise BadRequest("kv_capacity 必须是正整数或 auto")
+    cache = out.get("expert_cache_mib")
+    if isinstance(cache, str) and cache != "auto" and not cache.isdigit():
+        raise BadRequest("expert_cache_mib 必须是非负整数或 auto")
+    stage = out.get("stage_layers")
+    if isinstance(stage, str):
+        parts = [part.strip() for part in stage.split(",")]
+        if not parts or any(not part.isdigit() or int(part) <= 0 for part in parts):
+            raise BadRequest("stage_layers 必须是每卡层数的正整数列表，如 30,34")
+    disk_gib = out.get("disk_kv_gib")
+    disk_path = out.get("disk_kv_path")
+    if isinstance(disk_gib, (int, float)) and disk_gib > 0 and not disk_path:
+        raise BadRequest("disk_kv_gib 大于 0 时必须设置 disk_kv_path")
+    return out
+
+
+def ninfer_apply_engine_values(args: list[str], values: dict[str, Any]) -> list[str]:
+    """Write validated ninfer-serve options back to the per-model CLI args."""
+    out = [str(item) for item in args]
+    for key, value in values.items():
+        spec = NINFER_ENGINE_BY_KEY.get(key)
+        if spec is None:
+            continue
+        flags = spec["flags"]
+        if spec["type"] == "boolean":
+            for flag in flags:
+                out = _config_switch_remove(out, flag)
+            if value is True:
+                out.append(spec["flag"])
+            continue
+        if value is None:
+            for flag in flags:
+                out = _config_arg_remove(out, flag)
+            continue
+        for flag in flags[1:]:
+            out = _config_arg_remove(out, flag)
+        out = _config_arg_set(out, spec["flag"], value)
+    return out
 
 
 class SamplingStore:
@@ -2821,6 +3459,10 @@ def discover_ninfer_models(engine_cfg: dict[str, Any]) -> list[Model]:
             problem = f"模型文件不存在（{model_file}）"
         engine_model = str(cfg.get("model_id") or model_id)
         display_name = str(cfg.get("display_name") or model_id)
+        vision_enabled, vision_gpu = ninfer_vision_state(args)
+        if not vision_enabled and isinstance(cfg.get("vision"), dict):
+            vision_enabled = bool(cfg["vision"]) and cfg["vision"].get("enabled", True) is not False
+            vision_gpu = bool(cfg["vision"].get("gpu"))
         models.append(
             Model(
                 id=model_id,
@@ -2831,7 +3473,8 @@ def discover_ninfer_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 aliases=aliases,
                 context_length=ctx,
                 max_output_tokens=max_out,
-                multimodal=bool(cfg.get("vision")),
+                multimodal=vision_enabled,
+                vision_gpu=vision_gpu,
                 reasoning=bool(cfg.get("reasoning")),
                 notes=cfg.get("notes"),
                 quantization=cfg.get("quantization"),
@@ -4374,6 +5017,195 @@ class EngineManager:
 # gateway state and switching
 
 
+class RequestStats:
+    """The most recent completed generation, from upstream usage/timings."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.last: dict[str, Any] | None = None
+
+    def record(self, data: dict[str, Any]) -> None:
+        with self.lock:
+            self.last = data
+
+    def view(self) -> dict[str, Any]:
+        with self.lock:
+            return {"last": dict(self.last)} if self.last else {}
+
+
+class ProxyTrace:
+    """Collect usage/timings from one proxied generation response.
+
+    Reads both non-streaming JSON bodies and SSE ``data:`` lines while the
+    bytes pass through unchanged, and records the first content delta so the
+    console can show time-to-first-token.
+    """
+
+    def __init__(self, gateway: "Gateway", entry: Model, started: float):
+        self.gateway = gateway
+        self.entry = entry
+        self.started = started
+        self.buf = b""
+        self.usage: dict[str, Any] | None = None
+        self.timings: dict[str, Any] | None = None
+        self.first_token_s: float | None = None
+        self.stream = False
+
+    def feed(self, chunk: bytes) -> None:
+        self.stream = True
+        self.buf += chunk
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            self._line(line)
+
+    def flush(self) -> None:
+        if self.buf:
+            line, self.buf = self.buf, b""
+            self._line(line)
+
+    def feed_json(self, data: bytes) -> None:
+        if not data or len(data) > 64 * 1024 * 1024:
+            return
+        try:
+            obj = json.loads(data)
+        except ValueError:
+            return
+        if isinstance(obj, dict):
+            self._object(obj)
+
+    def _line(self, raw: bytes) -> None:
+        try:
+            text = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            return
+        if not text.startswith("data:"):
+            return
+        data = text[5:].strip()
+        if not data or data == "[DONE]":
+            return
+        try:
+            obj = json.loads(data)
+        except ValueError:
+            return
+        if isinstance(obj, dict):
+            self._object(obj)
+
+    def _object(self, obj: dict[str, Any]) -> None:
+        usage = obj.get("usage")
+        if not isinstance(usage, dict):
+            for key in ("response", "message"):
+                inner = obj.get(key)
+                if isinstance(inner, dict) and isinstance(inner.get("usage"), dict):
+                    usage = inner["usage"]
+                    break
+        if isinstance(usage, dict):
+            merged = dict(self.usage or {})
+            merged.update({key: value for key, value in usage.items() if value is not None})
+            self.usage = merged
+        timings = obj.get("timings")
+        if isinstance(timings, dict):
+            merged = dict(self.timings or {})
+            merged.update(timings)
+            self.timings = merged
+        if self.first_token_s is None and self._has_text(obj):
+            self.first_token_s = max(0.0, time.monotonic() - self.started)
+
+    @staticmethod
+    def _has_text(obj: dict[str, Any]) -> bool:
+        choices = obj.get("choices")
+        if isinstance(choices, list) and choices:
+            choice = choices[0] if isinstance(choices[0], dict) else {}
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            if delta.get("content") or delta.get("reasoning_content"):
+                return True
+            message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+            if message.get("content") or message.get("reasoning_content"):
+                return True
+            if choice.get("text"):
+                return True
+        return obj.get("type") in ("response.output_text.delta", "content_block_delta")
+
+    @staticmethod
+    def _number(value: Any) -> float | None:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+    def commit(self) -> None:
+        usage = self.usage if isinstance(self.usage, dict) else {}
+        timings = self.timings if isinstance(self.timings, dict) else {}
+        if not usage and not timings:
+            return
+        prompt_eval = int(self._number(timings.get("prompt_n")) or 0)
+        cache_n = int(self._number(timings.get("cache_n")) or 0)
+        prompt_tokens = int(
+            self._number(usage.get("prompt_tokens"))
+            or self._number(usage.get("input_tokens"))
+            or (prompt_eval + cache_n)
+            or 0
+        )
+        completion_tokens = int(
+            self._number(usage.get("completion_tokens"))
+            or self._number(usage.get("output_tokens"))
+            or self._number(timings.get("predicted_n"))
+            or 0
+        )
+        cached = 0
+        for holder in (
+            usage.get("prompt_tokens_details"),
+            usage.get("input_tokens_details"),
+        ):
+            if isinstance(holder, dict):
+                cached = int(self._number(holder.get("cached_tokens")) or 0)
+                if cached:
+                    break
+        if not cached:
+            cached = int(self._number(usage.get("cache_read_input_tokens")) or 0)
+        if not cached:
+            cached = cache_n
+        predicted_ms = self._number(timings.get("predicted_ms"))
+        predicted_n = self._number(timings.get("predicted_n")) or completion_tokens
+        prompt_ms = self._number(timings.get("prompt_ms"))
+        prompt_n = self._number(timings.get("prompt_n")) or prompt_tokens
+        gen_rate = self._number(timings.get("predicted_per_second"))
+        if gen_rate is None and predicted_ms and predicted_n:
+            gen_rate = predicted_n / predicted_ms * 1000.0
+        prefill_rate = self._number(timings.get("prompt_per_second"))
+        if prefill_rate is None and prompt_ms and prompt_n:
+            prefill_rate = prompt_n / prompt_ms * 1000.0
+        context_length = self.entry.context_length
+        total = prompt_tokens + completion_tokens
+        first_ms = (
+            self.first_token_s * 1000.0
+            if self.first_token_s is not None
+            else prompt_ms
+        )
+        data: dict[str, Any] = {
+            "at": iso_now(),
+            "model": self.entry.id,
+            "engine": self.entry.engine,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total,
+            "cached_tokens": cached,
+            "context_length": context_length,
+            "gen_per_second": round(gen_rate, 1) if gen_rate is not None else None,
+            "prefill_per_second": (
+                round(prefill_rate, 1) if prefill_rate is not None else None
+            ),
+            "prefill_ms": round(prompt_ms, 1) if prompt_ms is not None else None,
+            "first_token_ms": round(first_ms, 1) if first_ms is not None else None,
+            "total_ms": round((time.monotonic() - self.started) * 1000.0, 1),
+            "draft_n": int(self._number(timings.get("draft_n")) or 0) or None,
+            "draft_n_accepted": (
+                int(self._number(timings.get("draft_n_accepted")) or 0) or None
+            ),
+        }
+        self.gateway.stats.record(data)
+
+
 class Gateway:
     def __init__(
         self,
@@ -4417,6 +5249,7 @@ class Gateway:
             base_dir, config.get("model_params_file") or "model-params.json"
         )
         self.params = SamplingStore(params_path, log, registry)
+        self.stats = RequestStats()
         self.status_hub = StatusHub(self._hub_model_list, self._hub_stamp, log)
         self.model_jobs_lock = threading.Lock()
         self.model_jobs: dict[str, dict[str, Any]] = {}
@@ -6203,15 +7036,19 @@ class Gateway:
                 }
             elif kind == "ninfer_dir":
                 template_path, template = ninfer_reference_config(engine_cfg)
+                template_args = [str(item) for item in (template or {}).get("args") or []]
+                template_vision, template_vision_gpu = ninfer_vision_state(template_args)
                 out[engine_id] = {
                     "engine": engine_id,
                     "kind": "ninfer",
                     "label": "NInfer（KVMem）",
                     "models_dir": models_cfg.get("dir"),
                     "template": str(template_path) if template_path else None,
+                    "engine_params": ninfer_engine_values(template_args),
                     "defaults": {
-                        "args": list((template or {}).get("args") or []),
-                        "vision_gpu": False,
+                        "args": template_args,
+                        "vision": template_vision,
+                        "vision_gpu": template_vision_gpu,
                     },
                     "default_params": self.default_sampling(engine_id),
                 }
@@ -6246,6 +7083,7 @@ class Gateway:
             },
             "kvmem_engine_schema": kvmem_llama_engine_schema(),
             "kvmem_poly_engine_schema": kvmem_poly_engine_schema(),
+            "ninfer_engine_schema": ninfer_engine_schema(),
             "smoke_image": str(self.smoke_image_path),
             "engine_defaults": {
                 "kv": {"method": "q8_0/q8_0 (k8v8)", "fallback": "engine default"},
@@ -6344,6 +7182,9 @@ class Gateway:
         vision = payload.get("vision")
         if vision is not None and not isinstance(vision, str):
             raise BadRequest("vision must be a path or null")
+        vision_enabled = payload.get("vision_enabled")
+        if vision_enabled is not None and not isinstance(vision_enabled, bool):
+            raise BadRequest("vision_enabled must be true or false")
         params = payload.get("params")
         if params is not None and not isinstance(params, dict):
             raise BadRequest("params must be an object")
@@ -6377,9 +7218,9 @@ class Gateway:
             raise BadRequest("KVMem 引擎 KV 精度固定 q8_0，不能设置 K/V 精度")
         if kind == "ninfer_dir":
             if vision_path:
-                raise BadRequest("NInfer 模型暂不支持在控制台配置视觉 mmproj")
+                raise BadRequest("NInfer 的视觉塔内嵌在 .ninfer 模型里，不需要 mmproj 路径")
             if context_length is not None or cache_type_k is not None or cache_type_v is not None:
-                raise BadRequest("NInfer 的上下文与 KV 参数由模板配置决定，不能单独设置")
+                raise BadRequest("NInfer 的上下文与 KV 精度通过引擎参数设置")
         kvmem_budget = payload.get("kvmem_budget")
         if kvmem_budget is not None:
             if isinstance(kvmem_budget, bool) or not isinstance(kvmem_budget, int):
@@ -6400,6 +7241,8 @@ class Gateway:
                 engine_values["kvmem_budget"] = kvmem_budget
         elif kind == "kvmem_dir":
             engine_values = normalize_kvmem_poly_engine(raw_engine_params)
+        elif kind == "ninfer_dir":
+            engine_values = normalize_ninfer_engine(raw_engine_params)
         else:
             if raw_engine_params:
                 raise BadRequest("只有 KVMem 引擎接受 engine_params")
@@ -6436,6 +7279,7 @@ class Gateway:
             "engine": engine_id,
             "model": model.strip(),
             "vision": vision_path,
+            "vision_enabled": vision_enabled,
             "vision_device": "gpu" if vision_gpu else "cpu",
             "context_length": context_length,
             "cache_type_k": (cache_type_k or "").strip() or None,
@@ -6462,7 +7306,7 @@ class Gateway:
             target=self._model_add_worker,
             args=(job, engine_id, kind, Path(model.strip()).expanduser(),
                   Path(vision_path).expanduser() if vision_path else None, smoke,
-                  vision_gpu),
+                  vision_gpu, vision_enabled),
             name=f"model-add-{job['id']}",
             daemon=True,
         )
@@ -6573,6 +7417,8 @@ class Gateway:
         engine_id: str,
         model: Path,
         smoke: bool,
+        vision_gpu: bool = False,
+        vision_enabled: bool | None = None,
     ) -> None:
         """Add a .ninfer model as a single-model NInfer process.
 
@@ -6609,7 +7455,7 @@ class Gateway:
             self._job_step(job, "kv", "running")
             self._job_step(
                 job, "kv", "ok",
-                "上下文、KVMem 与 KV 量化均继承模板；单模型模式无需 GGUF 元数据",
+                "上下文、KV 与引擎参数继承模板；单模型模式无需 GGUF 元数据",
             )
 
             self._job_step(job, "config", "running")
@@ -6643,12 +7489,30 @@ class Gateway:
                 args = ["--model-id", name, *args]
             for router_flag in ("--host", "--port", "--api-key", "--models-dir", "--models-preset"):
                 args = _config_arg_remove(args, router_flag)
+            requested_engine = {
+                key: value
+                for key, value in (job.get("engine_params") or {}).items()
+                if value is not None
+            }
+            args = ninfer_apply_engine_values(args, requested_engine)
+            if vision_enabled is not None:
+                args = ninfer_set_vision(args, bool(vision_enabled), bool(vision_gpu))
             new_cfg["args"] = args
+            if vision_enabled is True:
+                new_cfg["vision"] = {"embedded": True, "gpu": bool(vision_gpu)}
+            elif vision_enabled is False:
+                new_cfg.pop("vision", None)
             write_json_atomic(config_file, new_cfg)
             job["config_path"] = str(config_file)
+            vision_note = (
+                f"；视觉走 {'GPU' if vision_gpu else 'CPU'}"
+                if vision_enabled is True
+                else "；无视觉" if vision_enabled is False
+                else ""
+            )
             self._job_step(
                 job, "config", "ok",
-                f"已写入 {config_file}；参数复制自 {template_path.name}",
+                f"已写入 {config_file}；参数复制自 {template_path.name}{vision_note}",
             )
 
             self._apply_job_display_name(job, name)
@@ -7046,9 +7910,12 @@ class Gateway:
         vision: Path | None,
         smoke: bool,
         vision_gpu: bool = False,
+        vision_enabled: bool | None = None,
     ) -> None:
         if kind == "ninfer_dir":
-            self._model_add_ninfer_worker(job, engine_id, model, smoke)
+            self._model_add_ninfer_worker(
+                job, engine_id, model, smoke, vision_gpu, vision_enabled
+            )
             return
         if kind == "kvmem_llama_dir":
             self._model_add_kvmem_llama_worker(
@@ -7564,7 +8431,7 @@ class Gateway:
         if entry.engine == "kvmem":
             return normalize_kvmem_poly_engine(raw)
         if entry.engine == "ninfer":
-            raise BadRequest("NInfer 的上下文与 KV 参数由模型配置决定，不支持在控制台修改")
+            return normalize_ninfer_engine(raw)
         if entry.engine == "kvmem_llama":
             return normalize_kvmem_llama_engine(raw)
         if entry.engine != "llama":
@@ -7634,11 +8501,14 @@ class Gateway:
         value = raw.strip().lower()
         if value not in ("cpu", "gpu"):
             raise BadRequest('vision_device must be "cpu" or "gpu"')
-        if entry.engine == "ninfer":
-            raise BadRequest("NInfer 模型不支持修改视觉运行位置")
         if not entry.multimodal:
             raise BadRequest("该模型没有视觉编码器，无法设置视觉运行位置")
-        if entry.engine == "llama":
+        if entry.engine == "ninfer":
+            config_path = Path(str(entry.config_path or ""))
+            config = read_json(config_path, {})
+            if not isinstance(config, dict) or not isinstance(config.get("args"), list):
+                raise BadRequest("找不到该模型的 NInfer 配置")
+        elif entry.engine == "llama":
             preset_path = Path(str(entry.config_path or ""))
             if entry.source != "preset" or not preset_path.is_file():
                 raise BadRequest("该模型由目录扫描发现，没有可编辑的 models.ini 预设段")
@@ -7697,6 +8567,23 @@ class Gateway:
                 engine_values = dict(engine_values or {})
                 engine_values["mmproj-offload"] = "on" if vision_gpu else "off"
             update_llama_preset(preset_path, entry.engine_model, engine_values)
+        elif entry.engine == "ninfer":
+            config_path = Path(str(entry.config_path or ""))
+            config = read_json(config_path, {})
+            if not isinstance(config, dict):
+                raise BadRequest("找不到该模型的配置文件")
+            args = config.get("args")
+            if not isinstance(args, list):
+                raise BadRequest("模型配置没有 args 列表")
+            args = [str(item) for item in args]
+            if engine_values is not None:
+                args = ninfer_apply_engine_values(args, engine_values)
+            if changed_vision:
+                args = ninfer_set_vision(args, True, bool(vision_gpu))
+                config["vision"] = {"embedded": True, "gpu": bool(vision_gpu)}
+            config["args"] = args
+            write_json_atomic(config_path, config)
+            fresh_values = ninfer_engine_values(args)
         elif entry.engine in ("kvmem", "kvmem_llama"):
             config_path = Path(str(entry.config_path or ""))
             config = read_json(config_path, {})
@@ -7789,6 +8676,8 @@ class Gateway:
             result["engine_params"] = self._kvmem_poly_engine_values(fresh or entry)
         elif entry.engine == "kvmem_llama":
             result["engine_params"] = self._kvmem_llama_engine_values(fresh or entry)
+        elif entry.engine == "ninfer":
+            result["engine_params"] = self._ninfer_engine_values(fresh or entry)
         result["vision_gpu"] = (
             fresh.vision_gpu if fresh is not None else bool(vision_gpu)
         )
@@ -7895,6 +8784,7 @@ class Gateway:
         data["engines"] = {
             engine_id: manager.status() for engine_id, manager in self.engines.items()
         }
+        data["stats"] = self.stats.view()
         return data
 
     def _state_for(
@@ -7944,6 +8834,17 @@ class Gateway:
             return {}
         return kvmem_poly_engine_values([str(item) for item in args])
 
+    def _ninfer_engine_values(self, entry: Model) -> dict[str, Any]:
+        """Whitelisted ninfer-serve options from one ninfer-*.json."""
+        if entry.engine != "ninfer":
+            return {}
+        config_path = Path(str(entry.config_path or ""))
+        config = read_json(config_path, {})
+        args = config.get("args") if isinstance(config, dict) else None
+        if not isinstance(args, list):
+            return {}
+        return ninfer_engine_values([str(item) for item in args])
+
     def model_list(self) -> dict[str, Any]:
         with self.cond:
             active = self.active
@@ -7963,6 +8864,8 @@ class Gateway:
                 item["engine_params"] = self._kvmem_poly_engine_values(model)
             elif model.engine == "kvmem_llama":
                 item["engine_params"] = self._kvmem_llama_engine_values(model)
+            elif model.engine == "ninfer":
+                item["engine_params"] = self._ninfer_engine_values(model)
             if status == "failed" and last_error and target is not None and target.id == model.id:
                 item["error"] = last_error
             data.append(item)
@@ -7977,6 +8880,8 @@ class Gateway:
             item["engine_params"] = self._kvmem_poly_engine_values(model)
         elif model.engine == "kvmem_llama":
             item["engine_params"] = self._kvmem_llama_engine_values(model)
+        elif model.engine == "ninfer":
+            item["engine_params"] = self._ninfer_engine_values(model)
         return item
 
     def params_view(self) -> dict[str, Any]:
@@ -7991,6 +8896,8 @@ class Gateway:
                 row["engine_params"] = self._kvmem_poly_engine_values(entry)
             elif entry.engine == "kvmem_llama":
                 row["engine_params"] = self._kvmem_llama_engine_values(entry)
+            elif entry.engine == "ninfer":
+                row["engine_params"] = self._ninfer_engine_values(entry)
             data.append(row)
         return {"object": "list", "data": data}
 
@@ -8919,6 +9826,11 @@ class Handler(BaseHTTPRequestHandler):
             and self.gateway.params.apply(entry.engine, entry.id, payload)
         ):
             payload_changed = True
+        trace = (
+            ProxyTrace(self.gateway, entry, started)
+            if isinstance(payload, dict) and path.rstrip("/") in STATS_PATHS
+            else None
+        )
         session = requests.Session()
         session.trust_env = False
         resp = None
@@ -8949,7 +9861,7 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             )
             status = resp.status_code
-            self._send_upstream(resp, method, payload)
+            self._send_upstream(resp, method, payload, trace)
             self.gateway.log.info(
                 "%s %s -> %s [%s] HTTP %s %.2fs",
                 method,
@@ -8994,11 +9906,18 @@ class Handler(BaseHTTPRequestHandler):
             headers["Authorization"] = f"Bearer {key}"
         return headers
 
-    def _send_upstream(self, resp: requests.Response, method: str, payload: Any) -> None:
+    def _send_upstream(
+        self,
+        resp: requests.Response,
+        method: str,
+        payload: Any,
+        trace: ProxyTrace | None = None,
+    ) -> None:
         ctype = (resp.headers.get("Content-Type") or "").lower()
         is_sse = "text/event-stream" in ctype
         wants_stream = isinstance(payload, dict) and payload.get("stream") is True
         is_stream = resp.status_code == 200 and (is_sse or wants_stream)
+        record = trace is not None and resp.status_code == 200
         self.send_response(resp.status_code)
         for key, value in resp.headers.items():
             lower = key.lower()
@@ -9017,10 +9936,15 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     for chunk in resp.iter_content(chunk_size=4096):
                         if chunk:
+                            if record:
+                                trace.feed(chunk)
                             self.wfile.write(chunk)
                             self.wfile.flush()
                 except (requests.RequestException, OSError):
                     self.close_connection = True
+                if record:
+                    trace.flush()
+                    trace.commit()
                 return
             self.send_header("Transfer-Encoding", "chunked")
             self.send_header("Connection", "keep-alive")
@@ -9030,6 +9954,8 @@ class Handler(BaseHTTPRequestHandler):
                 for chunk in resp.iter_content(chunk_size=4096):
                     if not chunk:
                         continue
+                    if record:
+                        trace.feed(chunk)
                     self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
                     self.wfile.write(chunk)
                     self.wfile.write(b"\r\n")
@@ -9038,6 +9964,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             except (requests.RequestException, OSError):
                 self.close_connection = True
+            if record:
+                trace.flush()
+                trace.commit()
             return
         data = resp.content
         if resp.status_code in (204, 304):
@@ -9054,6 +9983,9 @@ class Handler(BaseHTTPRequestHandler):
         self._response_started = True
         if method != "HEAD" and data:
             self.wfile.write(data)
+        if record:
+            trace.feed_json(data)
+            trace.commit()
 
 
 # ---------------------------------------------------------------------------

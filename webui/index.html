@@ -367,6 +367,47 @@
   .section-head .hint { color: var(--muted); font-size: 12px; }
   .section-head .spacer { margin-left: auto; }
 
+  .stats-block { margin-top: 0; }
+  .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .stat-card {
+    padding: 14px 16px; border-radius: 14px; background: var(--panel);
+    border: 1px solid var(--line); min-height: 118px;
+    display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .stat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .stat-label { color: var(--muted); font-size: 12px; letter-spacing: .02em; }
+  .stat-info {
+    width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line);
+    color: var(--faint); font-size: 10px; line-height: 1; display: grid; place-items: center;
+    cursor: help; flex: 0 0 auto;
+  }
+  .stat-main { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; }
+  .stat-value {
+    font-size: 30px; font-weight: 650; letter-spacing: -.02em; line-height: 1.1;
+    font-variant-numeric: tabular-nums; color: #f2f7ff;
+  }
+  .stat-unit { color: var(--muted); font-size: 12px; }
+  .stat-sub {
+    color: var(--faint); font-size: 11.5px; margin-top: 8px;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .stat-ring-row { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
+  .stat-ring {
+    --pct: 0; width: 66px; height: 66px; border-radius: 50%;
+    background: conic-gradient(var(--accent) calc(var(--pct) * 1%), rgba(94, 234, 212, .10) 0);
+    display: grid; place-items: center; position: relative; flex: 0 0 auto;
+  }
+  .stat-ring::after { content: ""; position: absolute; inset: 7px; border-radius: 50%; background: var(--panel); }
+  .stat-ring span {
+    position: relative; z-index: 1; font-size: 14px; font-weight: 650;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-inline { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .stat-bar { height: 7px; border-radius: 999px; background: rgba(125, 211, 252, .10); overflow: hidden; margin-top: 10px; }
+  .stat-bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--blue), var(--accent)); }
+  @media (max-width: 900px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 520px) { .stats-grid { grid-template-columns: 1fr; } }
+
   .engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
   .engine {
     padding: 16px; border-radius: 14px; background: var(--panel);
@@ -581,6 +622,14 @@
 
   <main id="console-view">
   <div id="console-content" hidden>
+  <section class="block stats-block" aria-labelledby="stats-title" id="stats-section" hidden>
+    <div class="section-head">
+      <h2 id="stats-title">运行统计</h2>
+      <span class="hint" id="stats-meta">最近一次生成</span>
+    </div>
+    <div class="stats-grid" id="stats"></div>
+  </section>
+
   <section class="block" aria-labelledby="engines-title">
     <div class="section-head">
       <h2 id="engines-title">引擎</h2>
@@ -808,7 +857,7 @@
       <div class="param-tabs" role="tablist" aria-label="模型参数分类">
         <button type="button" class="param-tab active" data-param-tab="basic" role="tab" aria-selected="true">基本参数</button>
         <button type="button" class="param-tab" data-param-tab="more" role="tab" aria-selected="false">更多参数<span class="tab-count" id="params-more-count"></span></button>
-        <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="params-kvmem-tab" hidden>KVMem 引擎<span class="tab-count" id="params-kvmem-count"></span></button>
+        <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="params-kvmem-tab" hidden>引擎参数<span class="tab-count" id="params-kvmem-count"></span></button>
       </div>
       <div class="params-panel" data-param-panel="basic">
         <div id="params-name">
@@ -894,16 +943,20 @@
         <label class="add-name-field">模型名称 <span class="name">选填</span>
           <input id="add-name" type="text" spellcheck="false" placeholder="如 Ornith 1.5；留空使用模型文件名" /></label>
       </div>
-      <div class="device-row disabled" id="add-vision-device" role="radiogroup" aria-label="视觉运行位置">
+      <div class="device-row" id="add-vision-enabled-field" hidden>
+        <span class="device-label">视觉编码器</span>
+        <label class="check"><input id="add-vision-enabled" type="checkbox" /> 启用视觉（.ninfer 内嵌视觉塔）</label>
+      </div>
+      <div class="device-row" id="add-vision-device" role="radiogroup" aria-label="视觉运行位置">
         <span class="device-label">视觉运行位置</span>
         <label class="check"><input type="radio" name="add-vision-device" value="cpu" checked /> CPU（默认）</label>
         <label class="check"><input type="radio" name="add-vision-device" value="gpu" /> GPU</label>
       </div>
-      <p class="params-hint" id="add-vision-hint">只控制视觉编码器（mmproj）；主模型和 KV cache 仍按 n-gpu-layers 与上下文加载到 GPU。</p>
+      <p class="params-hint" id="add-vision-hint">只控制视觉编码器；主模型和 KV cache 仍按 n-gpu-layers 与上下文加载到 GPU。</p>
       <div class="param-tabs" role="tablist" aria-label="模型参数分类">
         <button type="button" class="param-tab active" data-param-tab="basic" role="tab" aria-selected="true">基本参数</button>
         <button type="button" class="param-tab" data-param-tab="more" role="tab" aria-selected="false">更多参数<span class="tab-count" id="add-more-count"></span></button>
-        <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="add-kvmem-tab" hidden>KVMem 引擎<span class="tab-count" id="add-kvmem-count"></span></button>
+        <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="add-kvmem-tab" hidden>引擎参数<span class="tab-count" id="add-kvmem-count"></span></button>
       </div>
       <div class="params-panel" data-param-panel="basic">
         <div id="add-engine-params">
@@ -1169,7 +1222,9 @@
     const manage = state.manage || {};
     const schema = kind === "kvmem"
       ? manage.kvmem_poly_engine_schema
-      : manage.kvmem_engine_schema;
+      : kind === "ninfer"
+        ? manage.ninfer_engine_schema
+        : manage.kvmem_engine_schema;
     return Array.isArray(schema) ? schema : [];
   }
 
@@ -1177,11 +1232,15 @@
     const specs = kvmemEngineSpecs(kind);
     // KVMem+llama.cpp keeps the budget in the basic panel; polystrata has no
     // basic engine panel, so its budget lives in the tab with everything else.
-    return kind === "kvmem" ? specs : specs.filter((spec) => spec.key !== "kvmem_budget");
+    return kind === "kvmem" || kind === "ninfer"
+      ? specs
+      : specs.filter((spec) => spec.key !== "kvmem_budget");
   }
 
   function kvmemEngineTitle(kind) {
-    return kind === "kvmem" ? "strata-poly" : "llama-kvmem-server";
+    if (kind === "kvmem") return "strata-poly";
+    if (kind === "ninfer") return "ninfer-serve";
+    return "llama-kvmem-server";
   }
 
   function renderKvmemEngine(host, countHost, hintHost, values, kind) {
@@ -1205,7 +1264,7 @@
             ${spec.note ? `<span class="param-note">${esc(spec.note)}</span>` : ""}
           </label>`).join("")}
       </div>`).join("")
-      : '<p class="params-hint">该引擎没有额外的 KVMem 参数。</p>';
+      : '<p class="params-hint">该引擎没有额外的进程级参数。</p>';
     for (const spec of specs) {
       const input = host.querySelector(`[data-param-key="${spec.key}"]`);
       if (input) setParamInput(input, spec, values ? values[spec.key] : null);
@@ -1214,8 +1273,10 @@
     if (hintHost) {
       hintHost.textContent = specs.length
         ? (kind === "kvmem"
-            ? "这些是 strata-poly 的进程级参数，写入模型自己的 strata-*.json；留空表示沿用模板或引擎默认。MTP 留空时按模型 GGUF 的 nextn_predict_layers 自动判断。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。"
-            : "这些是 llama-kvmem-server 的进程级参数，写入模型自己的 kvmem-llama-*.json；留空表示沿用模板或引擎默认。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。")
+            ? "这些是 strata-poly 自身的进程级参数，写入模型自己的 strata-*.json；留空表示沿用模板或引擎默认。MTP 留空时按模型 GGUF 的 nextn_predict_layers 自动判断。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。"
+            : kind === "ninfer"
+              ? "这些是 ninfer-serve 自身的进程级参数，写入模型自己的 ninfer-*.json；留空表示删除该参数、使用引擎默认。视觉开关在“视觉编码器”里，上下文与 KV 精度也在本页设置。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。"
+              : "这些是 llama-kvmem-server 自身的进程级参数，写入模型自己的 kvmem-llama-*.json；留空表示沿用模板或引擎默认。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。")
         : "";
     }
   }
@@ -2577,8 +2638,82 @@
     $("console-empty").hidden = configured;
   }
 
+  function statNumber(value, digits) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return "—";
+    if (digits != null) return num.toFixed(digits);
+    return Math.round(num).toLocaleString("en-US");
+  }
+
+  function statSeconds(ms) {
+    const num = Number(ms);
+    return Number.isFinite(num) ? `${(num / 1000).toFixed(2)}s` : "—";
+  }
+
+  function renderStats() {
+    const section = $("stats-section");
+    const host = $("stats");
+    if (!section || !host) return;
+    const stats = state.status && state.status.stats && state.status.stats.last;
+    if (!stats) {
+      section.hidden = true;
+      host.innerHTML = "";
+      return;
+    }
+    section.hidden = false;
+    const scope = [stats.model, ENGINE_LABELS[stats.engine] || stats.engine].filter(Boolean).join(" · ");
+    $("stats-meta").textContent = scope ? `${scope} · 最近一次生成` : "最近一次生成";
+    const prompt = Number(stats.prompt_tokens) || 0;
+    const completion = Number(stats.completion_tokens) || 0;
+    const total = Number(stats.total_tokens) || prompt + completion;
+    const context = Number(stats.context_length) || 0;
+    const cached = Number(stats.cached_tokens) || 0;
+    const contextPct = context ? Math.min(100, Math.max(0, total / context * 100)) : 0;
+    const reusePct = prompt ? Math.min(100, Math.max(0, cached / prompt * 100)) : 0;
+    const gen = stats.gen_per_second == null ? null : Number(stats.gen_per_second);
+    const prefill = stats.prefill_per_second == null ? null : Number(stats.prefill_per_second);
+    host.innerHTML = `
+      <article class="stat-card">
+        <div class="stat-head"><span class="stat-label">本轮平均</span>
+          <span class="stat-info" title="最近一次生成的平均解码速度">i</span></div>
+        <div>
+          <div class="stat-main"><span class="stat-value">${gen == null ? "—" : statNumber(gen, 1)}</span><span class="stat-unit">tok/s</span></div>
+          <div class="stat-sub">生成 ${statNumber(completion)} tokens · 总计 ${statSeconds(stats.total_ms)}</div>
+        </div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-head"><span class="stat-label">预填充速度</span>
+          <span class="stat-info" title="最近一次生成的提示词处理速度">i</span></div>
+        <div>
+          <div class="stat-main"><span class="stat-value">${prefill == null ? "—" : statNumber(prefill)}</span><span class="stat-unit">tok/s</span></div>
+          <div class="stat-sub">预填充 ${statSeconds(stats.prefill_ms)} · 首 token ${statSeconds(stats.first_token_ms)}</div>
+        </div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-head"><span class="stat-label">逻辑上下文</span>
+          <span class="stat-info" title="本次请求总 token 占模型上下文长度的比例">i</span></div>
+        <div class="stat-ring-row">
+          <div class="stat-ring" style="--pct:${contextPct.toFixed(1)}"><span>${contextPct.toFixed(0)}%</span></div>
+          <div>
+            <div class="stat-inline">${statNumber(total)} / ${statNumber(context)}</div>
+            <div class="stat-sub">输入 ${statNumber(prompt)} · 输出 ${statNumber(completion)}</div>
+          </div>
+        </div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-head"><span class="stat-label">输入 token 复用</span>
+          <span class="stat-info" title="命中 KV/前缀缓存的输入 token 占比">i</span></div>
+        <div>
+          <div class="stat-main"><span class="stat-value">${reusePct.toFixed(0)}%</span></div>
+          <div class="stat-sub">${statNumber(cached)} / ${statNumber(prompt)} tokens</div>
+          <div class="stat-bar"><i style="width:${reusePct.toFixed(1)}%"></i></div>
+        </div>
+      </article>`;
+  }
+
   function render() {
     renderConsoleState();
+    renderStats();
     renderEngines();
     renderModels();
     renderAuth();
@@ -2691,16 +2826,15 @@
     const kvllama = model.engine === "kvmem_llama";
     renderKvmemEngine(
       $("params-kvmem"), $("params-kvmem-count"), $("params-kvmem-hint"),
-      engineParams, kv ? "kvmem" : "kvmem_llama",
+      engineParams, kv ? "kvmem" : ninfer ? "ninfer" : "kvmem_llama",
     );
     showParamTab(dialog, "basic");
-    setKvmemTabVisible(dialog, kvllama || kv);
+    setKvmemTabVisible(dialog, kvllama || kv || ninfer);
     const editable = model.engine === "llama" && model.source === "preset";
-    const visionEditable = !ninfer && (
-      editable
+    const visionEditable = editable
       || (kv && model.source === "strata")
       || (kvllama && model.source === "kvmem_llama")
-    );
+      || (ninfer && model.source === "ninfer");
     form.elements.top_k.min = kv ? 1 : 0;
     form.elements.top_k.max = kv ? 64 : 1000;
     form.elements.repeat_last_n.min = kv ? 1 : -1;
@@ -2731,7 +2865,7 @@
       fillCacheSelect($("params-cache-v"), manageEngine && manageEngine.cache_types, model.cache_type_v || "q8_0");
     }
     const visionRow = $("params-vision");
-    visionRow.hidden = !model.multimodal || ninfer;
+    visionRow.hidden = !model.multimodal;
     if (!visionRow.hidden) {
       const deviceRow = $("params-vision-device");
       const gpu = model.vision_gpu === true;
@@ -2740,25 +2874,27 @@
       deviceRow.classList.toggle("disabled", !visionEditable);
       deviceRow.querySelectorAll("input").forEach((el) => { el.disabled = !visionEditable; });
       $("params-vision-caption").textContent = visionEditable
-        ? "mmproj · 修改后自动重启引擎生效"
+        ? (ninfer ? "内嵌视觉塔 · 修改后自动重启引擎生效" : "mmproj · 修改后自动重启引擎生效")
         : "mmproj · 当前配置只读";
       $("params-vision-hint").textContent = visionEditable
-        ? (kv
-            ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
-            : kvllama
-              ? "写入模型配置的 vision.gpu；llama-kvmem-server 按 --mmproj-offload / --no-mmproj-offload 切换，CPU 与 GPU 共用同一份 mmproj；主模型仍按 --device 与 GPU 层数加载。"
-              : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off，主模型仍按 n-gpu-layers 加载。")
+        ? (ninfer
+            ? "写入 ninfer-*.json 的 args：GPU 使用 --vision --vision-residency，CPU 使用 --vision-cpu；视觉塔内嵌在 .ninfer 中，主模型仍按引擎参数加载。"
+            : kv
+              ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
+              : kvllama
+                ? "写入模型配置的 vision.gpu；llama-kvmem-server 按 --mmproj-offload / --no-mmproj-offload 切换，CPU 与 GPU 共用同一份 mmproj；主模型仍按 --device 与 GPU 层数加载。"
+                : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off，主模型仍按 n-gpu-layers 加载。")
         : "当前模型没有可编辑的引擎配置，无法修改视觉运行位置。";
     }
     $("params-title").textContent = `模型参数 · ${model.name || model.display_name || model.id}`;
     $("params-sub").textContent =
       `模型 ${model.id}（${ENGINE_LABELS[model.engine] || model.engine}）。留空的字段不注入，使用引擎默认值；请求中显式给出的参数优先。`;
     $("params-hint").textContent = ninfer
-      ? "NInfer 限制：repetition_penalty 只能为 1（已禁用），不支持 repeat_last_n；上下文与 KV 精度由模型模板决定，不能在这里修改。"
+      ? "NInfer 限制：repetition_penalty 只能为 1（已禁用），不支持 repeat_last_n；上下文、KV 精度与引擎自身参数在“引擎参数”页，视觉运行位置在“视觉编码器”，保存后自动重启引擎。"
       : kvllama
-        ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；上下文与 K/V 精度在新增模型时固定，KVMem 预算在“基本参数”，其余引擎参数在“KVMem 引擎”页，保存后自动重启引擎。"
+        ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；上下文与 K/V 精度在新增模型时固定，KVMem 预算在“基本参数”，其余引擎参数在“引擎参数”页，保存后自动重启引擎。"
         : kv
-          ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文固定为模型上限，KV 精度固定 q8_0；KVMem 引擎参数在“KVMem 引擎”页，保存后自动重启引擎。"
+          ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文固定为模型上限，KV 精度固定 q8_0；引擎自身参数在“引擎参数”页，保存后自动重启引擎。"
           : editable
             ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。修改上下文或 KV 精度会自动重启引擎。"
             : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。该模型由目录扫描发现，无法修改上下文与 KV 精度。";
@@ -2810,6 +2946,17 @@
       engineParams.cache_type_k = $("params-cache-k").value;
       engineParams.cache_type_v = $("params-cache-v").value;
       body.engine_params = engineParams;
+    }
+    if (model && model.engine === "ninfer") {
+      let ninferParams;
+      try {
+        ninferParams = readKvmemEngine($("params-kvmem"), "ninfer");
+      } catch (error) {
+        $("params-error").textContent = error.message;
+        $("params-error").hidden = false;
+        return;
+      }
+      body.engine_params = ninferParams;
     }
     if (model && model.engine === "kvmem_llama") {
       let kvParams;
@@ -2890,7 +3037,7 @@
           model.cache_type_k = payload.engine_params.cache_type_k;
           model.cache_type_v = payload.engine_params.cache_type_v;
         }
-        if ((model.engine === "kvmem_llama" || model.engine === "kvmem") && payload.engine_params) {
+        if ((model.engine === "kvmem_llama" || model.engine === "kvmem" || model.engine === "ninfer") && payload.engine_params) {
           model.engine_params = payload.engine_params;
         }
         if (payload.vision_gpu != null) model.vision_gpu = payload.vision_gpu;
@@ -3001,34 +3148,42 @@
         : "/path/to/model.gguf";
     $("add-vision-field").hidden = ninfer;
     $("add-model-field").classList.toggle("span-all", ninfer);
-    $("add-vision-device").hidden = ninfer;
-    $("add-vision-hint").hidden = ninfer;
+    $("add-vision-enabled-field").hidden = !ninfer;
+    const enabledBox = $("add-vision-enabled");
+    enabledBox.checked = ninfer ? !!(engine && engine.defaults && engine.defaults.vision) : false;
+    const deviceDefault = ninfer && engine && engine.defaults && engine.defaults.vision_gpu ? "gpu" : "cpu";
+    const deviceRadio = document.querySelector(`input[name="add-vision-device"][value="${deviceDefault}"]`);
+    if (deviceRadio) deviceRadio.checked = true;
     if (ninfer) $("add-vision").value = "";
+    $("add-vision-hint").textContent = ninfer
+      ? "视觉塔内嵌在 .ninfer 模型中，无需 mmproj。GPU 使用 --vision --vision-residency resident（模板为 overlay 时保留 overlay），CPU 使用 --vision-cpu。"
+      : "只控制视觉编码器（mmproj）；主模型和 KV cache 仍按 n-gpu-layers 与上下文加载到 GPU。";
     syncVisionDevice();
-    setKvmemTabVisible($("add-dialog"), kvllama || kv);
+    setKvmemTabVisible($("add-dialog"), kvllama || kv || ninfer);
     renderKvmemEngine(
       $("add-kvmem"), $("add-kvmem-count"), $("add-kvmem-hint"),
-      kv && !kvllama ? engine.engine_params || null : null,
-      kv ? "kvmem" : "kvmem_llama",
+      engine ? engine.engine_params || null : null,
+      kv ? "kvmem" : ninfer ? "ninfer" : "kvmem_llama",
     );
     renderMoreParams(
       $("add-more"), $("add-more-count"), $("add-more-hint"),
       kind, null,
     );
     $("add-defaults").textContent = !engine ? "" : ninfer
-      ? "NInfer 单模型模式：每份配置只服务一个 .ninfer 模型，参数继承选定模板；上下文与 KV 精度由模板决定；暂不支持视觉；repetition_penalty 只能为 1，且没有 repeat_last_n。"
+      ? "NInfer 单模型模式：每份配置只服务一个 .ninfer 模型，参数继承选定模板；视觉塔内嵌在模型中，可选择 CPU/GPU；上下文、KV 精度与其余引擎参数在“引擎参数”页按需覆盖模板；repetition_penalty 只能为 1，且没有 repeat_last_n。"
       : kvllama
-        ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；预算默认 32768 tokens，必须与生成预留一起落在上下文内；KV 精度默认 q8_0；其余参数可在“KVMem 引擎”页按需覆盖模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
+        ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；预算默认 32768 tokens，必须与生成预留一起落在上下文内；KV 精度默认 q8_0；其余参数可在“引擎参数”页按需覆盖模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
         : kv
-          ? "KV 精度固定 q8_0（引擎不支持时省略）；上下文留空读取 GGUF 上限，GGUF 缺少该字段时必须手动填写；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数可在“KVMem 引擎”页按需覆盖 ornith 模板，采样默认来自 ornith。MTP 留空时按模型 GGUF 自动判断。"
+          ? "KV 精度固定 q8_0（引擎不支持时省略）；上下文留空读取 GGUF 上限，GGUF 缺少该字段时必须手动填写；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数可在“引擎参数”页按需覆盖 ornith 模板，采样默认来自 ornith。MTP 留空时按模型 GGUF 自动判断。"
           : "上下文留空读取 GGUF 上限，可填更小值（GGUF 无该字段时必须填写）；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
   }
 
   function syncVisionDevice() {
-    const has = $("add-vision").value.trim() !== "";
+    // CPU/GPU is always selectable: for mmproj models it applies once a vision
+    // path is filled, and for NInfer it is paired with the enable checkbox.
     const row = $("add-vision-device");
-    row.classList.toggle("disabled", !has);
-    row.querySelectorAll("input").forEach((el) => { el.disabled = !has; });
+    row.classList.remove("disabled");
+    row.querySelectorAll("input").forEach((el) => { el.disabled = false; });
   }
 
   function renderAddEngines() {
@@ -3168,6 +3323,19 @@
         return;
       }
       body.vision = null;
+      body.vision_enabled = $("add-vision-enabled").checked;
+      let engineParams;
+      try {
+        engineParams = readKvmemEngine($("add-kvmem"), "ninfer");
+      } catch (error) {
+        showAddError(error.message);
+        return;
+      }
+      const advanced = {};
+      for (const [key, value] of Object.entries(engineParams)) {
+        if (value !== null) advanced[key] = value;
+      }
+      if (Object.keys(advanced).length) body.engine_params = advanced;
     }
     if (engineInfo.kind === "llama" || engineInfo.kind === "kvmem_llama" || engineInfo.kind === "kvmem") {
       const contextRaw = $("add-context").value.trim();

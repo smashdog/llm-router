@@ -273,8 +273,6 @@ try:
     assert bad.status_code == 400, bad.text
     bad = save("text-model", vision_device="gpu")
     assert bad.status_code == 400 and "没有视觉编码器" in bad.text, bad.text
-    bad = save("ninfer-vision", vision_device="gpu")
-    assert bad.status_code == 400 and "NInfer" in bad.text, bad.text
     bad = save("vision-model", vision_device=True)
     assert bad.status_code == 400, bad.text
     checks += 1
@@ -292,6 +290,67 @@ try:
     saved = save("kv-vision", vision_device="cpu")
     assert saved.status_code == 200 and saved.json()["vision_gpu"] is False, saved.text
     assert kv_gpu() is False
+    checks += 1
+
+    # NInfer carries the vision tower inside the .ninfer file: the device is
+    # written as --vision/--vision-residency (GPU) or --vision-cpu (CPU).
+    ninfer_config = ninfer_models / "ninfer-vision.json"
+
+    def ninfer_args() -> list:
+        return json.loads(ninfer_config.read_text(encoding="utf-8"))["args"]
+
+    saved = save("ninfer-vision", vision_device="gpu")
+    body = saved.json()
+    assert saved.status_code == 200, body
+    assert body["vision_gpu"] is True, body
+    args = ninfer_args()
+    assert "--vision" in args and "--vision-cpu" not in args, args
+    assert args[args.index("--vision-residency") + 1] == "resident", args
+    assert json.loads(ninfer_config.read_text(encoding="utf-8"))["vision"]["gpu"] is True
+    assert models()["ninfer-vision"]["vision_gpu"] is True
+    checks += 1
+
+    saved = save("ninfer-vision", vision_device="cpu")
+    body = saved.json()
+    assert saved.status_code == 200 and body["vision_gpu"] is False, body
+    args = ninfer_args()
+    assert args == ["--vision-cpu"], args
+    assert models()["ninfer-vision"]["vision_gpu"] is False
+    checks += 1
+
+    # NInfer engine parameters round-trip through the same endpoint.
+    saved = save("ninfer-vision", engine_params={
+        "max_context": 16384, "prefill_chunk": 2048, "kv_dtype": "int8",
+        "vision_max_merged": 1024,
+    })
+    body = saved.json()
+    assert saved.status_code == 200, body
+    params = body["engine_params"]
+    assert params["max_context"] == 16384, params
+    assert params["prefill_chunk"] == 2048, params
+    assert params["kv_dtype"] == "int8", params
+    args = ninfer_args()
+    for pair in (["--max-context", "16384"], ["--prefill-chunk", "2048"],
+                 ["--kv-dtype", "int8"], ["--vision-max-merged", "1024"]):
+        index = args.index(pair[0])
+        assert args[index + 1] == pair[1], args
+    assert "--vision-cpu" in args, args
+    checks += 1
+
+    bad = save("ninfer-vision", engine_params={"prefill_chunk": 1000})
+    assert bad.status_code == 400 and "128" in bad.text, bad.text
+    bad = save("ninfer-vision", engine_params={"bogus": 1})
+    assert bad.status_code == 400, bad.text
+    checks += 1
+
+    manage = requests.get(url + "/router/models/manage", timeout=10).json()
+    ninfer_keys = {spec["key"] for spec in manage["ninfer_engine_schema"]}
+    assert {"max_context", "vision_max_merged", "kv_dtype", "spec"} <= ninfer_keys
+    for schema, key in (
+        (manage["kvmem_poly_engine_schema"], "expert_profile"),
+        (manage["kvmem_engine_schema"], "n_predict"),
+    ):
+        assert key in {spec["key"] for spec in schema}, key
     checks += 1
 
     # Sampling parameters still save in the same request as a vision change.
@@ -460,9 +519,137 @@ try:
     wait("return !document.getElementById('params-dialog').open")
 
     open_model("ninfer-vision")
-    assert js("return document.getElementById('params-vision').hidden") is True
+    ninfer_state = js("""
+      const row = document.getElementById('params-vision');
+      const tab = document.getElementById('params-kvmem-tab');
+      return {
+        hidden: row.hidden,
+        tabHidden: tab.hidden,
+        tabLabel: tab.firstChild.textContent.trim(),
+        cpu: document.querySelector('input[name="params-vision-device"][value="cpu"]').checked,
+        disabled: [...row.querySelectorAll('input')].map(i => i.disabled),
+        hint: document.getElementById('params-vision-hint').textContent,
+        schema: [...document.querySelectorAll('#params-kvmem [data-param-key]')]
+          .map(el => el.dataset.paramKey),
+      };
+    """)
+    assert ninfer_state["hidden"] is False, ninfer_state
+    assert ninfer_state["tabHidden"] is False and ninfer_state["tabLabel"] == "引擎参数", ninfer_state
+    assert ninfer_state["cpu"] is True, ninfer_state
+    assert ninfer_state["disabled"] == [False, False], ninfer_state
+    assert "vision-cpu" in ninfer_state["hint"], ninfer_state
+    assert "max_context" in ninfer_state["schema"], ninfer_state["schema"][:10]
+    assert "vision_max_merged" in ninfer_state["schema"], ninfer_state["schema"][:10]
+    click("#params-kvmem-tab")
+    shot("ninfer-engine-desktop.png")
     click("#params-cancel")
     wait("return !document.getElementById('params-dialog').open")
+
+    # The add dialog must allow picking CPU/GPU before any mmproj path is set,
+    # and expose the NInfer vision switch plus its own engine parameters.
+    click("#btn-add-model")
+    wait("return document.getElementById('add-dialog').open", message="add dialog")
+    wait("return document.querySelectorAll('#add-engines input[name=\"add-engine\"]').length >= 3",
+         message="add engines")
+    add_state = js("""
+      const device = document.getElementById('add-vision-device');
+      return {
+        disabled: [...device.querySelectorAll('input')].map(i => i.disabled),
+        visionHidden: document.getElementById('add-vision-field').hidden,
+        enabledHidden: document.getElementById('add-vision-enabled-field').hidden,
+        tabHidden: document.getElementById('add-kvmem-tab').hidden,
+        engine: (document.querySelector('#add-engines input[name="add-engine"]:checked') || {}).value,
+      };
+    """)
+    assert add_state["disabled"] == [False, False], add_state
+    assert add_state["visionHidden"] is False and add_state["enabledHidden"] is True, add_state
+    assert add_state["tabHidden"] is True, add_state
+    js("""
+      const radio = document.querySelector('#add-engines input[name="add-engine"][value="ninfer"]');
+      radio.checked = true;
+      radio.dispatchEvent(new Event('change', {bubbles: true}));
+      return true;
+    """)
+    ninfer_add = js("""
+      const device = document.getElementById('add-vision-device');
+      return {
+        engine: (document.querySelector('#add-engines input[name="add-engine"]:checked') || {}).value,
+        disabled: [...device.querySelectorAll('input')].map(i => i.disabled),
+        visionHidden: document.getElementById('add-vision-field').hidden,
+        enabledHidden: document.getElementById('add-vision-enabled-field').hidden,
+        enabled: document.getElementById('add-vision-enabled').checked,
+        tabHidden: document.getElementById('add-kvmem-tab').hidden,
+        count: document.getElementById('add-kvmem-count').textContent,
+        schema: document.querySelectorAll('#add-kvmem [data-param-key]').length,
+        hint: document.getElementById('add-vision-hint').textContent,
+      };
+    """)
+    assert ninfer_add["engine"] == "ninfer", ninfer_add
+    assert ninfer_add["disabled"] == [False, False], ninfer_add
+    assert ninfer_add["visionHidden"] is True and ninfer_add["enabledHidden"] is False, ninfer_add
+    assert ninfer_add["tabHidden"] is False and ninfer_add["schema"] >= 20, ninfer_add
+    assert "内嵌" in ninfer_add["hint"], ninfer_add
+    click("#add-kvmem-tab")
+    shot("ninfer-add-desktop.png")
+    click("#add-cancel")
+    wait("return !document.getElementById('add-dialog').open")
+
+    # Statistics card, fed by the gateway's stats payload.
+    wd("POST", "/window/rect", {"width": 1440, "height": 1200})
+    js("""
+      window.__realFetch = window.fetch;
+      window.__fakeStats = {
+        at: '2026-11-06T12:00:00Z', model: 'ninfer-vision', engine: 'ninfer',
+        prompt_tokens: 25038, completion_tokens: 1827, total_tokens: 26865,
+        cached_tokens: 23387, context_length: 262144,
+        gen_per_second: 79.9, prefill_per_second: 1356.4,
+        prefill_ms: 1220, first_token_ms: 1220, total_ms: 24000,
+        draft_n: null, draft_n_accepted: null,
+      };
+      window.fetch = (input, init) => {
+        if (String(input).endsWith('/router/status')) {
+          return window.__realFetch(input, init).then(async (response) => {
+            const data = await response.json();
+            data.stats = { last: window.__fakeStats };
+            return new Response(JSON.stringify(data), {
+              status: 200, headers: {'Content-Type': 'application/json'},
+            });
+          });
+        }
+        return window.__realFetch(input, init);
+      };
+      return true;
+    """)
+    wait("return !document.getElementById('stats-section').hidden", timeout=8,
+         message="stats section")
+    stats_state = js("""
+      const cards = [...document.querySelectorAll('#stats .stat-card')];
+      return {
+        count: cards.length,
+        values: cards.map(c => (c.querySelector('.stat-value') || {}).textContent || null),
+        subs: cards.map(c => (c.querySelector('.stat-sub') || {}).textContent || ''),
+        ring: (document.querySelector('#stats .stat-ring span') || {}).textContent,
+        inline: (document.querySelector('#stats .stat-inline') || {}).textContent,
+        bar: (document.querySelector('#stats .stat-bar i') || {}).style.width,
+        meta: document.getElementById('stats-meta').textContent,
+      };
+    """)
+    assert stats_state["count"] == 4, stats_state
+    assert stats_state["values"][0] == "79.9", stats_state
+    assert stats_state["values"][1] == "1,356", stats_state
+    assert stats_state["ring"] == "10%", stats_state
+    assert stats_state["inline"] == "26,865 / 262,144", stats_state
+    assert stats_state["values"][3] == "93%", stats_state
+    assert stats_state["subs"][1] == "预填充 1.22s · 首 token 1.22s", stats_state
+    assert stats_state["subs"][3] == "23,387 / 25,038 tokens", stats_state
+    assert stats_state["bar"].startswith("93.4"), stats_state
+    assert "ninfer-vision" in stats_state["meta"], stats_state
+    shot("stats-desktop.png")
+    js("window.fetch = window.__realFetch; delete window.__realFetch;"
+       " delete window.__fakeStats; return true;")
+    wait("return document.getElementById('stats-section').hidden", timeout=8,
+         message="stats hidden without data")
+    checks += 1
 
     wd("POST", "/window/rect", {"width": 420, "height": 1000})
     time.sleep(0.3)
