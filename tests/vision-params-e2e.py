@@ -337,20 +337,71 @@ try:
     assert "--vision-cpu" in args, args
     checks += 1
 
+    # NInfer's KVMem extension flags round-trip separately.
+    saved = save("ninfer-vision", engine_params={
+        "kvmem": True, "kvmem_budget": 8192, "kvmem_gen_reserve": 2048,
+        "kvmem_sessions": 2, "kvmem_lrfu": False,
+    })
+    body = saved.json()
+    assert saved.status_code == 200, body
+    params = body["engine_params"]
+    assert params["kvmem"] is True and params["kvmem_budget"] == 8192, params
+    assert params["kvmem_sessions"] == 2 and params["kvmem_lrfu"] is False, params
+    args = ninfer_args()
+    assert args[args.index("--kvmem-budget") + 1] == "8192", args
+    assert "--kvmem" in args and "--no-kvmem-lrfu" in args, args
+    saved = save("ninfer-vision", engine_params={"kvmem": False, "kvmem_lrfu": True})
+    body = saved.json()
+    assert saved.status_code == 200, body
+    args = ninfer_args()
+    assert "--no-kvmem" in args and "--kvmem-lrfu" in args, args
+    assert "--kvmem" not in args, args
+    checks += 1
+
     bad = save("ninfer-vision", engine_params={"prefill_chunk": 1000})
     assert bad.status_code == 400 and "128" in bad.text, bad.text
     bad = save("ninfer-vision", engine_params={"bogus": 1})
     assert bad.status_code == 400, bad.text
+    bad = save("ninfer-vision", engine_params={"kvmem_disk_path": "/tmp/kv"})
+    assert bad.status_code == 400 and "kvmem_disk_mib" in bad.text, bad.text
+    checks += 1
+
+    # strata-poly: native --max-context lives beside the KVMem extension.
+    saved = save("kv-vision", engine_params={"max_context": 16384})
+    body = saved.json()
+    assert saved.status_code == 200, body
+    assert body["engine_params"]["max_context"] == 16384, body
+    doc = json.loads(kv_config.read_text(encoding="utf-8"))
+    args = doc["args"]
+    assert args[args.index("--max-context") + 1] == "16384", args
+    saved = save("kv-vision", engine_params={
+        "kvmem_budget": 4096, "kvmem_gen_reserve": 2048, "kvmem_sessions": 1,
+    })
+    body = saved.json()
+    assert saved.status_code == 200, body
+    assert body["engine_params"]["kvmem_budget"] == 4096, body
+    doc = json.loads(kv_config.read_text(encoding="utf-8"))
+    args = doc["args"]
+    assert args[args.index("--kvmem-budget") + 1] == "4096", args
+    assert args[args.index("--max-context") + 1] == "16384", args
+    assert args[args.index("--window") + 1] == "1", args
+    assert "--no-draft" in args and args[args.index("--lookup") + 1] == "0", args
+    bad = save("kv-vision", engine_params={"kvmem_budget": 100})
+    assert bad.status_code == 400, bad.text
     checks += 1
 
     manage = requests.get(url + "/router/models/manage", timeout=10).json()
-    ninfer_keys = {spec["key"] for spec in manage["ninfer_engine_schema"]}
-    assert {"max_context", "vision_max_merged", "kv_dtype", "spec"} <= ninfer_keys
-    for schema, key in (
-        (manage["kvmem_poly_engine_schema"], "expert_profile"),
-        (manage["kvmem_engine_schema"], "n_predict"),
-    ):
-        assert key in {spec["key"] for spec in schema}, key
+    ninfer_specs = {spec["key"]: spec for spec in manage["ninfer_engine_schema"]}
+    assert {"max_context", "vision_max_merged", "kv_dtype", "spec"} <= set(ninfer_specs)
+    assert ninfer_specs["max_context"]["owner"] == "engine"
+    assert ninfer_specs["kvmem_budget"]["owner"] == "kvmem"
+    poly_specs = {spec["key"]: spec for spec in manage["kvmem_poly_engine_schema"]}
+    assert {"max_context", "window", "lookup", "no_draft", "kv", "layer_split"} <= set(poly_specs)
+    assert poly_specs["max_context"]["owner"] == "engine"
+    assert poly_specs["kvmem_budget"]["owner"] == "kvmem"
+    kvllama_specs = {spec["key"]: spec for spec in manage["kvmem_engine_schema"]}
+    assert kvllama_specs["n_predict"]["owner"] == "engine"
+    assert kvllama_specs["kvmem_budget"]["owner"] == "kvmem"
     checks += 1
 
     # Sampling parameters still save in the same request as a vision change.
@@ -510,11 +561,43 @@ try:
         cpu: cpu.checked,
         disabled: [...row.querySelectorAll('input')].map(i => i.disabled),
         hint: document.getElementById('params-vision-hint').textContent,
+        tabLabel: document.getElementById('params-kvmem-tab').firstChild.textContent.trim(),
+        native: [...document.querySelectorAll('#params-more [data-param-key]')]
+          .map(el => el.dataset.paramKey),
+        kvmem: [...document.querySelectorAll('#params-kvmem [data-param-key]')]
+          .map(el => el.dataset.paramKey),
+        moreCaption: document.getElementById('params-more-caption').textContent,
+        kvHint: document.getElementById('params-kvmem-hint').textContent,
       };
     """)
     assert kv_state["hidden"] is False and kv_state["cpu"] is True, kv_state
     assert kv_state["disabled"] == [False, False], kv_state
     assert "vision.gpu" in kv_state["hint"], kv_state
+    assert kv_state["tabLabel"] == "kvmem参数", kv_state
+    for key in ("max_context", "window", "lookup", "no_draft", "kv", "layer_split", "threads"):
+        assert key in kv_state["native"], (key, kv_state["native"])
+    for key in ("kvmem_budget", "kvmem_block_tokens", "kvmem_sessions", "kvmem_mtp"):
+        assert key in kv_state["kvmem"], (key, kv_state["kvmem"])
+    for key in ("max_context", "no_draft", "threads"):
+        assert key not in kv_state["kvmem"], (key, kv_state["kvmem"])
+    assert "strata-poly" in kv_state["moreCaption"], kv_state
+    assert "--kvmem-*" in kv_state["kvHint"], kv_state
+    click("#params-kvmem-tab")
+    shot("kvmem-tabs-desktop.png")
+    click("#params-cancel")
+    wait("return !document.getElementById('params-dialog').open")
+
+    open_model("text-model")
+    llama_state = js("""
+      return {
+        tabHidden: document.getElementById('params-kvmem-tab').hidden,
+        more: [...document.querySelectorAll('#params-more [data-param-key]')]
+          .map(el => el.dataset.paramKey),
+      };
+    """)
+    assert llama_state["tabHidden"] is True, llama_state
+    assert "typical_p" in llama_state["more"], llama_state["more"]
+    assert "max_context" not in llama_state["more"], llama_state["more"]
     click("#params-cancel")
     wait("return !document.getElementById('params-dialog').open")
 
@@ -529,17 +612,24 @@ try:
         cpu: document.querySelector('input[name="params-vision-device"][value="cpu"]').checked,
         disabled: [...row.querySelectorAll('input')].map(i => i.disabled),
         hint: document.getElementById('params-vision-hint').textContent,
-        schema: [...document.querySelectorAll('#params-kvmem [data-param-key]')]
+        native: [...document.querySelectorAll('#params-more [data-param-key]')]
           .map(el => el.dataset.paramKey),
+        kvmem: [...document.querySelectorAll('#params-kvmem [data-param-key]')]
+          .map(el => el.dataset.paramKey),
+        moreCaption: document.getElementById('params-more-caption').textContent,
       };
     """)
     assert ninfer_state["hidden"] is False, ninfer_state
-    assert ninfer_state["tabHidden"] is False and ninfer_state["tabLabel"] == "引擎参数", ninfer_state
+    assert ninfer_state["tabHidden"] is False and ninfer_state["tabLabel"] == "kvmem参数", ninfer_state
     assert ninfer_state["cpu"] is True, ninfer_state
     assert ninfer_state["disabled"] == [False, False], ninfer_state
     assert "vision-cpu" in ninfer_state["hint"], ninfer_state
-    assert "max_context" in ninfer_state["schema"], ninfer_state["schema"][:10]
-    assert "vision_max_merged" in ninfer_state["schema"], ninfer_state["schema"][:10]
+    assert "max_context" in ninfer_state["native"], ninfer_state["native"][:10]
+    assert "vision_max_merged" in ninfer_state["native"], ninfer_state["native"][:10]
+    for key in ("kvmem", "kvmem_budget", "kvmem_sessions", "kvmem_disk_mib"):
+        assert key in ninfer_state["kvmem"], (key, ninfer_state["kvmem"])
+    assert "max_context" not in ninfer_state["kvmem"], ninfer_state["kvmem"]
+    assert "ninfer-serve" in ninfer_state["moreCaption"], ninfer_state
     click("#params-kvmem-tab")
     shot("ninfer-engine-desktop.png")
     click("#params-cancel")
@@ -579,18 +669,59 @@ try:
         enabledHidden: document.getElementById('add-vision-enabled-field').hidden,
         enabled: document.getElementById('add-vision-enabled').checked,
         tabHidden: document.getElementById('add-kvmem-tab').hidden,
+        tabLabel: document.getElementById('add-kvmem-tab').firstChild.textContent.trim(),
         count: document.getElementById('add-kvmem-count').textContent,
-        schema: document.querySelectorAll('#add-kvmem [data-param-key]').length,
+        native: [...document.querySelectorAll('#add-more [data-param-key]')]
+          .map(el => el.dataset.paramKey),
+        kvmem: [...document.querySelectorAll('#add-kvmem [data-param-key]')]
+          .map(el => el.dataset.paramKey),
         hint: document.getElementById('add-vision-hint').textContent,
+        engineParamsHidden: document.getElementById('add-engine-params').hidden,
       };
     """)
     assert ninfer_add["engine"] == "ninfer", ninfer_add
     assert ninfer_add["disabled"] == [False, False], ninfer_add
     assert ninfer_add["visionHidden"] is True and ninfer_add["enabledHidden"] is False, ninfer_add
-    assert ninfer_add["tabHidden"] is False and ninfer_add["schema"] >= 20, ninfer_add
+    assert ninfer_add["tabHidden"] is False and ninfer_add["tabLabel"] == "kvmem参数", ninfer_add
+    assert len(ninfer_add["native"]) >= 20 and "max_context" in ninfer_add["native"], ninfer_add
+    assert len(ninfer_add["kvmem"]) == 18, ninfer_add
+    for key in ("kvmem_budget", "kvmem_sessions", "kvmem_disk_mib"):
+        assert key in ninfer_add["kvmem"], (key, ninfer_add["kvmem"])
+    assert ninfer_add["engineParamsHidden"] is True, ninfer_add
     assert "内嵌" in ninfer_add["hint"], ninfer_add
     click("#add-kvmem-tab")
     shot("ninfer-add-desktop.png")
+
+    # Switching to KVMem shows its native process options in “更多参数” and
+    # the KVMem extension in “kvmem参数”; the context field lives in the
+    # native tab (--max-context), so the basic engine block stays hidden.
+    js("""
+      const radio = document.querySelector('#add-engines input[name="add-engine"][value="kvmem"]');
+      radio.checked = true;
+      radio.dispatchEvent(new Event('change', {bubbles: true}));
+      return true;
+    """)
+    kv_add = js("""
+      return {
+        engine: (document.querySelector('#add-engines input[name="add-engine"]:checked') || {}).value,
+        tabHidden: document.getElementById('add-kvmem-tab').hidden,
+        tabLabel: document.getElementById('add-kvmem-tab').firstChild.textContent.trim(),
+        count: document.getElementById('add-kvmem-count').textContent,
+        native: [...document.querySelectorAll('#add-more [data-param-key]')]
+          .map(el => el.dataset.paramKey),
+        kvmem: [...document.querySelectorAll('#add-kvmem [data-param-key]')]
+          .map(el => el.dataset.paramKey),
+        engineParamsHidden: document.getElementById('add-engine-params').hidden,
+        caption: document.getElementById('add-more-caption').textContent,
+      };
+    """)
+    assert kv_add["engine"] == "kvmem", kv_add
+    assert kv_add["tabHidden"] is False and kv_add["tabLabel"] == "kvmem参数", kv_add
+    assert kv_add["count"] == "22", kv_add
+    assert "max_context" in kv_add["native"] and "no_draft" in kv_add["native"], kv_add
+    assert "kvmem_budget" in kv_add["kvmem"] and "max_context" not in kv_add["kvmem"], kv_add
+    assert kv_add["engineParamsHidden"] is True, kv_add
+    assert "strata-poly" in kv_add["caption"], kv_add
     click("#add-cancel")
     wait("return !document.getElementById('add-dialog').open")
 

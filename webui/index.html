@@ -857,7 +857,7 @@
       <div class="param-tabs" role="tablist" aria-label="模型参数分类">
         <button type="button" class="param-tab active" data-param-tab="basic" role="tab" aria-selected="true">基本参数</button>
         <button type="button" class="param-tab" data-param-tab="more" role="tab" aria-selected="false">更多参数<span class="tab-count" id="params-more-count"></span></button>
-        <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="params-kvmem-tab" hidden>引擎参数<span class="tab-count" id="params-kvmem-count"></span></button>
+        <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="params-kvmem-tab" hidden>kvmem参数<span class="tab-count" id="params-kvmem-count"></span></button>
       </div>
       <div class="params-panel" data-param-panel="basic">
         <div id="params-name">
@@ -869,10 +869,8 @@
           <p class="params-hint" id="params-name-hint">留空使用默认名称。</p>
         </div>
         <div id="params-engine">
-          <p class="params-group-title">引擎参数 <span id="params-engine-caption">llama.cpp · 保存后自动重启引擎生效</span></p>
+          <p class="params-group-title">引擎设置 <span id="params-engine-caption">llama.cpp · 保存后自动重启引擎生效</span></p>
           <div class="params-grid engine-grid">
-            <label id="params-budget-field" hidden>KVMem 预算 <span class="name">kvmem-budget</span>
-              <input id="params-budget" type="number" step="32" min="128" placeholder="32768" /></label>
             <label id="params-context-field">上下文长度 <span class="name">ctx-size</span>
               <input id="params-context" type="number" step="1" min="256" placeholder="留空使用 GGUF 上限" /></label>
             <label id="params-cache-k-field">K 量化精度 <span class="name">cache-type-k</span>
@@ -911,8 +909,8 @@
         </div>
       </div>
       <div class="params-panel" data-param-panel="more" hidden>
-        <p class="params-group-title">更多参数 <span>引擎支持的高级采样 / 生成参数 · 留空不注入</span></p>
-        <div class="params-grid" id="params-more"></div>
+        <p class="params-group-title">更多参数 <span id="params-more-caption">引擎自身的进程级参数 · 留空沿用引擎默认</span></p>
+        <div id="params-more"></div>
         <p class="params-hint" id="params-more-hint"></p>
       </div>
       <div class="params-panel" data-param-panel="kvmem" hidden>
@@ -956,20 +954,18 @@
       <div class="param-tabs" role="tablist" aria-label="模型参数分类">
         <button type="button" class="param-tab active" data-param-tab="basic" role="tab" aria-selected="true">基本参数</button>
         <button type="button" class="param-tab" data-param-tab="more" role="tab" aria-selected="false">更多参数<span class="tab-count" id="add-more-count"></span></button>
-        <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="add-kvmem-tab" hidden>引擎参数<span class="tab-count" id="add-kvmem-count"></span></button>
+        <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="add-kvmem-tab" hidden>kvmem参数<span class="tab-count" id="add-kvmem-count"></span></button>
       </div>
       <div class="params-panel" data-param-panel="basic">
         <div id="add-engine-params">
-          <p class="params-group-title">引擎参数 <span id="add-engine-caption">llama.cpp · 上下文留空使用 GGUF 上限</span></p>
+          <p class="params-group-title">引擎设置 <span id="add-engine-caption">llama.cpp · 上下文留空使用 GGUF 上限</span></p>
           <div class="params-grid engine-grid">
-            <label>上下文长度 <span class="name">ctx-size</span>
+            <label id="add-context-field">上下文长度 <span class="name">ctx-size</span>
               <input id="add-context" type="number" step="1" min="256" placeholder="留空读取 GGUF；缺失则必填" /></label>
             <label id="add-cache-k-field">K 量化精度 <span class="name">cache-type-k</span>
               <select id="add-cache-k"></select></label>
             <label id="add-cache-v-field">V 量化精度 <span class="name">cache-type-v</span>
               <select id="add-cache-v"></select></label>
-            <label id="add-budget-field" hidden>KVMem 预算 <span class="name">kvmem-budget</span>
-              <input id="add-budget" type="number" step="32" min="128" placeholder="32768" /></label>
           </div>
         </div>
         <p class="params-hint" id="add-defaults"></p>
@@ -993,8 +989,8 @@
         </div>
       </div>
       <div class="params-panel" data-param-panel="more" hidden>
-        <p class="params-group-title">更多参数 <span>引擎支持的高级采样 / 生成参数 · 留空不注入</span></p>
-        <div class="params-grid" id="add-more"></div>
+        <p class="params-group-title">更多参数 <span id="add-more-caption">引擎自身的进程级参数 · 留空沿用模板</span></p>
+        <div id="add-more"></div>
         <p class="params-hint" id="add-more-hint"></p>
       </div>
       <div class="params-panel" data-param-panel="kvmem" hidden>
@@ -1165,11 +1161,11 @@
     if (!host) return;
     const specs = moreParamSpecs(kind);
     host.innerHTML = specs.length
-      ? specs.map((spec) => `
+      ? `<div class="params-grid">${specs.map((spec) => `
         <label>${esc(spec.label)} <span class="name">${esc(spec.key)}</span>
           ${paramControl(spec)}
           ${spec.note ? `<span class="param-note">${esc(spec.note)}</span>` : ""}
-        </label>`).join("")
+        </label>`).join("")}</div>`
       : '<p class="params-hint">该引擎没有额外的可配置参数。</p>';
     for (const spec of specs) {
       const input = host.querySelector(`[data-param-key="${spec.key}"]`);
@@ -1228,13 +1224,16 @@
     return Array.isArray(schema) ? schema : [];
   }
 
-  function kvmemUiSpecs(kind) {
-    const specs = kvmemEngineSpecs(kind);
-    // KVMem+llama.cpp keeps the budget in the basic panel; polystrata has no
-    // basic engine panel, so its budget lives in the tab with everything else.
-    return kind === "kvmem" || kind === "ninfer"
-      ? specs
-      : specs.filter((spec) => spec.key !== "kvmem_budget");
+  function engineTabSpecs(kind) {
+    return kvmemEngineSpecs(kind).filter((spec) => (spec.owner || "engine") !== "kvmem");
+  }
+
+  function kvmemTabSpecs(kind) {
+    return kvmemEngineSpecs(kind).filter((spec) => spec.owner === "kvmem");
+  }
+
+  function kvmemFamily(kind) {
+    return kind === "kvmem" || kind === "ninfer" || kind === "kvmem_llama";
   }
 
   function kvmemEngineTitle(kind) {
@@ -1243,9 +1242,7 @@
     return "llama-kvmem-server";
   }
 
-  function renderKvmemEngine(host, countHost, hintHost, values, kind) {
-    if (!host) return;
-    const specs = kvmemUiSpecs(kind);
+  function specGroups(specs) {
     const groups = [];
     for (const spec of specs) {
       let group = groups[groups.length - 1];
@@ -1255,36 +1252,80 @@
       }
       group.specs.push(spec);
     }
-    host.innerHTML = groups.length ? groups.map((group) => `
-      <p class="params-group-title">${esc(group.label)} <span>${esc(kvmemEngineTitle(kind))}</span></p>
+    return groups;
+  }
+
+  function specLabelHtml(spec) {
+    return `
+      <label>${esc(spec.label)} <span class="name">${esc(spec.flag || spec.key)}</span>
+        ${paramControl(spec, spec.default != null ? String(spec.default) : "引擎默认")}
+        ${spec.note ? `<span class="param-note">${esc(spec.note)}</span>` : ""}
+      </label>`;
+  }
+
+  function specGroupsHtml(groups, title) {
+    return groups.map((group) => `
+      <p class="params-group-title">${esc(group.label)} <span>${esc(title)}</span></p>
       <div class="params-grid">
-        ${group.specs.map((spec) => `
-          <label>${esc(spec.label)} <span class="name">${esc(spec.flag)}</span>
-            ${paramControl(spec, spec.default != null ? String(spec.default) : "引擎默认")}
-            ${spec.note ? `<span class="param-note">${esc(spec.note)}</span>` : ""}
-          </label>`).join("")}
-      </div>`).join("")
-      : '<p class="params-hint">该引擎没有额外的进程级参数。</p>';
+        ${group.specs.map(specLabelHtml).join("")}
+      </div>`).join("");
+  }
+
+  function fillSpecValues(host, specs, values) {
     for (const spec of specs) {
       const input = host.querySelector(`[data-param-key="${spec.key}"]`);
       if (input) setParamInput(input, spec, values ? values[spec.key] : null);
     }
-    if (countHost) countHost.textContent = specs.length ? String(specs.length) : "";
+  }
+
+  function renderEngineMore(host, countHost, hintHost, kind, samplingValues, engineValues) {
+    if (!host) return;
+    if (!kvmemFamily(kind)) {
+      renderMoreParams(host, countHost, hintHost, kind, samplingValues);
+      return;
+    }
+    const sampling = moreParamSpecs(kind);
+    const specs = engineTabSpecs(kind);
+    const groups = specGroups(specs);
+    const samplingHtml = sampling.length
+      ? `<p class="params-group-title">采样 <span>请求级 · 留空不注入</span></p>
+         <div class="params-grid">${sampling.map(specLabelHtml).join("")}</div>`
+      : "";
+    const engineHtml = groups.length ? specGroupsHtml(groups, kvmemEngineTitle(kind)) : "";
+    host.innerHTML = samplingHtml + engineHtml
+      || '<p class="params-hint">该引擎没有额外的可配置参数。</p>';
+    fillSpecValues(host, sampling, samplingValues);
+    fillSpecValues(host, specs, engineValues);
+    const total = sampling.length + specs.length;
+    if (countHost) countHost.textContent = total ? String(total) : "";
     if (hintHost) {
-      hintHost.textContent = specs.length
-        ? (kind === "kvmem"
-            ? "这些是 strata-poly 自身的进程级参数，写入模型自己的 strata-*.json；留空表示沿用模板或引擎默认。MTP 留空时按模型 GGUF 的 nextn_predict_layers 自动判断。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。"
-            : kind === "ninfer"
-              ? "这些是 ninfer-serve 自身的进程级参数，写入模型自己的 ninfer-*.json；留空表示删除该参数、使用引擎默认。视觉开关在“视觉编码器”里，上下文与 KV 精度也在本页设置。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。"
-              : "这些是 llama-kvmem-server 自身的进程级参数，写入模型自己的 kvmem-llama-*.json；留空表示沿用模板或引擎默认。保存后会重启引擎。采样参数仍在“基本/更多参数”里按请求注入。")
+      hintHost.textContent = total
+        ? `这些是 ${kvmemEngineTitle(kind)} 自身的进程级参数，写入模型自己的引擎配置；留空表示沿用模板或引擎默认。KVMem 扩展参数在“kvmem参数”页，请求级采样参数在“基本参数”页。保存后按需重启引擎。`
         : "";
     }
   }
 
-  function readKvmemEngine(host, kind) {
+  function renderKvmemEngine(host, countHost, hintHost, values, kind) {
+    if (!host) return;
+    const specs = kvmemTabSpecs(kind);
+    const groups = specGroups(specs);
+    host.innerHTML = groups.length
+      ? specGroupsHtml(groups, `${kvmemEngineTitle(kind)} · KVMem 扩展`)
+      : '<p class="params-hint">该引擎没有 KVMem 扩展参数。</p>';
+    fillSpecValues(host, specs, values);
+    if (countHost) countHost.textContent = specs.length ? String(specs.length) : "";
+    if (hintHost) {
+      hintHost.textContent = specs.length
+        ? `这些是 KVMem 叠加在 ${kvmemEngineTitle(kind)} 上的扩展参数（--kvmem-*），写入模型自己的引擎配置；留空表示沿用模板或引擎默认，引擎不支持时会拒绝启动。保存后按需重启引擎。`
+        : "";
+    }
+  }
+
+  function readKvmemEngine(host, kind, owner = "kvmem") {
     const values = {};
     if (!host) return values;
-    for (const spec of kvmemUiSpecs(kind)) {
+    const specs = owner === "engine" ? engineTabSpecs(kind) : kvmemTabSpecs(kind);
+    for (const spec of specs) {
       const input = host.querySelector(`[data-param-key="${spec.key}"]`);
       if (!input) continue;
       const raw = String(input.value || "").trim();
@@ -2817,13 +2858,13 @@
       const input = form.elements[key];
       if (input && params[key] != null) input.value = params[key];
     }
-    renderMoreParams(
-      $("params-more"), $("params-more-count"), $("params-more-hint"),
-      model.engine, params,
-    );
     const kv = model.engine === "kvmem";
     const ninfer = model.engine === "ninfer";
     const kvllama = model.engine === "kvmem_llama";
+    renderEngineMore(
+      $("params-more"), $("params-more-count"), $("params-more-hint"),
+      model.engine, params, engineParams,
+    );
     renderKvmemEngine(
       $("params-kvmem"), $("params-kvmem-count"), $("params-kvmem-hint"),
       engineParams, kv ? "kvmem" : ninfer ? "ninfer" : "kvmem_llama",
@@ -2846,18 +2887,15 @@
     if (ninfer || kvllama) {
       form.elements.repeat_last_n.value = "";
     }
-    $("params-engine").hidden = !editable && !kvllama;
-    $("params-budget-field").hidden = !kvllama;
-    $("params-context-field").hidden = kvllama;
-    $("params-cache-k-field").hidden = kvllama;
-    $("params-cache-v-field").hidden = kvllama;
-    $("params-engine-caption").textContent = kvllama
-      ? "llama-kvmem-server · 预算可改，上下文与 K/V 精度在新增模型时固定"
-      : "llama.cpp · 保存后自动重启引擎生效";
-    if (kvllama) {
-      $("params-budget").value = engineParams.kvmem_budget == null
-        ? "" : String(engineParams.kvmem_budget);
-    }
+    $("params-engine").hidden = !editable;
+    $("params-engine-caption").textContent = "llama.cpp · 保存后自动重启引擎生效";
+    $("params-more-caption").textContent = kvllama
+      ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
+      : kv
+        ? "strata-poly 原生进程参数 · 留空沿用模板"
+        : ninfer
+          ? "ninfer-serve 原生进程参数 · 留空沿用模板"
+          : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
     if (editable) {
       const manageEngine = llamaManageEngine();
       $("params-context").value = model.context_length == null ? "" : model.context_length;
@@ -2890,11 +2928,11 @@
     $("params-sub").textContent =
       `模型 ${model.id}（${ENGINE_LABELS[model.engine] || model.engine}）。留空的字段不注入，使用引擎默认值；请求中显式给出的参数优先。`;
     $("params-hint").textContent = ninfer
-      ? "NInfer 限制：repetition_penalty 只能为 1（已禁用），不支持 repeat_last_n；上下文、KV 精度与引擎自身参数在“引擎参数”页，视觉运行位置在“视觉编码器”，保存后自动重启引擎。"
+      ? "NInfer 限制：repetition_penalty 只能为 1（已禁用），不支持 repeat_last_n；ninfer-serve 自身的进程参数在“更多参数”，KVMem 扩展在“kvmem参数”，视觉运行位置在“视觉编码器”，保存后自动重启引擎。"
       : kvllama
-        ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；上下文与 K/V 精度在新增模型时固定，KVMem 预算在“基本参数”，其余引擎参数在“引擎参数”页，保存后自动重启引擎。"
+        ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；上下文与 K/V 精度在新增模型时固定；llama-kvmem-server 自身的进程参数在“更多参数”，KVMem 扩展（预算等）在“kvmem参数”，保存后自动重启引擎。"
         : kv
-          ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文固定为模型上限，KV 精度固定 q8_0；引擎自身参数在“引擎参数”页，保存后自动重启引擎。"
+          ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；strata-poly 自身的进程参数（上下文、MTP、KV 格式等）在“更多参数”，KVMem 扩展（预算、检索、SSD 等）在“kvmem参数”，保存后自动重启引擎。"
           : editable
             ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。修改上下文或 KV 精度会自动重启引擎。"
             : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。该模型由目录扫描发现，无法修改上下文与 KV 精度。";
@@ -2950,7 +2988,11 @@
     if (model && model.engine === "ninfer") {
       let ninferParams;
       try {
-        ninferParams = readKvmemEngine($("params-kvmem"), "ninfer");
+        ninferParams = Object.assign(
+          {},
+          readKvmemEngine($("params-more"), "ninfer", "engine"),
+          readKvmemEngine($("params-kvmem"), "ninfer"),
+        );
       } catch (error) {
         $("params-error").textContent = error.message;
         $("params-error").hidden = false;
@@ -2961,23 +3003,15 @@
     if (model && model.engine === "kvmem_llama") {
       let kvParams;
       try {
-        kvParams = readKvmemEngine($("params-kvmem"), "kvmem_llama");
+        kvParams = Object.assign(
+          {},
+          readKvmemEngine($("params-more"), "kvmem_llama", "engine"),
+          readKvmemEngine($("params-kvmem"), "kvmem_llama"),
+        );
       } catch (error) {
         $("params-error").textContent = error.message;
         $("params-error").hidden = false;
         return;
-      }
-      const budgetRaw = $("params-budget").value.trim();
-      if (budgetRaw === "") {
-        kvParams.kvmem_budget = null;
-      } else {
-        const budget = Number(budgetRaw);
-        if (!Number.isInteger(budget) || budget < 128) {
-          $("params-error").textContent = "KVMem 预算必须是 ≥128 的整数（单位 token）。";
-          $("params-error").hidden = false;
-          return;
-        }
-        kvParams.kvmem_budget = budget;
       }
       const diskMib = Number(kvParams.kvmem_disk_mib || 0);
       const diskPath = String(kvParams.kvmem_disk_path || "").trim();
@@ -2996,7 +3030,11 @@
     if (model && model.engine === "kvmem") {
       let kvParams;
       try {
-        kvParams = readKvmemEngine($("params-kvmem"), "kvmem");
+        kvParams = Object.assign(
+          {},
+          readKvmemEngine($("params-more"), "kvmem", "engine"),
+          readKvmemEngine($("params-kvmem"), "kvmem"),
+        );
       } catch (error) {
         $("params-error").textContent = error.message;
         $("params-error").hidden = false;
@@ -3120,9 +3158,7 @@
       form.elements.repeat_last_n.value = "";
     }
     const llama = kind === "llama";
-    $("add-engine-params").hidden = !llama && !kvllama && !kv;
-    $("add-budget-field").hidden = !kvllama;
-    $("add-budget").value = kvllama ? "32768" : "";
+    $("add-engine-params").hidden = !llama && !kvllama;
     $("add-cache-k-field").hidden = !(llama || kvllama);
     $("add-cache-v-field").hidden = !(llama || kvllama);
     $("add-context").value = "";
@@ -3132,10 +3168,15 @@
       fillCacheSelect($("add-cache-v"), engine.cache_types, "q8_0");
     }
     $("add-engine-caption").textContent = kvllama
-      ? "llama-kvmem-server · 预算留空用 32768，上下文留空读取 GGUF"
+      ? "llama-kvmem-server · 上下文留空读取 GGUF"
+      : "llama.cpp · 上下文留空读取 GGUF";
+    $("add-more-caption").textContent = kvllama
+      ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
       : kv
-        ? "KVMem · 上下文留空读取 GGUF；GGUF 无该字段时必须填写"
-        : "llama.cpp · 上下文留空读取 GGUF";
+        ? "strata-poly 原生进程参数 · 留空沿用模板"
+        : ninfer
+          ? "ninfer-serve 原生进程参数 · 留空沿用模板"
+          : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
     $("add-model-hint").textContent = ninfer
       ? ".ninfer 文件，必填"
       : kvllama || kv
@@ -3165,16 +3206,16 @@
       engine ? engine.engine_params || null : null,
       kv ? "kvmem" : ninfer ? "ninfer" : "kvmem_llama",
     );
-    renderMoreParams(
+    renderEngineMore(
       $("add-more"), $("add-more-count"), $("add-more-hint"),
-      kind, null,
+      kind, null, engine ? engine.engine_params || null : null,
     );
     $("add-defaults").textContent = !engine ? "" : ninfer
-      ? "NInfer 单模型模式：每份配置只服务一个 .ninfer 模型，参数继承选定模板；视觉塔内嵌在模型中，可选择 CPU/GPU；上下文、KV 精度与其余引擎参数在“引擎参数”页按需覆盖模板；repetition_penalty 只能为 1，且没有 repeat_last_n。"
+      ? "NInfer 单模型模式：每份配置只服务一个 .ninfer 模型，参数继承选定模板；视觉塔内嵌在模型中，可选择 CPU/GPU；上下文、KV 精度等 ninfer-serve 自身参数在“更多参数”按需覆盖模板，KVMem 扩展在“kvmem参数”；repetition_penalty 只能为 1，且没有 repeat_last_n。"
       : kvllama
-        ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；预算默认 32768 tokens，必须与生成预留一起落在上下文内；KV 精度默认 q8_0；其余参数可在“引擎参数”页按需覆盖模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
+        ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；上下文与 KV 精度在“基本参数”设置；KVMem 预算等扩展在“kvmem参数”，其余 llama-kvmem-server 自身参数在“更多参数”按需覆盖模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
         : kv
-          ? "KV 精度固定 q8_0（引擎不支持时省略）；上下文留空读取 GGUF 上限，GGUF 缺少该字段时必须手动填写；视觉可选 CPU/GPU（默认 CPU）；其余引擎参数可在“引擎参数”页按需覆盖 ornith 模板，采样默认来自 ornith。MTP 留空时按模型 GGUF 自动判断。"
+          ? "strata-poly 单模型模式：上下文（--max-context）等引擎自身参数在“更多参数”，KVMem 预算/检索/SSD 等扩展在“kvmem参数”；上下文留空读取 GGUF 上限，GGUF 缺少该字段时必须手动填写；视觉可选 CPU/GPU（默认 CPU）；采样默认来自 ornith 模板，MTP 留空时按模型 GGUF 自动判断。"
           : "上下文留空读取 GGUF 上限，可填更小值（GGUF 无该字段时必须填写）；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
   }
 
@@ -3326,7 +3367,11 @@
       body.vision_enabled = $("add-vision-enabled").checked;
       let engineParams;
       try {
-        engineParams = readKvmemEngine($("add-kvmem"), "ninfer");
+        engineParams = Object.assign(
+          {},
+          readKvmemEngine($("add-more"), "ninfer", "engine"),
+          readKvmemEngine($("add-kvmem"), "ninfer"),
+        );
       } catch (error) {
         showAddError(error.message);
         return;
@@ -3337,7 +3382,7 @@
       }
       if (Object.keys(advanced).length) body.engine_params = advanced;
     }
-    if (engineInfo.kind === "llama" || engineInfo.kind === "kvmem_llama" || engineInfo.kind === "kvmem") {
+    if (engineInfo.kind === "llama" || engineInfo.kind === "kvmem_llama") {
       const contextRaw = $("add-context").value.trim();
       if (contextRaw !== "") {
         const context = Number(contextRaw);
@@ -3355,7 +3400,11 @@
     if (engineInfo.kind === "kvmem_llama") {
       let engineParams;
       try {
-        engineParams = readKvmemEngine($("add-kvmem"), "kvmem_llama");
+        engineParams = Object.assign(
+          {},
+          readKvmemEngine($("add-more"), "kvmem_llama", "engine"),
+          readKvmemEngine($("add-kvmem"), "kvmem_llama"),
+        );
       } catch (error) {
         showAddError(error.message);
         return;
@@ -3366,18 +3415,9 @@
       }
       const reserve = advanced.kvmem_gen_reserve == null
         ? 1024 : Number(advanced.kvmem_gen_reserve);
-      const budgetRaw = $("add-budget").value.trim();
-      if (budgetRaw !== "") {
-        const budget = Number(budgetRaw);
-        if (!Number.isInteger(budget) || budget < 128) {
-          showAddError("KVMem 预算必须是 ≥128 的整数（单位 token）。");
-          return;
-        }
-        if (body.context_length && budget + reserve > body.context_length) {
-          showAddError(`KVMem 预算 + 生成预留（${reserve}）不能超过上下文长度。`);
-          return;
-        }
-        body.kvmem_budget = budget;
+      if (body.context_length && advanced.kvmem_budget && reserve + Number(advanced.kvmem_budget) > body.context_length) {
+        showAddError(`KVMem 预算 + 生成预留（${reserve}）不能超过上下文长度。`);
+        return;
       }
       const diskMib = Number(advanced.kvmem_disk_mib || 0);
       const diskPath = String(advanced.kvmem_disk_path || "").trim();
@@ -3394,7 +3434,11 @@
     if (engineInfo.kind === "kvmem") {
       let engineParams;
       try {
-        engineParams = readKvmemEngine($("add-kvmem"), "kvmem");
+        engineParams = Object.assign(
+          {},
+          readKvmemEngine($("add-more"), "kvmem", "engine"),
+          readKvmemEngine($("add-kvmem"), "kvmem"),
+        );
       } catch (error) {
         showAddError(error.message);
         return;

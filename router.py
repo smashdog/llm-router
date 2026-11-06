@@ -735,6 +735,7 @@ def _kv_engine_spec(
     note: str | None = None,
     off_flag: str | None = None,
     group_labels: dict[str, str] | None = None,
+    owner: str | None = None,
 ) -> dict[str, Any]:
     flag_list = (flags,) if isinstance(flags, str) else tuple(flags)
     spec: dict[str, Any] = {
@@ -746,6 +747,9 @@ def _kv_engine_spec(
         "group_label": (group_labels or KVMEM_LLAMA_GROUP_LABELS)[group],
         "type": kind,
         "default": default,
+        # KVMem's own extension flags (--kvmem-*) belong to the console's
+        # "kvmem参数" tab; everything else is the backend engine's own option.
+        "owner": owner or ("kvmem" if flag_list[0].startswith("--kvmem-") else "engine"),
     }
     if low is not None:
         spec["min"] = low
@@ -1084,6 +1088,7 @@ def kvmem_llama_engine_schema() -> list[dict[str, Any]]:
 # model, so leaving a field empty keeps the template value.
 
 POLYSTRATA_ENGINE_GROUPS = (
+    ("context", "上下文"),
     ("core", "预算与保留"),
     ("retrieval", "检索与选择"),
     ("memory", "内存与存储"),
@@ -1095,6 +1100,12 @@ POLYSTRATA_ENGINE_GROUPS = (
 POLYSTRATA_GROUP_LABELS = dict(POLYSTRATA_ENGINE_GROUPS)
 
 POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
+    _kv_engine_spec(
+        "max_context", "--max-context", "上下文长度", "context",
+        low=256, step=1,
+        note="注意力缓存能容纳的 token 数；KV 预算 B + 生成预留 R 必须落在其中",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
     _kv_engine_spec(
         "kvmem_budget", "--kvmem-budget", "KV 预算 B", "core",
         default=32768, low=128, step=32,
@@ -1248,6 +1259,22 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
+        "kv", "--kv", "KV 缓存格式", "runtime", "enum",
+        choices=[
+            {"value": "fp16", "label": "fp16 · 默认"},
+            {"value": "q8_0", "label": "q8_0"},
+            {"value": "int8", "label": "int8（Gemma 4）"},
+            {"value": "int8k", "label": "int8k（Gemma 4，K 量化/V fp16）"},
+        ],
+        note="原生 K/V 缓存格式；留空沿用模型配置",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "layer_split", "--layer-split", "多卡层划分", "runtime", "string",
+        note="auto 或后续每张卡的首层，如 20 或 20,30；留空表示单卡",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
         "threads", ("-t", "--threads"), "CPU 线程", "runtime",
         low=-1, step=1, note="≤0 使用全部可用线程",
         group_labels=POLYSTRATA_GROUP_LABELS,
@@ -1256,6 +1283,22 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         "vram_reserve_mib", "--vram-reserve-mib", "VRAM 预留（MiB）", "runtime",
         default=256, low=256, high=8192, step=64,
         note="专家缓存之外留给系统的显存，至少 256",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "window", "--window", "推测窗口", "spec",
+        low=1, high=8, step=1,
+        note="一次通过的 token 数；KVMem 关闭 MTP 时为 1，开启时为 2..4，保存时自动校正",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "lookup", "--lookup", "历史查表", "spec",
+        low=0, step=1, note="按前文重复猜测后续 token；KVMem 路径必须为 0",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "no_draft", "--no-draft", "关闭草稿块", "spec", "boolean",
+        note="KVMem 关闭 MTP 时必须启用；开启 MTP 时自动移除",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
@@ -1419,6 +1462,7 @@ NINFER_ENGINE_GROUPS = (
     ("spec", "推测解码"),
     ("thinking", "思考"),
     ("vision", "视觉"),
+    ("kvmem", "KVMem 扩展"),
 )
 NINFER_GROUP_LABELS = dict(NINFER_ENGINE_GROUPS)
 
@@ -1727,6 +1771,107 @@ NINFER_ENGINE_SPECS: list[dict[str, Any]] = [
     _kv_engine_spec(
         "media_preprocess_threads", "--media-preprocess-threads", "媒体预处理线程", "vision",
         low=0, high=16, step=1, note="0 自动，最多 16",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    # -- KVMem extension ---------------------------------------------------
+    _kv_engine_spec(
+        "kvmem", "--kvmem", "启用 KVMem", "kvmem", "boolean",
+        off_flag="--no-kvmem",
+        note="默认关闭；留空沿用模板，开启时预算必须大于 0",
+        group_labels=NINFER_GROUP_LABELS,
+        owner="kvmem",
+    ),
+    _kv_engine_spec(
+        "kvmem_budget", "--kvmem-budget", "KV 预算 B", "kvmem",
+        default=32768, low=64, step=64,
+        note="选中的历史预算，按 64 向下取整；启用 KVMem 时必须为正",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_gen_reserve", "--kvmem-gen-reserve", "生成预留 R", "kvmem",
+        default=1024, low=64, step=64,
+        note="可复用追加空间，按 64 向下取整",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_host_mib", "--kvmem-host-mib", "Host KV 预算（MiB）", "kvmem",
+        default=16384, low=1, step=1,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_sink_tokens", "--kvmem-sink-tokens", "开头保留 sink", "kvmem",
+        default=0, low=0, step=1, note="留空/0 表示保留一个 64-token 页",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_recent_tokens", "--kvmem-recent-tokens", "最近保留", "kvmem",
+        default=64, low=64, step=1, note="至少 64，按整页向下取整",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_sessions", "--kvmem-sessions", "非活动会话数", "kvmem",
+        default=4, low=1, high=16, step=1,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_query_scorer", "--kvmem-query-scorer", "Query 打分", "kvmem", "enum",
+        default="page-softmax",
+        choices=[
+            {"value": "page-softmax", "label": "page-softmax"},
+            {"value": "meanq-cosine", "label": "meanq-cosine"},
+        ],
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_score_agg", "--kvmem-score-agg", "分数聚合", "kvmem", "enum",
+        choices=[{"value": "mean", "label": "mean"}, {"value": "max", "label": "max"}],
+        note="留空由引擎按打分器选择",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_graph_alpha", "--kvmem-graph-alpha", "图传播 alpha", "kvmem", "number",
+        default=0.2, low=0.0, high=1.0, step=0.01,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_lrfu", "--kvmem-lrfu", "历史加权 LRFU", "kvmem", "boolean",
+        off_flag="--no-kvmem-lrfu",
+        note="留空时仅 meanq-cosine 默认开启",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_lrfu_lambda", "--kvmem-lrfu-lambda", "LRFU 衰减 λ", "kvmem", "number",
+        default=0.5, low=0.0, high=1.0, step=0.01,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_lrfu_top_frac", "--kvmem-lrfu-top-frac", "LRFU 命中比例", "kvmem",
+        "number", default=0.9, low=0.0, high=1.0, step=0.01, low_exclusive=True,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_query_max_tokens", "--kvmem-query-max-tokens", "Query 上限", "kvmem",
+        default=512, low=1, step=1,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_query_replay_max_tokens", "--kvmem-query-replay-max-tokens",
+        "Query 重放上限", "kvmem", default=2048, low=1, step=1,
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_disk_mib", "--kvmem-disk-mib", "SSD 额度（MiB）", "kvmem",
+        default=0, low=0, step=256,
+        note="0 关闭；大于 0 时必须同时设置 SSD 目录",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_disk_path", "--kvmem-disk-path", "SSD 目录", "kvmem", "string",
+        group_labels=NINFER_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_verify_transfers", "--kvmem-verify-transfers", "传输校验", "kvmem",
+        "boolean", note="恢复 KV/GDN 时校验字节，诊断用，会轻微拖慢",
         group_labels=NINFER_GROUP_LABELS,
     ),
 ]
@@ -2267,6 +2412,8 @@ def ninfer_engine_values(args: list[str]) -> dict[str, Any]:
         if spec["type"] == "boolean":
             if any(_config_switch_present(tokens, flag) for flag in spec["flags"]):
                 out[key] = True
+            elif spec.get("off_flag") and _config_switch_present(tokens, spec["off_flag"]):
+                out[key] = False
             continue
         raw = _config_arg_value(tokens, *spec["flags"])
         if raw is None:
@@ -2342,6 +2489,12 @@ def normalize_ninfer_engine(values: dict[str, Any] | None) -> dict[str, Any]:
     disk_path = out.get("disk_kv_path")
     if isinstance(disk_gib, (int, float)) and disk_gib > 0 and not disk_path:
         raise BadRequest("disk_kv_gib 大于 0 时必须设置 disk_kv_path")
+    kvmem_disk = out.get("kvmem_disk_mib")
+    kvmem_path = out.get("kvmem_disk_path")
+    if isinstance(kvmem_disk, (int, float)) and kvmem_disk > 0 and not kvmem_path:
+        raise BadRequest("kvmem_disk_mib 大于 0 时必须设置 kvmem_disk_path")
+    if kvmem_path and not (isinstance(kvmem_disk, (int, float)) and kvmem_disk > 0):
+        raise BadRequest("设置 kvmem_disk_path 时必须同时把 kvmem_disk_mib 设为大于 0")
     return out
 
 
@@ -2353,11 +2506,16 @@ def ninfer_apply_engine_values(args: list[str], values: dict[str, Any]) -> list[
         if spec is None:
             continue
         flags = spec["flags"]
+        off_flag = spec.get("off_flag")
         if spec["type"] == "boolean":
             for flag in flags:
                 out = _config_switch_remove(out, flag)
+            if off_flag:
+                out = _config_switch_remove(out, off_flag)
             if value is True:
                 out.append(spec["flag"])
+            elif value is False and off_flag:
+                out.append(off_flag)
             continue
         if value is None:
             for flag in flags:
@@ -8103,6 +8261,11 @@ class Gateway:
                 args = kvmem_poly_apply_engine_values(
                     args, engine_values, mtp_supported=mtp_supported
                 )
+                # The engine's own --max-context may be overridden in the same
+                # request; fit and validate against the value that will run.
+                context = (
+                    parse_int(_config_arg_value(args, "--max-context", "--ctx")) or context
+                )
                 template_budget = parse_int(
                     _config_arg_value([str(item) for item in (template.get("args") or [])],
                                       "--kvmem-budget")
@@ -8623,13 +8786,6 @@ class Gateway:
                 if not isinstance(args, list):
                     raise BadRequest("模型配置没有 args 列表")
                 args = [str(item) for item in args]
-                context = (
-                    parse_int(_config_arg_value(args, "--max-context", "--ctx"))
-                    or parse_int(config.get("context_length"))
-                    or entry.context_length
-                )
-                if not context:
-                    raise BadRequest("无法从模型配置读取上下文长度")
                 current_budget = parse_int(_config_arg_value(args, "--kvmem-budget"))
                 current_reserve = parse_int(_config_arg_value(args, "--kvmem-gen-reserve"))
                 explicit_budget = (
@@ -8644,6 +8800,14 @@ class Gateway:
                 args = kvmem_poly_apply_engine_values(
                     args, engine_values, mtp_supported=mtp_supported
                 )
+                # --max-context may have changed in this same save.
+                context = (
+                    parse_int(_config_arg_value(args, "--max-context", "--ctx"))
+                    or parse_int(config.get("context_length"))
+                    or entry.context_length
+                )
+                if not context:
+                    raise BadRequest("无法从模型配置读取上下文长度")
                 args = kvmem_poly_fit_tuning(
                     args,
                     int(context),
