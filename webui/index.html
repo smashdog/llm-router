@@ -1278,14 +1278,14 @@
     }
   }
 
-  function renderEngineMore(host, countHost, hintHost, kind, samplingValues, engineValues) {
+  function renderEngineMore(host, countHost, hintHost, kind, samplingValues, engineValues, multimodal = null) {
     if (!host) return;
     if (!kvmemFamily(kind)) {
       renderMoreParams(host, countHost, hintHost, kind, samplingValues);
       return;
     }
     const sampling = moreParamSpecs(kind);
-    const specs = engineTabSpecs(kind);
+    const specs = engineTabSpecs(kind).filter((spec) => !spec.vision_only || multimodal !== false);
     const groups = specGroups(specs);
     const samplingHtml = sampling.length
       ? `<p class="params-group-title">采样 <span>请求级 · 留空不注入</span></p>
@@ -1300,7 +1300,7 @@
     if (countHost) countHost.textContent = total ? String(total) : "";
     if (hintHost) {
       hintHost.textContent = total
-        ? `这些是 ${kvmemEngineTitle(kind)} 自身的进程级参数，写入模型自己的引擎配置；留空表示沿用模板或引擎默认。KVMem 扩展参数在“kvmem参数”页，请求级采样参数在“基本参数”页。保存后按需重启引擎。`
+        ? `这些是 ${kvmemEngineTitle(kind)} 自身的参数，写入模型自己的引擎配置（视觉组写入 vision 段）；留空表示沿用模板或引擎默认。KVMem 扩展参数在“kvmem参数”页，请求级采样参数在“基本参数”页。保存后按需重启引擎。`
         : "";
     }
   }
@@ -2863,7 +2863,7 @@
     const kvllama = model.engine === "kvmem_llama";
     renderEngineMore(
       $("params-more"), $("params-more-count"), $("params-more-hint"),
-      model.engine, params, engineParams,
+      model.engine, params, engineParams, model.multimodal === true,
     );
     renderKvmemEngine(
       $("params-kvmem"), $("params-kvmem-count"), $("params-kvmem-hint"),
@@ -2892,7 +2892,7 @@
     $("params-more-caption").textContent = kvllama
       ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
       : kv
-        ? "strata-poly 原生进程参数 · 留空沿用模板"
+        ? "strata-poly 原生进程 / 视觉参数 · 留空沿用模板"
         : ninfer
           ? "ninfer-serve 原生进程参数 · 留空沿用模板"
           : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
@@ -3173,7 +3173,7 @@
     $("add-more-caption").textContent = kvllama
       ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
       : kv
-        ? "strata-poly 原生进程参数 · 留空沿用模板"
+        ? "strata-poly 原生进程 / 视觉参数 · 留空沿用模板"
         : ninfer
           ? "ninfer-serve 原生进程参数 · 留空沿用模板"
           : "llama.cpp 高级采样 / 生成参数 · 留空不注入";

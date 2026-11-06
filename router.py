@@ -736,6 +736,8 @@ def _kv_engine_spec(
     off_flag: str | None = None,
     group_labels: dict[str, str] | None = None,
     owner: str | None = None,
+    config_path: tuple[str, ...] | None = None,
+    vision_only: bool = False,
 ) -> dict[str, Any]:
     flag_list = (flags,) if isinstance(flags, str) else tuple(flags)
     spec: dict[str, Any] = {
@@ -751,6 +753,12 @@ def _kv_engine_spec(
         # "kvmem参数" tab; everything else is the backend engine's own option.
         "owner": owner or ("kvmem" if flag_list[0].startswith("--kvmem-") else "engine"),
     }
+    if config_path:
+        # Some engine options live in the model's JSON config rather than in
+        # its argv (PolyStrata's "vision" block, for one).
+        spec["config_path"] = list(config_path)
+    if vision_only:
+        spec["vision_only"] = True
     if low is not None:
         spec["min"] = low
     if high is not None:
@@ -1096,6 +1104,7 @@ POLYSTRATA_ENGINE_GROUPS = (
     ("spec", "推测解码（MTP）"),
     ("engine", "专家与解码"),
     ("cache", "提示与会话缓存"),
+    ("vision", "视觉（strata-vision）"),
 )
 POLYSTRATA_GROUP_LABELS = dict(POLYSTRATA_ENGINE_GROUPS)
 
@@ -1104,6 +1113,31 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         "max_context", "--max-context", "上下文长度", "context",
         low=256, step=1,
         note="注意力缓存能容纳的 token 数；KV 预算 B + 生成预留 R 必须落在其中",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    # -- vision encoder ----------------------------------------------------
+    # These are PolyStrata's "vision" block in strata-*.json, not strata-poly
+    # flags: serve/server.py forwards them to strata-vision as --threads,
+    # --max-tokens and --min-tokens.
+    _kv_engine_spec(
+        "vision_threads", "vision.threads", "编码线程", "vision",
+        low=0, high=256, step=1,
+        config_path=("vision", "threads"), vision_only=True,
+        note="strata-vision 的 CPU 线程数；0 或留空由编码器选择",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "vision_max_tokens", "vision.max_tokens", "图片最大 token", "vision",
+        low=1, high=1048576, step=1,
+        config_path=("vision", "max_tokens"), vision_only=True,
+        note="每张图片最多编码成多少 token；越大保留越多细节，编码也越慢",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "vision_min_tokens", "vision.min_tokens", "图片最小 token", "vision",
+        low=0, high=1048576, step=1,
+        config_path=("vision", "min_tokens"), vision_only=True,
+        note="可选；小图至少放大到该 token 数（strata-vision --min-tokens）",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
@@ -1439,6 +1473,14 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     ),
 ]
 POLYSTRATA_ENGINE_BY_KEY = {spec["key"]: spec for spec in POLYSTRATA_ENGINE_SPECS}
+
+# PolyStrata keeps the encoder settings in the model's "vision" object; the
+# console exposes them as vision_* engine parameters.
+POLYSTRATA_VISION_KEYS = {
+    "vision_threads": "threads",
+    "vision_max_tokens": "max_tokens",
+    "vision_min_tokens": "min_tokens",
+}
 
 
 def kvmem_poly_engine_schema() -> list[dict[str, Any]]:
@@ -2089,12 +2131,34 @@ def kvmem_llama_validate_disk(args: list[str]) -> None:
         raise BadRequest("旧 --kvmem-cpu-gb 与 SSD 分层不能同时启用")
 
 
-def kvmem_poly_engine_values(args: list[str]) -> dict[str, Any]:
-    """Read the whitelisted strata-poly KVMem options from one model's args."""
+def kvmem_poly_engine_values(
+    args: list[str], config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Read the whitelisted strata-poly options from one model's config.
+
+    Most options live in ``args``; a few engine options (the ``vision`` block)
+    live in the JSON config itself.
+    """
     tokens = [str(item) for item in args]
     out: dict[str, Any] = {}
     for spec in POLYSTRATA_ENGINE_SPECS:
         key = spec["key"]
+        if spec.get("config_path"):
+            raw = _config_path_value(config, spec["config_path"])
+            if raw is None or isinstance(raw, bool):
+                continue
+            if spec["type"] == "integer":
+                value = parse_int(raw)
+            elif spec["type"] == "number":
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                value = str(raw)
+            if value is not None:
+                out[key] = value
+            continue
         if spec["type"] == "boolean":
             if any(_config_switch_present(tokens, flag) for flag in spec["flags"]):
                 out[key] = True
@@ -2225,6 +2289,9 @@ def kvmem_poly_apply_engine_values(
         spec = POLYSTRATA_ENGINE_BY_KEY.get(key)
         if spec is None:
             continue
+        if spec.get("config_path"):
+            # Written to the JSON config, not to argv.
+            continue
         flags = spec["flags"]
         off_flag = spec.get("off_flag")
         if spec["type"] == "boolean":
@@ -2279,6 +2346,42 @@ def kvmem_poly_apply_engine_values(
         out = _config_arg_set(out, "--window", 1)
         out = _config_arg_set(out, "--lookup", 0)
     return out
+
+
+def kvmem_poly_visible_vision_values(values: dict[str, Any] | None) -> dict[str, Any]:
+    """The vision_* entries of an engine_params payload."""
+    if not isinstance(values, dict):
+        return {}
+    return {key: value for key, value in values.items() if key in POLYSTRATA_VISION_KEYS}
+
+
+def kvmem_poly_apply_vision_values(
+    config: dict[str, Any], values: dict[str, Any]
+) -> None:
+    """Write vision_* engine parameters into the model's "vision" object."""
+    wanted = kvmem_poly_visible_vision_values(values)
+    if not wanted:
+        return
+    vision = config.get("vision")
+    if not isinstance(vision, dict):
+        if any(value is not None for value in wanted.values()):
+            raise BadRequest("该模型的配置没有 vision 段，无法设置视觉参数")
+        return
+    for key, value in wanted.items():
+        field = POLYSTRATA_VISION_KEYS[key]
+        if value is None:
+            vision.pop(field, None)
+        else:
+            vision[field] = value
+    maximum = parse_int(vision.get("max_tokens"))
+    minimum = parse_int(vision.get("min_tokens"))
+    if maximum is not None and maximum < 1:
+        raise BadRequest("vision_max_tokens（vision.max_tokens）必须大于 0")
+    if minimum is not None and minimum < 0:
+        raise BadRequest("vision_min_tokens（vision.min_tokens）不能为负数")
+    if maximum is not None and minimum is not None and minimum > maximum:
+        raise BadRequest("vision_min_tokens 不能大于 vision_max_tokens")
+    config["vision"] = vision
 
 
 def kvmem_poly_fit_tuning(
@@ -3652,6 +3755,16 @@ def _config_arg_value(args: list[str], *flags: str) -> str | None:
             if token.startswith(flag + "="):
                 return token.split("=", 1)[1]
     return None
+
+
+def _config_path_value(config: dict[str, Any] | None, path: tuple[str, ...] | list[str]):
+    """Read a nested key such as ``("vision", "max_tokens")`` from a config."""
+    node: Any = config
+    for part in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
 
 
 def discover_kvmem_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
@@ -8313,10 +8426,15 @@ class Gateway:
                         vision_cfg["exe"] = str(Path(str(kv_cfg.get("exe"))).with_name("strata-vision"))
                     vision_cfg.setdefault("threads", max(1, (os.cpu_count() or 8) // 2))
                     vision_cfg.setdefault("max_tokens", 65536)
+                    vision_box = {"vision": vision_cfg}
+                    kvmem_poly_apply_vision_values(vision_box, engine_values)
+                    vision_cfg = vision_box["vision"]
                     if not Path(str(vision_cfg["exe"])).is_file():
                         raise BadRequest(f"视觉编码器不存在：{vision_cfg['exe']}")
                     kv_cfg["vision"] = vision_cfg
                 else:
+                    if kvmem_poly_visible_vision_values(engine_values):
+                        raise BadRequest("该模型没有视觉编码器，不能设置视觉参数")
                     kv_cfg.pop("vision", None)
                 write_json_atomic(config_file, kv_cfg)
                 job["config_path"] = str(config_file)
@@ -8818,8 +8936,9 @@ class Gateway:
                 if not _config_switch_present(args, "--kvmem-mtp"):
                     config.pop("kvmem_mtp_policy", None)
                     config.pop("kvmem_mtp_drafts_max", None)
+                kvmem_poly_apply_vision_values(config, engine_values)
                 config["args"] = args
-                fresh_values = kvmem_poly_engine_values(args)
+                fresh_values = kvmem_poly_engine_values(args, config)
             write_json_atomic(config_path, config)
             if fresh_values is not None:
                 result["engine_params"] = fresh_values
@@ -8996,7 +9115,9 @@ class Gateway:
         args = config.get("args") if isinstance(config, dict) else None
         if not isinstance(args, list):
             return {}
-        return kvmem_poly_engine_values([str(item) for item in args])
+        return kvmem_poly_engine_values(
+            [str(item) for item in args], config if isinstance(config, dict) else None
+        )
 
     def _ninfer_engine_values(self, entry: Model) -> dict[str, Any]:
         """Whitelisted ninfer-serve options from one ninfer-*.json."""

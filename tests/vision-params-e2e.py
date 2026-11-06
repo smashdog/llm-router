@@ -105,6 +105,16 @@ kv_config.write_text(json.dumps({
         "max_tokens": 1024,
     },
 }, ensure_ascii=False, indent=2), encoding="utf-8")
+# A text-only polystrata model: the vision_* engine parameters must be hidden
+# in the console and rejected by the API.
+kv_text_config = kv_models / "strata-zz-kv-text.json"
+kv_text_config.write_text(json.dumps({
+    "model_name": "kv-text",
+    "display_name": "KV Text",
+    "exe": str(strata_exe),
+    "args": ["--model", str(kv_model), "--max-context", "4096"],
+    "tokenizer": str(tokenizer),
+}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # --- fake NInfer ----------------------------------------------------------
 ninfer_cwd = BASE / "ninfer"
@@ -250,6 +260,10 @@ try:
     assert items["text-model"]["multimodal"] is False, items.get("text-model")
     assert items["kv-vision"]["multimodal"] is True, items.get("kv-vision")
     assert items["kv-vision"]["vision_gpu"] is False, items.get("kv-vision")
+    assert items["kv-vision"]["engine_params"]["vision_threads"] == 2, items["kv-vision"]
+    assert items["kv-vision"]["engine_params"]["vision_max_tokens"] == 1024, items["kv-vision"]
+    assert items["kv-text"]["multimodal"] is False, items.get("kv-text")
+    assert "vision_max_tokens" not in (items["kv-text"].get("engine_params") or {}), items["kv-text"]
     assert items["ninfer-vision"]["multimodal"] is True, items.get("ninfer-vision")
     checks += 1
 
@@ -390,6 +404,32 @@ try:
     assert bad.status_code == 400, bad.text
     checks += 1
 
+    # PolyStrata's vision encoder settings live in the model's "vision"
+    # object (strata-vision --threads/--max-tokens/--min-tokens).
+    saved = save("kv-vision", engine_params={
+        "vision_max_tokens": 2048, "vision_threads": 8, "vision_min_tokens": 512,
+    })
+    body = saved.json()
+    assert saved.status_code == 200, body
+    params = body["engine_params"]
+    assert params["vision_max_tokens"] == 2048, params
+    assert params["vision_threads"] == 8, params
+    assert params["vision_min_tokens"] == 512, params
+    doc = json.loads(kv_config.read_text(encoding="utf-8"))
+    assert doc["vision"]["max_tokens"] == 2048, doc["vision"]
+    assert doc["vision"]["threads"] == 8, doc["vision"]
+    assert doc["vision"]["min_tokens"] == 512, doc["vision"]
+    assert doc["vision"]["gpu"] is False and doc["vision"]["mmproj"], doc["vision"]
+    assert "--vision-max-tokens" not in doc["args"], doc["args"]
+    assert models()["kv-vision"]["engine_params"]["vision_max_tokens"] == 2048
+    bad = save("kv-vision", engine_params={"vision_min_tokens": 4096})
+    assert bad.status_code == 400 and "vision_min_tokens" in bad.text, bad.text
+    bad = save("kv-vision", engine_params={"vision_max_tokens": 0})
+    assert bad.status_code == 400, bad.text
+    bad = save("kv-text", engine_params={"vision_max_tokens": 1024})
+    assert bad.status_code == 400 and "没有 vision" in bad.text, bad.text
+    checks += 1
+
     manage = requests.get(url + "/router/models/manage", timeout=10).json()
     ninfer_specs = {spec["key"]: spec for spec in manage["ninfer_engine_schema"]}
     assert {"max_context", "vision_max_merged", "kv_dtype", "spec"} <= set(ninfer_specs)
@@ -397,7 +437,11 @@ try:
     assert ninfer_specs["kvmem_budget"]["owner"] == "kvmem"
     poly_specs = {spec["key"]: spec for spec in manage["kvmem_poly_engine_schema"]}
     assert {"max_context", "window", "lookup", "no_draft", "kv", "layer_split"} <= set(poly_specs)
+    assert {"vision_threads", "vision_max_tokens", "vision_min_tokens"} <= set(poly_specs)
     assert poly_specs["max_context"]["owner"] == "engine"
+    assert poly_specs["vision_max_tokens"]["owner"] == "engine"
+    assert poly_specs["vision_max_tokens"]["config_path"] == ["vision", "max_tokens"]
+    assert poly_specs["vision_max_tokens"]["vision_only"] is True
     assert poly_specs["kvmem_budget"]["owner"] == "kvmem"
     kvllama_specs = {spec["key"]: spec for spec in manage["kvmem_engine_schema"]}
     assert kvllama_specs["n_predict"]["owner"] == "engine"
@@ -566,6 +610,8 @@ try:
           .map(el => el.dataset.paramKey),
         kvmem: [...document.querySelectorAll('#params-kvmem [data-param-key]')]
           .map(el => el.dataset.paramKey),
+        visionValues: ["vision_max_tokens", "vision_threads", "vision_min_tokens"]
+          .map(k => (document.querySelector('#params-more [data-param-key="' + k + '"]') || {}).value),
         moreCaption: document.getElementById('params-more-caption').textContent,
         kvHint: document.getElementById('params-kvmem-hint').textContent,
       };
@@ -576,14 +622,34 @@ try:
     assert kv_state["tabLabel"] == "kvmem参数", kv_state
     for key in ("max_context", "window", "lookup", "no_draft", "kv", "layer_split", "threads"):
         assert key in kv_state["native"], (key, kv_state["native"])
+    for key in ("vision_threads", "vision_max_tokens", "vision_min_tokens"):
+        assert key in kv_state["native"], (key, kv_state["native"])
+    assert kv_state["visionValues"] == ["2048", "8", "512"], kv_state["visionValues"]
     for key in ("kvmem_budget", "kvmem_block_tokens", "kvmem_sessions", "kvmem_mtp"):
         assert key in kv_state["kvmem"], (key, kv_state["kvmem"])
-    for key in ("max_context", "no_draft", "threads"):
+    for key in ("max_context", "no_draft", "threads", "vision_max_tokens"):
         assert key not in kv_state["kvmem"], (key, kv_state["kvmem"])
     assert "strata-poly" in kv_state["moreCaption"], kv_state
     assert "--kvmem-*" in kv_state["kvHint"], kv_state
+    click('[data-param-tab="more"]')
+    shot("kvmem-more-vision-desktop.png")
     click("#params-kvmem-tab")
     shot("kvmem-tabs-desktop.png")
+    click("#params-cancel")
+    wait("return !document.getElementById('params-dialog').open")
+
+    # A text-only polystrata model has no vision object: the vision specs are
+    # not rendered in its "更多参数" tab.
+    open_model("kv-text")
+    kv_text_state = js("""
+      return {
+        native: [...document.querySelectorAll('#params-more [data-param-key]')]
+          .map(el => el.dataset.paramKey),
+      };
+    """)
+    assert "max_context" in kv_text_state["native"], kv_text_state
+    assert "vision_max_tokens" not in kv_text_state["native"], kv_text_state
+    assert "vision_threads" not in kv_text_state["native"], kv_text_state
     click("#params-cancel")
     wait("return !document.getElementById('params-dialog').open")
 
@@ -719,6 +785,7 @@ try:
     assert kv_add["tabHidden"] is False and kv_add["tabLabel"] == "kvmem参数", kv_add
     assert kv_add["count"] == "22", kv_add
     assert "max_context" in kv_add["native"] and "no_draft" in kv_add["native"], kv_add
+    assert "vision_max_tokens" in kv_add["native"], kv_add
     assert "kvmem_budget" in kv_add["kvmem"] and "max_context" not in kv_add["kvmem"], kv_add
     assert kv_add["engineParamsHidden"] is True, kv_add
     assert "strata-poly" in kv_add["caption"], kv_add
