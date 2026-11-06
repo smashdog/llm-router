@@ -601,7 +601,7 @@
   }
   .add-fields textarea { resize: vertical; min-height: 78px; line-height: 1.5; }
   .add-fields .add-name-field, .add-fields .span-all { grid-column: 1 / -1; }
-  #add-model, #add-vision { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  #add-model, #add-vision, #add-draft { font-family: ui-monospace, Menlo, Consolas, monospace; }
   .add-fields input:focus, .add-fields textarea:focus { border-color: rgba(94,234,212,.45); }
   .device-row {
     display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
@@ -999,6 +999,8 @@
           <textarea id="add-model" rows="3" spellcheck="false" placeholder="/path/to/model.gguf"></textarea></label>
         <label id="add-vision-field">视觉路径 <span class="name">mmproj .gguf，选填</span>
           <textarea id="add-vision" rows="3" spellcheck="false" placeholder="/path/to/mmproj.gguf（留空表示无视觉）"></textarea></label>
+        <label id="add-draft-field" class="span-all" hidden>draft 路径 <span class="name">MTP .gguf 或已转换运行时目录，选填</span>
+          <textarea id="add-draft" rows="3" spellcheck="false" placeholder="/path/to/mtp-...-draft.gguf（留空沿用模板的 --mtp；.gguf 会转换成同名 .rt）"></textarea></label>
         <label class="add-name-field">模型名称 <span class="name">选填</span>
           <input id="add-name" type="text" spellcheck="false" placeholder="如 Ornith 1.5；留空使用模型文件名" /></label>
       </div>
@@ -3446,6 +3448,8 @@
         ? "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf"
         : "/path/to/model.gguf";
     $("add-vision-field").hidden = ninfer;
+    $("add-draft-field").hidden = !strata;
+    if (!strata) $("add-draft").value = "";
     $("add-model-field").classList.toggle("span-all", ninfer);
     $("add-vision-enabled-field").hidden = !ninfer;
     const enabledBox = $("add-vision-enabled");
@@ -3475,7 +3479,7 @@
       : kvllama
         ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；上下文与 KV 精度在“基本参数”设置；KVMem 预算等扩展在“kvmem参数”，其余 llama-kvmem-server 自身参数在“更多参数”按需覆盖模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
         : strata
-          ? "Strata 单模型模式：每份配置服务一个 GGUF，packs、专家缓存等参数复制选定模板；上下文（--max-context）、KV 精度（--kv）、MTP/查表与视觉参数在“更多参数”按需覆盖模板；模型路径会写入 --native，PLE 与主模型相同时一并替换；上下文留空时按 GGUF 上限收敛；视觉可选 CPU/GPU（模板默认跟随）；视觉组参数只有填写 mmproj 时才生效。"
+          ? "Strata 单模型模式：每份配置服务一个 GGUF，packs、专家缓存等参数复制选定模板；上下文（--max-context）、KV 精度（--kv）、MTP/查表与视觉参数在“更多参数”按需覆盖模板；模型路径会写入 --native，PLE 与主模型相同时一并替换；上下文留空时按 GGUF 上限收敛；视觉可选 CPU/GPU（模板默认跟随）；视觉组参数只有填写 mmproj 时才生效；draft 路径填写 MTP .gguf 时转换为同名 .rt 并写入 --mtp（drafting=mtp），填写 .rt 目录则直接复用。"
           : kv
             ? "strata-poly 单模型模式：上下文（--max-context）等引擎自身参数在“更多参数”，KVMem 预算/检索/SSD 等扩展在“kvmem参数”；上下文留空读取 GGUF 上限，GGUF 缺少该字段时必须手动填写；视觉可选 CPU/GPU（默认 CPU）；采样默认来自 ornith 模板，MTP 留空时按模型 GGUF 自动判断。"
             : "上下文留空读取 GGUF 上限，可填更小值（GGUF 无该字段时必须填写）；KV 精度默认 K/V 均为 q8_0，可分别选择；视觉可选 CPU/GPU（默认 CPU）；其它预设参数继承 models.ini 的 [*] 与 LFM3-Omni-2B 默认，采样默认来自 LFM3-Omni-2B。";
@@ -3650,6 +3654,9 @@
       vision_device: (document.querySelector('input[name="add-vision-device"]:checked') || {}).value || "cpu",
       smoke: $("add-smoke").checked,
     };
+    if (engineInfo.kind === "strata") {
+      body.draft = $("add-draft").value.trim() || null;
+    }
     if (engineInfo.kind === "ninfer") {
       if (!/\.ninfer$/i.test(model)) {
         showAddError("NInfer 模型路径必须是 .ninfer 文件。");

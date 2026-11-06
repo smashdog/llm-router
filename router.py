@@ -8997,6 +8997,12 @@ class Gateway:
         if not isinstance(vision_device, str) or vision_device.strip().lower() not in ("cpu", "gpu"):
             raise BadRequest('vision_device must be "cpu" or "gpu"')
         vision_gpu = vision_device.strip().lower() == "gpu"
+        draft = payload.get("draft")
+        if draft is not None and not isinstance(draft, str):
+            raise BadRequest("draft must be a path or null")
+        draft_path = (draft or "").strip() or None
+        if draft_path and kind != "strata_dir":
+            raise BadRequest("只有 Strata 引擎支持 draft（MTP）路径")
         context_length = payload.get("context_length")
         if context_length is not None:
             if isinstance(context_length, bool) or not isinstance(context_length, int):
@@ -9073,12 +9079,20 @@ class Gateway:
             steps[2]["label"] = "选择 KV 精度、MTP 与 KVMem 参数"
         if kind == "strata_dir":
             steps[2]["label"] = "复制模板并应用 Strata 参数"
+            if draft_path:
+                steps.insert(3, {
+                    "key": "draft",
+                    "label": "准备 MTP draft",
+                    "status": "pending",
+                    "detail": "",
+                })
         job = {
             "id": uuid.uuid4().hex[:12],
             "kind": "add",
             "engine": engine_id,
             "model": model.strip(),
             "vision": vision_path,
+            "draft": draft_path,
             "vision_enabled": vision_enabled,
             "vision_device": "gpu" if vision_gpu else "cpu",
             "context_length": context_length,
@@ -9106,7 +9120,8 @@ class Gateway:
             target=self._model_add_worker,
             args=(job, engine_id, kind, Path(model.strip()).expanduser(),
                   Path(vision_path).expanduser() if vision_path else None, smoke,
-                  vision_gpu, vision_enabled),
+                  vision_gpu, vision_enabled,
+                  Path(draft_path).expanduser() if draft_path else None),
             name=f"model-add-{job['id']}",
             daemon=True,
         )
@@ -9701,6 +9716,46 @@ class Gateway:
                 job["status"] = job.get("status") if job.get("status") != "running" else "failed"
                 job["finished_at"] = job.get("finished_at") or iso_now()
 
+    def _strata_prepare_draft(self, engine_id: str, draft: Path) -> tuple[Path, bool]:
+        """Turn a draft GGUF (or an already-converted runtime dir) into the
+        engine's MTP runtime directory.  Returns (dir, reused)."""
+        if draft.is_dir():
+            return draft, True
+        engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
+        command = engine_cfg.get("command")
+        python = str(command[0]) if isinstance(command, list) and command else sys.executable
+        cwd = Path(str(engine_cfg.get("cwd") or "")).expanduser()
+        script = Path(__file__).resolve().parent / "tools" / "strata_mtp_convert.py"
+        if not script.is_file():
+            raise BadRequest(f"缺少 draft 转换脚本：{script}")
+        runtime = draft.with_suffix(".rt")
+        complete = ("dense.txt", "dense.bin", "experts.bin")
+        if all((runtime / name).is_file() for name in complete):
+            return runtime, True
+        env = dict(os.environ)
+        slot_env = engine_cfg.get("env")
+        if isinstance(slot_env, dict):
+            env.update({str(key): str(value) for key, value in slot_env.items()})
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        proc = subprocess.run(
+            [python, str(script), "--strata", str(cwd), "--gguf", str(draft),
+             "--out", str(runtime)],
+            cwd=str(cwd) if cwd.is_dir() else None,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        if proc.returncode != 0:
+            lines = [line for line in (proc.stderr or proc.stdout or "").strip().splitlines()
+                     if line.strip()]
+            detail = lines[-1] if lines else f"退出码 {proc.returncode}"
+            raise BadRequest(f"draft 转换失败：{detail}")
+        missing = [name for name in complete if not (runtime / name).is_file()]
+        if missing:
+            raise BadRequest(f"draft 转换未生成 {', '.join(missing)}：{runtime}")
+        return runtime, False
+
     def _model_add_strata_worker(
         self,
         job: dict[str, Any],
@@ -9709,6 +9764,7 @@ class Gateway:
         vision: Path | None,
         smoke: bool,
         vision_gpu: bool,
+        draft: Path | None = None,
     ) -> None:
         """Add a model to the standalone Strata server.
 
@@ -9751,12 +9807,29 @@ class Gateway:
                             "status": "pending",
                             "detail": "",
                         })
+            if draft is not None:
+                if draft.is_dir():
+                    missing = [
+                        name for name in ("dense.txt", "dense.bin", "experts.bin")
+                        if not (draft / name).is_file()
+                    ]
+                    if missing:
+                        raise BadRequest(
+                            f"draft 运行时目录缺少 {', '.join(missing)}：{draft}"
+                        )
+                elif draft.is_file():
+                    if draft.suffix.lower() != ".gguf":
+                        raise BadRequest("draft 必须是 .gguf 文件或已转换的运行时目录")
+                else:
+                    raise BadRequest(f"draft 路径不存在：{draft}")
             path_note = (
                 f"目录 {model.parent} → {model.name}" if source_is_dir else str(model)
             )
             self._job_step(
                 job, "paths", "ok",
-                path_note + (f"；视觉 {vision.name}" if vision is not None else "；无视觉"),
+                path_note
+                + (f"；视觉 {vision.name}" if vision is not None else "；无视觉")
+                + (f"；draft {draft.name}" if draft is not None else ""),
             )
 
             self._job_step(job, "metadata", "running")
@@ -9828,9 +9901,28 @@ class Gateway:
                     args.append("--vision")
             else:
                 args = _config_switch_remove(args, "--vision")
+            draft_rt: Path | None = None
+            if draft is not None:
+                self._job_step(
+                    job, "draft", "running",
+                    f"正在转换 {draft.name}…" if draft.is_file() else str(draft),
+                )
+                draft_rt, reused = self._strata_prepare_draft(engine_id, draft)
+                self._job_step(
+                    job, "draft", "ok",
+                    f"{'复用' if reused else '已生成'} {draft_rt}",
+                )
+            if draft_rt is not None:
+                # The form's draft path wins over the template's --mtp; the
+                # launcher then keeps the MTP and drops any DFlash2 flags.
+                args = _config_arg_set(args, "--mtp", str(draft_rt))
+                new_cfg["drafting"] = "mtp"
+                new_cfg["mtp"] = True
             # The model path, context clamp and --vision edits must win over
             # the template's user_args as well.
             touched = {"--native", "--model", "--ple-gguf", "--max-context", "--ctx", "--vision"}
+            if draft_rt is not None:
+                touched.add("--mtp")
             user = new_cfg.get("user_args")
             if isinstance(user, list):
                 remaining = _strata_strip_user_flags(user, touched)
@@ -9966,6 +10058,7 @@ class Gateway:
         smoke: bool,
         vision_gpu: bool = False,
         vision_enabled: bool | None = None,
+        draft: Path | None = None,
     ) -> None:
         if kind == "ninfer_dir":
             self._model_add_ninfer_worker(
@@ -9979,7 +10072,7 @@ class Gateway:
             return
         if kind == "strata_dir":
             self._model_add_strata_worker(
-                job, engine_id, model, vision, smoke, vision_gpu
+                job, engine_id, model, vision, smoke, vision_gpu, draft
             )
             return
         engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
