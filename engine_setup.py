@@ -1473,6 +1473,48 @@ class EngineSetup:
             return root / "backends" / "polystrata", root / "backends" / "polystrata" / "requirements.txt"
         return None
 
+    def _ensure_pip_socks(self, job: dict[str, Any], python: Path, env: dict[str, str]) -> None:
+        """Make PySocks visible to a fresh engine venv before pip runs.
+
+        pip only understands SOCKS proxies when the ``socks`` module is
+        importable in its own interpreter.  The router environment already has
+        it (requirements.txt pins PySocks), but ``python -m venv`` starts from
+        an empty site-packages, so copy that single pure-Python module over.
+        """
+        url = proxy_url(self.proxy_cfg()) if job["use_proxy"] else ""
+        if not str(url or "").lower().startswith("socks"):
+            return
+        probe = subprocess.run(
+            [str(python), "-c", "import socks"],
+            capture_output=True, env=env,
+        )
+        if probe.returncode == 0:
+            return
+        try:
+            import socks as parent_socks
+        except ImportError:
+            parent_socks = None
+        source = Path(str(getattr(parent_socks, "__file__", "") or ""))
+        if not source.is_file():
+            raise SetupError(
+                "当前代理是 SOCKS5，但运行 llm-router 的 Python 环境缺少 PySocks，"
+                "pip 无法通过 SOCKS 安装依赖。请在该环境安装 PySocks"
+                "（路由器安装脚本已包含）或在管理页改用 HTTP 代理"
+            )
+        purelib = subprocess.run(
+            [str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            capture_output=True, text=True, env=env,
+        )
+        if purelib.returncode != 0 or not purelib.stdout.strip():
+            raise SetupError("无法定位引擎虚拟环境的 site-packages，不能为 pip 准备 SOCKS 支持")
+        target = Path(purelib.stdout.strip()) / source.name
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        except OSError as exc:
+            raise SetupError(f"无法为 pip 复制 PySocks：{exc}") from exc
+        job["detail"] = f"已为 pip 准备 SOCKS 支持：{target}"
+
     def _python_deps(self, job: dict[str, Any], engine_id: str, root: Path) -> None:
         self._step(job, "deps", "running")
         target = self._requirements(engine_id, root)
@@ -1488,7 +1530,12 @@ class EngineSetup:
         env = self._env(None, job["use_proxy"])
         if not python.is_file():
             self._run(job, [sys.executable, "-m", "venv", str(venv)], env=env, step="venv")
-        self._run(job, [str(python), "-m", "pip", "install", "--upgrade", "pip"], env=env, step="pip")
+        self._ensure_pip_socks(job, python, env)
+        # Keep the pip that ensurepip installed with this interpreter.  Upgrading
+        # it used to be harmless, but pip 26.3 vendors urllib3 2.8 whose pool key
+        # rejects the proxy_ssl_context that the SOCKS manager passes, so every
+        # install through a SOCKS proxy dies with a PoolKey TypeError.  The
+        # bundled pip is new enough to read current wheel metadata.
         self._run(job, [str(python), "-m", "pip", "install", "-r", str(requirements)], cwd=cwd, env=env, step="pip")
         self._step(job, "deps", "ok", str(requirements))
 
