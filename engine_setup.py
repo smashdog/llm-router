@@ -241,7 +241,10 @@ ENGINE_CATALOG: dict[str, dict[str, Any]] = {
     "kvmem": {
         "label": "KVMem",
         "repo": "https://github.com/kvmem/kvmem",
-        "needs": ("llama",),
+        # The three backends are KVMem submodules (pinned and patched by the
+        # KVMem repo).  They are independent of the standalone llama.cpp and
+        # Strata installs and must not require either one to be present.
+        "needs": (),
         "submodules": True,
         "artifacts": {
             "cuda": (
