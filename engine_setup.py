@@ -811,6 +811,7 @@ class EngineSetup:
         persist: Callable[[], None] | None = None,
         proxy_cfg: Callable[[], dict[str, Any] | None] | None = None,
         stop_engine: Callable[[], bool] | None = None,
+        on_engine_ready: Callable[[str], Any] | None = None,
     ):
         self.base_dir = Path(base_dir)
         self.log = log
@@ -818,6 +819,7 @@ class EngineSetup:
         self.persist = persist
         self.proxy_cfg = proxy_cfg or (lambda: None)
         self.stop_engine = stop_engine
+        self.on_engine_ready = on_engine_ready
         self.dir_engine = self.base_dir / "engine"
         self.dir_bin = self.base_dir / "bin"
         self.dir_config = self.base_dir / "config"
@@ -1191,6 +1193,17 @@ class EngineSetup:
                 job["status"] = "ok"
                 job["percent"] = 100
                 job["detail"] = job["detail"] or "完成"
+                if (
+                    self.on_engine_ready is not None
+                    and job["action"] in ("install", "update")
+                ):
+                    try:
+                        self.on_engine_ready(job["engine"])
+                    except Exception:
+                        self.log.exception(
+                            "cannot register managed engine %s after setup",
+                            job["engine"],
+                        )
         except SetupError as exc:
             if job["_cancel"].is_set():
                 job["status"] = "cancelled"

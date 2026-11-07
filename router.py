@@ -5854,6 +5854,49 @@ def materialize_engine_paths(pending: list[tuple[str, Path]]) -> list[str]:
     return notes
 
 
+AUTO_ENGINE_DATA_KINDS = {
+    "llama": "llama_preset",
+    "kvmem": "kvmem_meta",
+    "kvmem_llama": "kvmem_llama_template",
+}
+
+
+def managed_engine_config(base_dir: Path, engine_id: str) -> dict[str, Any] | None:
+    """Runtime config for an engine installed by the setup subsystem.
+
+    The managed layout (``bin/``, ``engine/``, ``config/``) is the source of
+    truth: once the executable and working directory exist there is nothing
+    left for the operator to fill in, so the slot is activated automatically.
+    A partial install (missing binary or a Strata/NInfer template that cannot
+    be guessed) returns ``None`` and stays unconfigured.
+    """
+    fields = engine_slot_defaults(base_dir, engine_id)
+    if not fields:
+        return None
+    binary = Path(fields.get("binary") or "")
+    cwd = Path(fields.get("cwd") or "")
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        return None
+    if not cwd.is_dir():
+        return None
+    model_key = str(ENGINE_SLOTS[engine_id]["model_key"])
+    key_path = Path(fields[model_key]) if fields.get(model_key) else None
+    data_kind = AUTO_ENGINE_DATA_KINDS.get(engine_id)
+    if key_path is not None and not key_path.is_file() and data_kind is None:
+        return None
+    pending: list[tuple[str, Path]] = []
+    models_dir = Path(fields["models_dir"])
+    if not models_dir.is_dir():
+        pending.append(("models_dir", models_dir))
+    if key_path is not None and not key_path.is_file() and data_kind:
+        pending.append((data_kind, key_path))
+    try:
+        materialize_engine_paths(pending)
+        return build_engine_cfg(engine_id, fields, None)
+    except (BadRequest, KeyError, ValueError):
+        return None
+
+
 def _probe_tail(text: str, limit: int = 600) -> str:
     compact = " ".join(text.split())
     return compact[-limit:]
@@ -7596,10 +7639,61 @@ class Gateway:
             persist=self._persist_config,
             proxy_cfg=self._setup_proxy,
             stop_engine=self._stop_engine_for_setup,
+            on_engine_ready=self.reconcile_managed_engines,
         )
         self.smoke_image_path = resolve_path(
             base_dir, config.get("smoke_image") or "smoke.png"
         )
+        # Engines installed by the setup subsystem need no path form: activate
+        # every complete managed installation before the first model listing.
+        self.reconcile_managed_engines()
+
+    def reconcile_managed_engines(self, engine_id: str | None = None) -> list[str]:
+        """Create runtime config for complete managed engine installations.
+
+        Called at startup and after an install/update job finishes.  Existing
+        entries are never rewritten: a hand-written config keeps its custom
+        command line, and only missing slots are filled from the managed layout.
+        """
+        engines_cfg = self.config.get("engines")
+        if not isinstance(engines_cfg, dict):
+            engines_cfg = {}
+            self.config["engines"] = engines_cfg
+        slots = [engine_id] if engine_id else list(ENGINE_SLOT_ORDER)
+        created: list[str] = []
+        for slot in slots:
+            if slot not in ENGINE_SLOTS or isinstance(engines_cfg.get(slot), dict):
+                continue
+            try:
+                cfg = managed_engine_config(self.base_dir, slot)
+            except Exception:
+                self.log.exception("cannot auto-configure managed engine %s", slot)
+                continue
+            if cfg is None:
+                continue
+            with self._config_lock:
+                engines_cfg[slot] = cfg
+            if slot not in self.engines:
+                self.engines[slot] = EngineManager(
+                    slot,
+                    cfg,
+                    self.base_dir,
+                    self.timeouts,
+                    self.state_path,
+                    self.log,
+                    runtime_lib_dirs=toolchain_runtime_libs(self.base_dir),
+                )
+            created.append(slot)
+        if created:
+            try:
+                self._persist_config()
+            except OSError:
+                self.log.exception("cannot persist auto-configured engines")
+            self.registry.reload()
+            self.log.info(
+                "auto-configured managed engines: %s", ", ".join(created)
+            )
+        return created
 
     def _load_auth_key(self) -> str:
         """One client-facing key for every model.  The value may live in a separate file."""
