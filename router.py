@@ -5537,15 +5537,13 @@ KV_PROBE_MARKER = "LLM_ROUTER_KVPROBE_42"
 
 
 def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
-    """Conventional layout, used to prefill a new engine.
+    """Conventional managed layout used to prefill a new engine.
 
-    When the setup subsystem has produced binaries in ``bin/`` the defaults
-    follow that layout (bin/config/engine); otherwise the historical sibling
-    directories are suggested.
-    """
-    root = base_dir.parent
+    Binaries live in ``bin/``, sources in ``engine/`` and generated configs in
+    ``config/``; the setup subsystem installs into exactly these paths."""
     bin_dir = base_dir / "bin"
     config_dir = base_dir / "config"
+    engine_root = base_dir / "engine"
 
     def provisioned(name: str) -> str:
         for candidate in (
@@ -5555,101 +5553,44 @@ def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
         ):
             if candidate.is_file():
                 return str(candidate)
-        return ""
+        return str(bin_dir / name)
 
-    if engine_id == "llama" and provisioned("llama-server"):
-        engine_root = base_dir / "engine" / "llama.cpp"
+    if engine_id == "llama":
         return {
             "binary": provisioned("llama-server"),
-            "cwd": str(engine_root),
+            "cwd": str(engine_root / "llama.cpp"),
             "models_dir": str(base_dir / "models"),
             "preset": str(config_dir / "llama.cpp" / "model.ini"),
         }
     if engine_id == "strata":
-        engine_root = base_dir / "engine" / "Strata"
-        python = engine_root / ".venv" / "bin" / "python"
-        if provisioned("strata") and python.is_file():
-            return {
-                "binary": str(python),
-                "cwd": str(engine_root),
-                "models_dir": str(config_dir / "strata"),
-                "template": str(config_dir / "strata" / "strata-template.json"),
-            }
-    if engine_id == "kvmem":
-        engine_root = base_dir / "engine" / "kvmem"
-        python = engine_root / ".venv" / "bin" / "python"
-        if provisioned("kvmem-strata-poly") and python.is_file():
-            return {
-                "binary": str(python),
-                "cwd": str(engine_root / "backends" / "polystrata"),
-                "models_dir": str(config_dir / "polystrata"),
-                "meta": str(config_dir / "polystrata" / "models.json"),
-            }
-    if engine_id == "ninfer" and provisioned("kvmem-ninfer-serve"):
-        engine_root = base_dir / "engine" / "kvmem"
-        return {
-            "binary": provisioned("kvmem-ninfer-serve"),
-            "cwd": str(engine_root),
-            "models_dir": str(config_dir / "ninfer"),
-            "template": str(config_dir / "ninfer" / "ninfer.template.json"),
-        }
-    if engine_id == "kvmem_llama" and provisioned("kvmem-llama-server"):
-        engine_root = base_dir / "engine" / "kvmem"
-        return {
-            "binary": provisioned("kvmem-llama-server"),
-            "cwd": str(engine_root),
-            "models_dir": str(config_dir / "kvmem-llama"),
-            "template": str(config_dir / "kvmem-llama" / "kvmem-llama.template.json"),
-        }
-    if engine_id == "llama":
-        cwd = root / "llama.cpp"
-        return {
-            "binary": str(cwd / "build" / "bin" / "llama-server"),
-            "cwd": str(cwd),
-            "models_dir": str(base_dir / "models"),
-            "preset": str(base_dir / "models.ini"),
-        }
-    if engine_id == "strata":
-        home = root / "Strata"
-        models_dir = home / "config"
+        home = engine_root / "Strata"
         return {
             "binary": str(home / ".venv" / "bin" / "python"),
             "cwd": str(home),
-            "models_dir": str(models_dir),
-            "template": str(models_dir / "strata-gyro-gyro-m.json"),
+            "models_dir": str(config_dir / "strata"),
+            "template": str(config_dir / "strata" / "strata-template.json"),
         }
     if engine_id == "kvmem":
-        home = root / "kvmem"
-        models_dir = home / "local_config"
+        home = engine_root / "kvmem"
         return {
             "binary": str(home / ".venv" / "bin" / "python"),
             "cwd": str(home / "backends" / "polystrata"),
-            "models_dir": str(models_dir),
-            "meta": str(models_dir / "models.json"),
+            "models_dir": str(config_dir / "polystrata"),
+            "meta": str(config_dir / "polystrata" / "models.json"),
         }
     if engine_id == "ninfer":
-        home = root / "kvmem"
-        models_dir = home / "local_config"
         return {
-            "binary": str(root / "build-ninfer" / "apps" / "ninfer-serve"),
-            "cwd": str(home),
-            "models_dir": str(models_dir),
-            "template": str(models_dir / "ninfer.template.json"),
+            "binary": provisioned("kvmem-ninfer-serve"),
+            "cwd": str(engine_root / "kvmem"),
+            "models_dir": str(config_dir / "ninfer"),
+            "template": str(config_dir / "ninfer" / "ninfer.template.json"),
         }
     if engine_id == "kvmem_llama":
-        home = root / "kvmem-llamacpp090"
-        binary = home / "build" / "bin" / "llama-kvmem-server"
-        for sub in ("build", "build-hip", "build-cuda", "build-vulkan", "build-rocm"):
-            candidate = home / sub / "bin" / "llama-kvmem-server"
-            if candidate.is_file():
-                binary = candidate
-                break
-        models_dir = base_dir / "models-kvmem-llama"
         return {
-            "binary": str(binary),
-            "cwd": str(home),
-            "models_dir": str(models_dir),
-            "template": str(models_dir / "kvmem-llama.template.json"),
+            "binary": provisioned("kvmem-llama-server"),
+            "cwd": str(engine_root / "kvmem"),
+            "models_dir": str(config_dir / "kvmem-llama"),
+            "template": str(config_dir / "kvmem-llama" / "kvmem-llama.template.json"),
         }
     return {}
 
