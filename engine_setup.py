@@ -1002,6 +1002,13 @@ class EngineSetup:
             notes.append("源码目录有未提交的修改，更新会被拒绝")
         if repo["exists"] and repo["remote_ok"] and not variants:
             notes.append("未配置可用的 CUDA / ROCm 工具链，无法编译")
+        if engine_id == "kvmem" and "cuda" not in variants:
+            has_nvidia = any(item.get("vendor") == "nvidia" for item in detect_gpus())
+            notes.append(
+                "未检测到可用的 CUDA 工具链，NInfer（仅支持 CUDA）不会编译"
+                if has_nvidia
+                else "本机没有 NVIDIA 显卡，NInfer（仅支持 CUDA）不参与编译"
+            )
         deps = []
         for dep in spec["needs"]:
             dep_repo = self._repo_state(dep)
@@ -1711,9 +1718,11 @@ class EngineSetup:
                      "-DSTRATA_PREFILL_MMQ=ON",
                      *self._hip_compiler(tool_root),
                      f"-DCMAKE_HIP_ARCHITECTURES={self._amd_arch(detect_gpus())}"]
+        job["detail"] = f"编译 PolyStrata（{VARIANT_LABEL[variant]}）"
         self._run(job, poly, env=env, step=step)
         self._run(job, [cmake, "--build", str(poly_dir), "--config", "Release", "--parallel", jobs, "--target", "strata-poly"], env=env, step=step)
         if variant == "cuda":
+            job["detail"] = "编译 NInfer（CUDA）"
             ninfer_dir = backends / "ninfer" / "build-cuda"
             self._ensure_ninfer_tools(job, root, env, step)
             media_dir = backends / "ninfer" / "third_party" / "media-sources"
@@ -1732,6 +1741,7 @@ class EngineSetup:
             self._run(job, ninfer, env=env, step=step)
             self._run(job, [cmake, "--build", str(ninfer_dir), "--config", "Release", "--parallel", jobs, "--target", "ninfer-serve"], env=env, step=step)
         # llama-kvmem-server (the KVMem llama.cpp integration)
+        job["detail"] = f"编译 llama.cpp KVMem 后端（{VARIANT_LABEL[variant]}）"
         build_dir = root / ("build-cuda" if variant == "cuda" else "build-rocm")
         if variant == "cuda":
             script = root / "scripts" / "build-cuda.sh"

@@ -5860,6 +5860,13 @@ AUTO_ENGINE_DATA_KINDS = {
     "kvmem_llama": "kvmem_llama_template",
 }
 
+# One setup job installs a product, but KVMem ships three independent workers.
+# Activate every sibling whose binary/template the install produced instead of
+# leaving them for the next startup.
+AUTO_ENGINE_SIBLINGS = {
+    "kvmem": ("kvmem", "kvmem_llama", "ninfer"),
+}
+
 
 def managed_engine_config(base_dir: Path, engine_id: str) -> dict[str, Any] | None:
     """Runtime config for an engine installed by the setup subsystem.
@@ -7659,7 +7666,11 @@ class Gateway:
         if not isinstance(engines_cfg, dict):
             engines_cfg = {}
             self.config["engines"] = engines_cfg
-        slots = [engine_id] if engine_id else list(ENGINE_SLOT_ORDER)
+        slots = (
+            list(AUTO_ENGINE_SIBLINGS.get(engine_id, (engine_id,)))
+            if engine_id
+            else list(ENGINE_SLOT_ORDER)
+        )
         created: list[str] = []
         for slot in slots:
             if slot not in ENGINE_SLOTS or isinstance(engines_cfg.get(slot), dict):
