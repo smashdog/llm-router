@@ -813,7 +813,7 @@
           <div class="provision" id="engine-provision">
             <div class="provision-head">
               <h3>编译工具链</h3>
-              <span class="hint">只显示本机存在的显卡对应的工具链；低于最低版本会拒绝保存。</span>
+              <span class="hint">只显示本机存在的显卡对应的工具链；未安装或低于最低版本时按提示重新安装。</span>
             </div>
             <div class="toolchain-rows" id="toolchain-rows">
               <div class="empty">正在检测显卡与工具链…</div>
@@ -2659,10 +2659,15 @@
     const key = `toolchain:${kind}`;
     const job = state.setupJobs[key];
     const running = !!(job && job.status === "running");
+    const installed = !!(report.installed || report.ok);
     const tag = report.ok
       ? `<span class="tag green">${label} ${esc(report.version)}</span>`
-      : '<span class="tag amber">未就绪</span>';
-    const value = report.resolved_path || report.path || "";
+      : installed
+        ? `<span class="tag amber">${label}${report.version ? ` ${esc(report.version)}` : ""} 不满足</span>`
+        : '<span class="tag amber">未安装</span>';
+    const location = report.ok
+      ? `<p class="provision-meta">位置：${esc(report.resolved_path || report.path || "")}</p>`
+      : "";
     const download = report.ok ? "" : (catalog.length ? `
       <div class="toolchain-download">
         <label>版本
@@ -2671,19 +2676,15 @@
           </select>
         </label>
         ${setupProxyBox(key, data, running)}
-        <button class="btn primary" type="button" data-setup-action="toolchain" data-kind="${kind}" ${running ? "disabled" : ""}>下载并安装</button>
-      </div>` : `<p class="provision-warn">当前 GPU 架构${data.rocm_family ? `（${esc(data.rocm_family)}）` : ""}没有可下载的 ROCm 预编译包，请手动安装后填写路径</p>`);
+        <button class="btn primary" type="button" data-setup-action="toolchain" data-kind="${kind}" ${running ? "disabled" : ""}>${installed ? "重新安装" : "下载并安装"}</button>
+      </div>` : `<p class="provision-warn">当前 GPU 架构${data.rocm_family ? `（${esc(data.rocm_family)}）` : ""}没有可下载的 ROCm 预编译包，请手动安装符合最低要求的版本</p>`);
     return `<article class="toolchain-row">
       <div class="toolchain-head"><h4>${label}</h4>${tag}
         <span class="hint">最低 ${esc((data.minimum || {})[kind] || "")}</span></div>
-      <div class="toolchain-controls">
-        <input type="text" spellcheck="false" data-toolchain-path="${kind}"
-          value="${esc(value)}" placeholder="${esc((data.detected || {})[kind] || (kind === "cuda" ? "/usr/local/cuda" : "/opt/rocm"))}"
-          ${running ? "disabled" : ""}/>
-        <button class="btn" type="button" data-setup-action="save-path" data-kind="${kind}" ${running ? "disabled" : ""}>保存路径</button>
-      </div>
-      ${report.ok ? "" : `<p class="provision-warn">${esc(report.reason || "路径不可用")}</p>`}
+      ${location}
+      ${report.ok ? "" : `<p class="provision-warn">${esc(report.reason || "未检测到可用安装")}</p>`}
       ${download}
+      ${!report.ok && kind === "rocm" && catalog.length ? '<p class="provision-meta">AMD 从 7.10 起才提供免安装 tarball；6.x 只有发行版安装包，需要手动安装到系统默认位置。</p>' : ""}
       ${setupJobBlock(key)}
     </article>`;
   }
@@ -2741,7 +2742,7 @@
       return;
     }
     const html = [toolchainRow("cuda", data), toolchainRow("rocm", data)].filter(Boolean).join("");
-    rows.innerHTML = html || '<div class="empty">未检测到 NVIDIA 或 AMD 显卡，无需配置编译工具链。</div>';
+    rows.innerHTML = html || '<div class="empty">未检测到 NVIDIA 或 AMD 显卡，无需安装编译工具链。</div>';
     list.innerHTML = (data.engines || []).map((item) => engineSetupCard(item, data)).join("")
       || '<div class="empty">没有引擎</div>';
   }
@@ -2806,21 +2807,6 @@
     try {
       await api("/router/setup/job/cancel", { method: "POST", body: JSON.stringify({ id: jobId }) });
       toast("正在取消安装…", "");
-    } catch (error) {
-      toast(error.message, "bad");
-    }
-  }
-
-  async function saveToolchainPath(kind) {
-    const input = document.querySelector(`input[data-toolchain-path="${kind}"]`);
-    if (!input) return;
-    const body = kind === "cuda" ? { cuda_path: input.value.trim() } : { rocm_path: input.value.trim() };
-    try {
-      const payload = await api("/router/setup/paths", { method: "POST", body: JSON.stringify(body) });
-      state.setup = payload;
-      renderSetup();
-      toast(`${kind === "cuda" ? "CUDA" : "ROCm"} 路径已保存`, "ok");
-      loadEnginePaths();
     } catch (error) {
       toast(error.message, "bad");
     }
@@ -4217,9 +4203,7 @@
     const button = event.target.closest("button[data-setup-action]");
     if (!button || button.disabled) return;
     const action = button.dataset.setupAction;
-    if (action === "save-path") {
-      saveToolchainPath(button.dataset.kind).catch((error) => toast(error.message, "bad"));
-    } else if (action === "toolchain") {
+    if (action === "toolchain") {
       installToolchain(button.dataset.kind).catch((error) => toast(error.message, "bad"));
     } else if (action === "engine") {
       startEngineSetup(button.dataset.engine, button.dataset.op || "install", button.dataset.force === "1")

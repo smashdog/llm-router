@@ -62,50 +62,104 @@ CUDA_CATALOG: tuple[dict[str, Any], ...] = (
     },
 )
 
-# TheRock distribution tarballs.  The file-name suffix is not uniform: most
-# families ship -all/-dgpu/-dcgpu builds while a few are published bare, so the
-# exact names from https://repo.amd.com/rocm/tarball/ are listed per family.
-ROCM_TARBALL = "https://repo.amd.com/rocm/tarball/{filename}"
+# TheRock distribution tarballs.  AMD's relocatable packages start at 7.10
+# (TheRock tags therock-7.10 … therock-10.1); ROCm 6.x was only ever shipped as
+# distro packages, so MIN_ROCM stays 6.1 for manually installed toolkits while
+# the download list starts at 7.10.  Channels differ per series: 10.x lives on
+# the stable index, 7.14.x only on the multi-arch index, older 7.x on the
+# legacy tarball index.  The file-name suffix is not uniform (-all/-dgpu/-dcgpu
+# or bare), so the exact names are listed per family.
+ROCM_TARBALL = "https://repo.amd.com/rocm/tarball/"
+ROCM_CHANNELS: dict[str, str] = {
+    "10.1.0": "https://stable.repo.amd.com/rocm/core/tarball/",
+    "10.0.0": "https://stable.repo.amd.com/rocm/core/tarball/",
+    "7.14.1": "https://repo.amd.com/rocm/tarball-multi-arch/",
+    "7.14.0": "https://repo.amd.com/rocm/tarball-multi-arch/",
+}
 
 ROCM_PACKAGES: dict[str, tuple[tuple[str, str], ...]] = {
     "gfx101X": (
         ("7.13.0", "therock-dist-linux-gfx101X-dgpu-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx101X-dgpu-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx101X-dgpu-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx101X-dgpu-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx101X-dgpu-10.1.0.tar.gz"),
     ),
     "gfx103X": (
         ("7.13.0", "therock-dist-linux-gfx103X-all-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx103X-all-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx103X-all-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx103X-all-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx103X-all-10.1.0.tar.gz"),
     ),
     "gfx110X": (
         ("7.10.0", "therock-dist-linux-gfx110X-dgpu-7.10.0.tar.gz"),
         ("7.11.0", "therock-dist-linux-gfx110X-all-7.11.0.tar.gz"),
         ("7.12.0", "therock-dist-linux-gfx110X-all-7.12.0.tar.gz"),
         ("7.13.0", "therock-dist-linux-gfx110X-all-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx110X-all-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx110X-all-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx110X-all-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx110X-all-10.1.0.tar.gz"),
     ),
     "gfx1150": (
         ("7.10.0", "therock-dist-linux-gfx1150-7.10.0.tar.gz"),
         ("7.11.0", "therock-dist-linux-gfx1150-7.11.0.tar.gz"),
         ("7.12.0", "therock-dist-linux-gfx1150-7.12.0.tar.gz"),
         ("7.13.0", "therock-dist-linux-gfx1150-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx1150-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx1150-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx1150-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx1150-10.1.0.tar.gz"),
     ),
     "gfx1151": (
         ("7.10.0", "therock-dist-linux-gfx1151-7.10.0.tar.gz"),
         ("7.11.0", "therock-dist-linux-gfx1151-7.11.0.tar.gz"),
         ("7.12.0", "therock-dist-linux-gfx1151-7.12.0.tar.gz"),
         ("7.13.0", "therock-dist-linux-gfx1151-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx1151-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx1151-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx1151-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx1151-10.1.0.tar.gz"),
     ),
     "gfx1152": (
         ("7.11.0", "therock-dist-linux-gfx1152-7.11.0.tar.gz"),
         ("7.12.0", "therock-dist-linux-gfx1152-7.12.0.tar.gz"),
         ("7.13.0", "therock-dist-linux-gfx1152-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx1152-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx1152-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx1152-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx1152-10.1.0.tar.gz"),
+    ),
+    "gfx1153": (
+        ("7.14.0", "therock-dist-linux-gfx1153-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx1153-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx1153-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx1153-10.1.0.tar.gz"),
     ),
     "gfx120X": (
         ("7.10.0", "therock-dist-linux-gfx120X-all-7.10.0.tar.gz"),
         ("7.11.0", "therock-dist-linux-gfx120X-all-7.11.0.tar.gz"),
         ("7.12.0", "therock-dist-linux-gfx120X-all-7.12.0.tar.gz"),
         ("7.13.0", "therock-dist-linux-gfx120X-all-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx120X-all-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx120X-all-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx120X-all-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx120X-all-10.1.0.tar.gz"),
+    ),
+    "gfx125X": (
+        ("7.14.0", "therock-dist-linux-gfx125X-dcgpu-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx125X-dcgpu-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx125X-dcgpu-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx125X-dcgpu-10.1.0.tar.gz"),
     ),
     "gfx908": (
         ("7.12.0", "therock-dist-linux-gfx908-7.12.0.tar.gz"),
         ("7.13.0", "therock-dist-linux-gfx908-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx908-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx908-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx908-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx908-10.1.0.tar.gz"),
     ),
     "gfx90X": (
         ("7.10.0", "therock-dist-linux-gfx90X-dcgpu-7.10.0.tar.gz"),
@@ -114,18 +168,30 @@ ROCM_PACKAGES: dict[str, tuple[tuple[str, str], ...]] = {
     "gfx90A": (
         ("7.12.0", "therock-dist-linux-gfx90a-7.12.0.tar.gz"),
         ("7.13.0", "therock-dist-linux-gfx90a-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx90a-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx90a-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx90a-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx90a-10.1.0.tar.gz"),
     ),
     "gfx94X": (
         ("7.10.0", "therock-dist-linux-gfx94X-dcgpu-7.10.0.tar.gz"),
         ("7.11.0", "therock-dist-linux-gfx94X-dcgpu-7.11.0.tar.gz"),
         ("7.12.0", "therock-dist-linux-gfx94X-dcgpu-7.12.0.tar.gz"),
         ("7.13.0", "therock-dist-linux-gfx94X-dcgpu-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx94X-dcgpu-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx94X-dcgpu-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx94X-dcgpu-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx94X-dcgpu-10.1.0.tar.gz"),
     ),
     "gfx950": (
         ("7.10.0", "therock-dist-linux-gfx950-dcgpu-7.10.0.tar.gz"),
         ("7.11.0", "therock-dist-linux-gfx950-dcgpu-7.11.0.tar.gz"),
         ("7.12.0", "therock-dist-linux-gfx950-dcgpu-7.12.0.tar.gz"),
         ("7.13.0", "therock-dist-linux-gfx950-dcgpu-7.13.0.tar.gz"),
+        ("7.14.0", "therock-dist-linux-gfx950-dcgpu-7.14.0.tar.gz"),
+        ("7.14.1", "therock-dist-linux-gfx950-dcgpu-7.14.1.tar.gz"),
+        ("10.0.0", "therock-dist-linux-gfx950-dcgpu-10.0.0.tar.gz"),
+        ("10.1.0", "therock-dist-linux-gfx950-dcgpu-10.1.0.tar.gz"),
     ),
 }
 
@@ -135,10 +201,12 @@ NASM_VERSION = "2.16.03"
 NASM_URL = f"https://www.nasm.us/pub/nasm/releasebuilds/{NASM_VERSION}/nasm-{NASM_VERSION}.tar.xz"
 
 ROCM_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("gfx1153", "gfx1153"),
     ("gfx1152", "gfx1152"),
     ("gfx1151", "gfx1151"),
     ("gfx1150", "gfx1150"),
     ("gfx110", "gfx110X"),
+    ("gfx125", "gfx125X"),
     ("gfx120", "gfx120X"),
     ("gfx103", "gfx103X"),
     ("gfx101", "gfx101X"),
@@ -313,7 +381,11 @@ def _read_sys(path: Path) -> str:
 
 def _glob_lib(root: Path, pattern: str) -> list[Path]:
     found: list[Path] = []
-    for base in (root / "lib64", root / "lib"):
+    bases = [root / "lib64", root / "lib"]
+    # Distro packages (for example a /usr toolkit) put the runtime in the
+    # multiarch directory instead of lib/ or lib64/.
+    bases.extend(sorted((root / "lib").glob("*-linux-gnu*")))
+    for base in bases:
         if base.is_dir():
             found.extend(sorted(base.glob(pattern)))
     return found
@@ -449,10 +521,11 @@ def rocm_catalog(arch: str) -> list[dict[str, Any]]:
     for version, filename in ROCM_PACKAGES.get(rocm_family(arch), ()):
         if not version_ok(parse_version(version), MIN_ROCM):
             continue
+        channel = ROCM_CHANNELS.get(version, ROCM_TARBALL)
         entries.append(
             {
                 "version": version,
-                "url": ROCM_TARBALL.format(filename=filename),
+                "url": channel + filename,
                 "filename": filename,
                 "bytes": 3_750_000_000,
             }
@@ -558,6 +631,113 @@ def inspect_cuda(path_value: Any) -> dict[str, Any]:
     out["ok"] = True
     out["resolved_path"] = str(root)
     return out
+
+
+def _toolchain_candidates(kind: str, base_dir: Path) -> list[Path]:
+    """Standard places an installed toolkit can live.
+
+    Managed downloads land in ``toolchains/<kind>-<version>``; everything else
+    is the host's normal install location or whatever ``nvcc``/``hipcc`` on
+    PATH resolves to."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        raw = str(value or "").strip()
+        if not raw:
+            return
+        path = Path(raw).expanduser()
+        if not path.is_dir():
+            return
+        key = os.path.realpath(str(path))
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(path)
+
+    pattern = "cuda-*" if kind == "cuda" else "rocm-*"
+    try:
+        for path in sorted((Path(base_dir) / "toolchains").glob(pattern), reverse=True):
+            add(path)
+    except OSError:
+        pass
+    which = shutil.which("nvcc" if kind == "cuda" else "hipcc")
+    if which:
+        add(Path(which).resolve().parent.parent)
+    if kind == "cuda":
+        for env in ("CUDA_HOME", "CUDA_PATH"):
+            add(os.environ.get(env))
+        add("/usr/local/cuda")
+        try:
+            for path in sorted(Path("/usr/local").glob("cuda-*"), reverse=True):
+                add(path)
+        except OSError:
+            pass
+        add("/opt/cuda")
+    else:
+        add(os.environ.get("ROCM_PATH"))
+        add("/opt/rocm")
+        try:
+            for path in sorted(Path("/opt").glob("rocm-*"), reverse=True):
+                add(path)
+        except OSError:
+            pass
+    return roots
+
+
+def detect_installed_toolchain(kind: str, base_dir: Path) -> dict[str, Any]:
+    """The best usable toolkit of this kind, or why a present one is unusable.
+
+    Managed installs and host locations are inspected; the newest complete
+    toolkit wins.  An installation that exists but is older than the minimum
+    (or misses compiler pieces) stays visible as installed-but-unusable so the
+    UI can ask for a reinstall instead of pretending nothing is there."""
+    inspect = inspect_cuda if kind == "cuda" else inspect_rocm
+    label = "CUDA" if kind == "cuda" else "ROCm"
+    minimum = MIN_CUDA if kind == "cuda" else MIN_ROCM
+    label_minimum = version_text(minimum)
+    reports: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in _toolchain_candidates(kind, base_dir):
+        report = inspect(str(path))
+        root = str(report.get("resolved_path") or report.get("path") or path)
+        key = os.path.realpath(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        report["path"] = root
+        report["installed"] = bool(
+            report.get("version") or report.get("nvcc" if kind == "cuda" else "hipcc")
+        )
+        reports.append(report)
+    working = [item for item in reports if item["ok"]]
+    if working:
+        best = max(working, key=lambda item: parse_version(item["version"]))
+        best["installed"] = True
+        return best
+    old = [
+        item for item in reports
+        if item.get("version") and not version_ok(parse_version(item["version"]), minimum)
+    ]
+    if old:
+        best = max(old, key=lambda item: parse_version(item["version"]))
+        best["installed"] = True
+        best["needs_reinstall"] = True
+        best["reason"] = (
+            f"已安装 {label} {best['version']}（{best['path']}），"
+            f"低于最低要求 {label_minimum}，必须重新安装"
+        )
+        return best
+    broken = [item for item in reports if item.get("installed") and not item["ok"]]
+    if broken:
+        best = broken[0]
+        best["needs_reinstall"] = True
+        best["reason"] = f"已检测到 {label}（{best['path']}），{best['reason']}，必须重新安装"
+        return best
+    return {
+        "kind": kind, "path": "", "ok": False, "version": "", "installed": False,
+        "reason": f"未检测到 {label}，请选择版本安装", "minimum": label_minimum,
+    }
 
 
 def inspect_rocm(path_value: Any) -> dict[str, Any]:
@@ -672,45 +852,20 @@ class EngineSetup:
             except OSError as exc:
                 self.log.warning("cannot create %s: %s", path, exc)
 
-    def setup_state(self) -> dict[str, Any]:
-        state = self.config.get("setup")
-        if not isinstance(state, dict):
-            state = {}
-            self.config["setup"] = state
-        return state
-
     # -- toolchains --------------------------------------------------------
     def toolchains(self) -> dict[str, Any]:
         if self._report_cache is not None and time.time() - self._report_cache[0] < 8:
             return self._report_cache[1]
-        state = self.setup_state()
         gpus = detect_gpus()
         vendors = {item["vendor"] for item in gpus}
-        cuda_path = str(state.get("cuda_path") or "")
-        rocm_path = str(state.get("rocm_path") or "")
-        cuda = inspect_cuda(cuda_path)
-        rocm = inspect_rocm(rocm_path)
-        detected = {
-            "cuda": next(
-                (str(candidate) for candidate in (
-                    os.environ.get("CUDA_HOME"), "/usr/local/cuda", "/opt/cuda",
-                ) if candidate and Path(str(candidate)).exists()),
-                "",
-            ),
-            "rocm": next(
-                (str(candidate) for candidate in (
-                    os.environ.get("ROCM_PATH"), "/opt/rocm", "/usr",
-                ) if candidate and (Path(str(candidate)) / "bin" / "hipcc").is_file()),
-                "",
-            ),
-        }
+        cuda = detect_installed_toolchain("cuda", self.base_dir)
+        rocm = detect_installed_toolchain("rocm", self.base_dir)
         result = {
             "gpus": gpus,
             "show_cuda": "nvidia" in vendors,
             "show_rocm": "amd" in vendors,
             "cuda": cuda,
             "rocm": rocm,
-            "detected": detected,
             "cuda_catalog": list(CUDA_CATALOG),
             "rocm_catalog": rocm_catalog(self._amd_arch(gpus)),
             "rocm_family": rocm_family(self._amd_arch(gpus)),
@@ -725,31 +880,6 @@ class EngineSetup:
             if item.get("vendor") == "amd" and item.get("arch"):
                 return str(item["arch"])
         return "gfx1100"
-
-    def save_paths(self, payload: dict[str, Any]) -> dict[str, Any]:
-        state = self.setup_state()
-        gpus = detect_gpus()
-        vendors = {item["vendor"] for item in gpus}
-        for key, kind, vendor, label in (
-            ("cuda_path", "cuda", "nvidia", "CUDA"),
-            ("rocm_path", "rocm", "amd", "ROCm"),
-        ):
-            if key not in payload:
-                continue
-            raw = str(payload.get(key) or "").strip()
-            if not raw:
-                state[key] = ""
-                continue
-            if vendor not in vendors:
-                raise SetupError(f"本机未检测到 {label} 显卡，不能配置 {label} 路径")
-            report = inspect_cuda(raw) if kind == "cuda" else inspect_rocm(raw)
-            if not report["ok"]:
-                raise SetupError(report["reason"] or f"{label} 路径不可用")
-            state[key] = str(report.get("resolved_path") or raw)
-        self._report_cache = None
-        if self.persist:
-            self.persist()
-        return self.toolchains()
 
     def active_variants(self) -> dict[str, dict[str, Any]]:
         """Usable toolchains for the GPUs on this machine, in build order."""
@@ -1225,12 +1355,9 @@ class EngineSetup:
         report = inspect_cuda(str(target)) if kind == "cuda" else inspect_rocm(str(target))
         if not report["ok"]:
             raise SetupError(f"安装后校验失败：{report['reason']}")
-        state = self.setup_state()
-        key = "cuda_path" if kind == "cuda" else "rocm_path"
-        state[key] = str(report.get("resolved_path") or target)
+        # The managed toolchains/ directory is auto-detected on the next scan,
+        # so no path needs to be persisted.
         self._report_cache = None
-        if self.persist:
-            self.persist()
         self._step(job, "verify", "ok", f"{kind.upper()} {report['version']}")
 
     def _check_disk(self, path: Path, needed: int) -> None:

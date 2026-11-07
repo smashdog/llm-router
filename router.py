@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import requests
 
-from engine_setup import EngineSetup, SetupError
+from engine_setup import EngineSetup, SetupError, detect_installed_toolchain
 
 
 VERSION = "0.4.3"
@@ -6518,28 +6518,26 @@ def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
 # engine supervisor
 
 
-def toolchain_runtime_libs(config: dict[str, Any]) -> list[str]:
-    """Library directories of the configured GPU toolchains.
+def toolchain_runtime_libs(base_dir: Path) -> list[str]:
+    """Library directories of the detected GPU toolchains.
 
     Built engines (notably Strata) link the vendor runtime without an rpath,
     so the started engine and its helpers need the toolchain's lib dir on
     LD_LIBRARY_PATH."""
-    setup_cfg = config.get("setup") if isinstance(config.get("setup"), dict) else {}
     dirs: list[str] = []
-    for key, env_key, defaults in (
-        ("cuda_path", "CUDA_HOME", ("/usr/local/cuda", "/opt/cuda")),
-        ("rocm_path", "ROCM_PATH", ("/opt/rocm",)),
-    ):
-        raw = str(setup_cfg.get(key) or os.environ.get(env_key) or "").strip()
-        for root in ([raw] if raw else []) + list(defaults):
-            base = Path(root).expanduser()
-            if not base.is_dir():
-                continue
-            for sub in ("lib64", "lib"):
-                lib = base / sub
-                if lib.is_dir() and str(lib) not in dirs:
-                    dirs.append(str(lib))
-            break
+    for kind in ("cuda", "rocm"):
+        report = detect_installed_toolchain(kind, base_dir)
+        if not report.get("ok"):
+            continue
+        root = Path(str(report.get("resolved_path") or report.get("path") or ""))
+        # /usr is already on the loader's default search path; adding its
+        # multiarch directory would leak every system library into the engines.
+        if os.path.realpath(str(root)) in ("/", "/usr"):
+            continue
+        for sub in ("lib64", "lib"):
+            lib = root / sub
+            if lib.is_dir() and str(lib) not in dirs:
+                dirs.append(str(lib))
     return dirs
 
 
@@ -8199,15 +8197,6 @@ class Gateway:
         data["proxy_configured"] = self._proxy_configured()
         return data
 
-    def save_setup_toolchains(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            data = self.engine_setup.save_paths(payload)
-        except SetupError as exc:
-            raise BadRequest(str(exc)) from exc
-        data["proxy_configured"] = self._proxy_configured()
-        data["engines"] = self.engine_setup.view()["engines"]
-        return data
-
     def _stop_engine_for_setup(self) -> bool:
         """Compiling needs the machine's RAM and the card, so a setup build
         stops whatever engine is serving first.  Returns True if one ran."""
@@ -8373,7 +8362,7 @@ class Gateway:
                     self.timeouts,
                     self.state_path,
                     self.log,
-                    runtime_lib_dirs=toolchain_runtime_libs(self.config),
+                    runtime_lib_dirs=toolchain_runtime_libs(self.base_dir),
                 )
             else:
                 manager.cfg = cfg
@@ -12731,12 +12720,6 @@ class Handler(BaseHTTPRequestHandler):
                 raise MethodNotAllowed("method not allowed")
             self._json(200, self.gateway.setup_view())
             return
-        if normalized == "/router/setup/paths":
-            if method != "POST":
-                raise MethodNotAllowed("method not allowed")
-            payload = self._json_body(required=True) or {}
-            self._json(200, self.gateway.save_setup_toolchains(payload))
-            return
         if normalized == "/router/setup/engine/install":
             if method != "POST":
                 raise MethodNotAllowed("method not allowed")
@@ -13207,7 +13190,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "modelscope": {"use_proxy": False},
         },
     },
-    "setup": {"cuda_path": "", "rocm_path": ""},
+    "setup": {},
 }
 
 
@@ -13258,10 +13241,11 @@ def main(argv: list[str] | None = None) -> int:
     timeouts = config.get("timeouts", {})
     state_path = base_dir / str(config.get("state_file") or "state.json")
     engines: dict[str, EngineManager] = {}
+    runtime_libs = toolchain_runtime_libs(base_dir)
     for engine_id, engine_cfg in config.get("engines", {}).items():
         engines[engine_id] = EngineManager(
             engine_id, engine_cfg, base_dir, timeouts, state_path, log,
-            runtime_lib_dirs=toolchain_runtime_libs(config),
+            runtime_lib_dirs=runtime_libs,
         )
     gateway = Gateway(config, registry, engines, state_path, base_dir, log, config_path)
     Handler.gateway = gateway
