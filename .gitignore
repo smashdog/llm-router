@@ -19,3 +19,11 @@ models-kvmem-llama/
 .venv/
 __pycache__/
 *.pyc
+
+# engine provisioning (sources, compiled binaries, generated configs and logs)
+engine/
+bin/
+config/
+log/
+toolchains/
+tests/isolated-setup/

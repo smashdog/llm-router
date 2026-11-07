@@ -185,6 +185,49 @@
   .engine-path-actions .hint { margin-right: auto; color: var(--faint); font-size: 11.5px; }
   .engine-path .params-error { margin-top: 10px !important; }
   .engine-path .path-warning { margin: 10px 0 0; color: #ffe5a3; font-size: 12px; }
+  .provision { display: flex; flex-direction: column; gap: 12px; margin-bottom: 22px; }
+  .provision-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .provision-head h3 { margin: 0; font-size: 13px; }
+  .provision-head .hint { color: var(--faint); font-size: 11.5px; }
+  .toolchain-rows, .provision-list { display: flex; flex-direction: column; gap: 12px; }
+  .toolchain-row, .provision-engine {
+    padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line);
+    background: rgba(255,255,255,.02);
+  }
+  .toolchain-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .toolchain-head h4 { margin: 0; font-size: 13.5px; }
+  .toolchain-head .hint { margin-left: auto; color: var(--faint); font-size: 11px; }
+  .toolchain-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .toolchain-controls input {
+    flex: 1; min-width: 240px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0c121a; color: var(--text); font: inherit; font-size: 12.5px; outline: none;
+  }
+  .toolchain-controls input:focus { border-color: rgba(94,234,212,.45); }
+  .toolchain-download { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .toolchain-download label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .toolchain-download select {
+    padding: 6px 8px; border-radius: 7px; border: 1px solid var(--line);
+    background: #0c121a; color: var(--text); font: inherit; font-size: 12px;
+  }
+  .provision-warn { margin: 8px 0 0; color: #ffe5a3; font-size: 11.5px; overflow-wrap: anywhere; }
+  .provision-engine-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .provision-engine-head h4 { margin: 0; font-size: 13.5px; }
+  .provision-engine-head .hint { margin-left: auto; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
+  .provision-meta { margin: 0; color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
+  .provision-bins { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+  .provision-bin { font-size: 11px; color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .provision-bin.missing { color: #ffc1ca; }
+  .provision-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 11px; }
+  .provision-actions .check { margin-top: 0; }
+  .provision-steps { margin-top: 10px; padding: 9px 11px; border-radius: 9px; background: #0c121a; border: 1px solid var(--line-soft); }
+  .provision-step { display: flex; gap: 8px; align-items: baseline; font-size: 11.5px; color: var(--muted); padding: 1px 0; }
+  .provision-step .state { width: 52px; flex: none; color: var(--faint); }
+  .provision-step.running .state { color: var(--accent); }
+  .provision-step.ok .state { color: #b9f6cb; }
+  .provision-step.error .state { color: #ffc1ca; }
+  .provision-step .detail { overflow-wrap: anywhere; }
+  .provision-progress { height: 4px; border-radius: 3px; background: var(--line-soft); overflow: hidden; margin: 8px 0 2px; }
+  .provision-progress span { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }
   .engine-update-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; }
   .engine-update-bar .hint { color: var(--faint); font-size: 11.5px; }
   .engine-update-bar .check { margin-top: 0; }
@@ -767,6 +810,22 @@
         <section class="manage-panel" data-panel="engines" aria-labelledby="engine-paths-title">
           <h2 id="engine-paths-title">引擎</h2>
           <p class="panel-hint">按分类配置引擎：llama.cpp 分类下为原生 llama.cpp；Strata 分类下为独立 Strata 服务；kvmem 分类下包含 llama.cpp（KVMem 补丁版）、polystrata 与 ninfer。保存前会轻量探测二进制是否可用，成功后写入 config.json。正在运行的引擎需重启后才会使用新路径。</p>
+          <div class="provision" id="engine-provision">
+            <div class="provision-head">
+              <h3>编译工具链</h3>
+              <span class="hint">只显示本机存在的显卡对应的工具链；低于最低版本会拒绝保存。</span>
+            </div>
+            <div class="toolchain-rows" id="toolchain-rows">
+              <div class="empty">正在检测显卡与工具链…</div>
+            </div>
+            <div class="provision-head">
+              <h3>引擎源码与编译</h3>
+              <span class="hint">源码装在 engine/，可执行文件装到 bin/，配置写入 config/，日志写入 log/。</span>
+            </div>
+            <div class="provision-list" id="engine-install-list">
+              <div class="empty">正在读取引擎状态…</div>
+            </div>
+          </div>
           <div class="engine-update-bar">
             <button class="btn" type="button" id="engine-check-update">检查更新</button>
             <label class="check" id="engine-proxy-field" hidden><input id="engine-use-proxy" type="checkbox" /> 使用代理</label>
@@ -1102,6 +1161,11 @@
     engineUpdateBusy: false,
     engineUpdateNote: "",
     engineUseProxy: false,
+    setup: null,
+    setupLoading: false,
+    setupJobs: {},
+    setupPolling: {},
+    setupProxy: {},
     addJob: null,
     addTimer: null,
     proxy: null,
@@ -2553,12 +2617,257 @@
     return html;
   }
 
+  const SETUP_ENGINE_LABELS = { llama: "llama.cpp", strata: "Strata", kvmem: "KVMem" };
+  const SETUP_STEP_STATE = { pending: "等待", running: "进行中", ok: "完成", warn: "提示", error: "失败", skip: "跳过" };
+
+  function setupJobBlock(key) {
+    const job = state.setupJobs[key];
+    if (!job) return "";
+    const steps = (job.steps || []).map((step) => `
+      <div class="provision-step ${esc(step.status || "")}">
+        <span class="state">${esc(SETUP_STEP_STATE[step.status] || step.status || "")}</span>
+        <span class="detail">${esc(step.label)}${step.detail ? ` · ${esc(step.detail)}` : ""}</span>
+      </div>`).join("");
+    const percent = Math.max(0, Math.min(100, Number(job.percent) || 0));
+    const bar = job.status === "running" && percent
+      ? `<div class="provision-progress"><span style="width:${percent}%"></span></div>`
+      : "";
+    const message = job.status === "error"
+      ? `<p class="provision-warn">${esc(job.error || "安装失败")}</p>`
+      : "";
+    const cancel = job.status === "running"
+      ? `<button class="btn ghost" type="button" data-setup-action="cancel" data-job="${esc(job.id)}">取消</button>`
+      : "";
+    const detail = job.status === "running" ? (job.detail || "") : (job.detail || "");
+    return `<div class="provision-steps">${bar}${steps}${message}
+      <div class="provision-actions">${cancel}<span class="hint">${esc(detail)}</span></div>
+    </div>`;
+  }
+
+  function setupProxyBox(key, data, running) {
+    if (!data.proxy_configured) return "";
+    const checked = !!(state.setupProxy && state.setupProxy[key]);
+    return `<label class="check"><input type="checkbox" data-setup-proxy="${esc(key)}" ${checked ? "checked" : ""} ${running ? "disabled" : ""}/> 使用代理</label>`;
+  }
+
+  function toolchainRow(kind, data) {
+    const visible = kind === "cuda" ? data.show_cuda : data.show_rocm;
+    if (!visible) return "";
+    const report = kind === "cuda" ? data.cuda : data.rocm;
+    const label = kind === "cuda" ? "CUDA" : "ROCm";
+    const catalog = (kind === "cuda" ? data.cuda_catalog : data.rocm_catalog) || [];
+    const key = `toolchain:${kind}`;
+    const job = state.setupJobs[key];
+    const running = !!(job && job.status === "running");
+    const tag = report.ok
+      ? `<span class="tag green">${label} ${esc(report.version)}</span>`
+      : '<span class="tag amber">未就绪</span>';
+    const value = report.resolved_path || report.path || "";
+    const download = report.ok ? "" : (catalog.length ? `
+      <div class="toolchain-download">
+        <label>版本
+          <select data-toolchain-version="${kind}" ${running ? "disabled" : ""}>
+            ${catalog.map((item, index) => `<option value="${esc(item.version)}"${index === catalog.length - 1 ? " selected" : ""}>${esc(item.version)}${index === catalog.length - 1 ? "（最新）" : ""}</option>`).join("")}
+          </select>
+        </label>
+        ${setupProxyBox(key, data, running)}
+        <button class="btn primary" type="button" data-setup-action="toolchain" data-kind="${kind}" ${running ? "disabled" : ""}>下载并安装</button>
+      </div>` : `<p class="provision-warn">当前 GPU 架构${data.rocm_family ? `（${esc(data.rocm_family)}）` : ""}没有可下载的 ROCm 预编译包，请手动安装后填写路径</p>`);
+    return `<article class="toolchain-row">
+      <div class="toolchain-head"><h4>${label}</h4>${tag}
+        <span class="hint">最低 ${esc((data.minimum || {})[kind] || "")}</span></div>
+      <div class="toolchain-controls">
+        <input type="text" spellcheck="false" data-toolchain-path="${kind}"
+          value="${esc(value)}" placeholder="${esc((data.detected || {})[kind] || (kind === "cuda" ? "/usr/local/cuda" : "/opt/rocm"))}"
+          ${running ? "disabled" : ""}/>
+        <button class="btn" type="button" data-setup-action="save-path" data-kind="${kind}" ${running ? "disabled" : ""}>保存路径</button>
+      </div>
+      ${report.ok ? "" : `<p class="provision-warn">${esc(report.reason || "路径不可用")}</p>`}
+      ${download}
+      ${setupJobBlock(key)}
+    </article>`;
+  }
+
+  function engineSetupCard(item, data) {
+    const key = `engine:${item.engine}`;
+    const job = state.setupJobs[key];
+    const running = !!(job && job.status === "running");
+    const stateTag = {
+      missing: '<span class="tag amber">未安装</span>',
+      invalid: '<span class="tag red">源码异常</span>',
+      source: '<span class="tag amber">待编译</span>',
+      built: '<span class="tag green">已编译</span>',
+    }[item.state] || "";
+    const variantBins = Object.entries(item.variants || {}).flatMap(([variant, view]) =>
+      (view.binaries || []).map((bin) =>
+        `<span class="provision-bin ${bin.exists ? "" : "missing"}">${esc(bin.name)}${bin.exists ? "" : "（缺失）"}</span>`
+      )
+    ).join("");
+    const missingDeps = (item.deps || []).filter((dep) => !dep.ok)
+      .map((dep) => `依赖 ${esc(dep.label)} 尚未安装`).join("；");
+    const notes = (item.notes || []).map((note) => `<p class="provision-warn">${esc(note)}</p>`).join("");
+    let primary = "";
+    if (item.state === "built") {
+      primary = `<button class="btn primary" type="button" data-setup-action="engine" data-engine="${esc(item.engine)}" data-op="update" ${running ? "disabled" : ""}>更新</button>`;
+    } else if (item.state === "invalid") {
+      primary = `<button class="btn primary" type="button" data-setup-action="engine" data-engine="${esc(item.engine)}" data-op="install" data-force="1" ${running ? "disabled" : ""}>重新下载</button>`;
+    } else {
+      primary = `<button class="btn primary" type="button" data-setup-action="engine" data-engine="${esc(item.engine)}" data-op="install" ${running ? "disabled" : ""}>${item.state === "source" ? "编译" : "安装"}</button>`;
+    }
+    return `<article class="provision-engine">
+      <div class="provision-engine-head"><h4>${esc(item.label || SETUP_ENGINE_LABELS[item.engine] || item.engine)}</h4>${stateTag}
+        <span class="hint">${esc(item.source || "")}</span></div>
+      <p class="provision-meta">${esc(item.dir || "")}${item.repo && item.repo.version ? ` · ${esc(item.repo.version)}` : ""}</p>
+      ${variantBins ? `<div class="provision-bins">${variantBins}</div>` : ""}
+      ${missingDeps ? `<p class="provision-warn">${missingDeps}</p>` : ""}
+      ${notes}
+      <div class="provision-actions">
+        ${primary}
+        ${setupProxyBox(key, data, running)}
+        ${item.state === "built" ? `<button class="btn" type="button" data-setup-action="engine" data-engine="${esc(item.engine)}" data-op="install" ${running ? "disabled" : ""}>重新编译</button>` : ""}
+      </div>
+      ${setupJobBlock(key)}
+    </article>`;
+  }
+
+  function renderSetup() {
+    const data = state.setup;
+    const rows = $("toolchain-rows");
+    const list = $("engine-install-list");
+    if (!rows || !list) return;
+    if (!data) {
+      rows.innerHTML = '<div class="empty">正在检测显卡与工具链…</div>';
+      list.innerHTML = '<div class="empty">正在读取引擎状态…</div>';
+      return;
+    }
+    const html = [toolchainRow("cuda", data), toolchainRow("rocm", data)].filter(Boolean).join("");
+    rows.innerHTML = html || '<div class="empty">未检测到 NVIDIA 或 AMD 显卡，无需配置编译工具链。</div>';
+    list.innerHTML = (data.engines || []).map((item) => engineSetupCard(item, data)).join("")
+      || '<div class="empty">没有引擎</div>';
+  }
+
+  function mergeSetupJobs(jobs) {
+    (jobs || []).forEach((job) => {
+      if (!job || !job.id) return;
+      const key = job.action === "toolchain" ? `toolchain:${job.kind}` : `engine:${job.engine}`;
+      state.setupJobs[key] = job;
+      if (job.status === "running" && !state.setupPolling[key]) {
+        pollSetupJob(key, job.id).catch((error) => toast(error.message, "bad"));
+      }
+    });
+  }
+
+  async function loadSetup() {
+    if (state.setupLoading) return;
+    state.setupLoading = true;
+    try {
+      state.setup = await api("/router/setup");
+      mergeSetupJobs(state.setup.jobs);
+      renderSetup();
+    } catch (error) {
+      const host = $("toolchain-rows");
+      if (host) host.innerHTML = `<div class="empty">无法读取工具链状态：${esc(error.message)}</div>`;
+    } finally {
+      state.setupLoading = false;
+    }
+  }
+
+  async function pollSetupJob(key, jobId) {
+    if (state.setupPolling[key]) return;
+    state.setupPolling[key] = true;
+    try {
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        let job;
+        try {
+          job = await api(`/router/setup/job?id=${encodeURIComponent(jobId)}`);
+        } catch (error) {
+          toast(`安装任务状态读取失败：${error.message}`, "bad");
+          break;
+        }
+        state.setupJobs[key] = job;
+        renderSetup();
+        if (job.status !== "running") {
+          if (job.status === "ok") toast(`${key.startsWith("toolchain:") ? "工具链" : SETUP_ENGINE_LABELS[job.engine] || job.engine} 安装完成`, "ok");
+          else if (job.status === "cancelled") toast("安装已取消", "");
+          else toast(`${job.error || "安装失败"}`, "bad");
+          break;
+        }
+      }
+    } finally {
+      state.setupPolling[key] = false;
+    }
+    await loadSetup();
+    await loadEnginePaths();
+  }
+
+  async function cancelSetupJob(jobId) {
+    if (!jobId) return;
+    try {
+      await api("/router/setup/job/cancel", { method: "POST", body: JSON.stringify({ id: jobId }) });
+      toast("正在取消安装…", "");
+    } catch (error) {
+      toast(error.message, "bad");
+    }
+  }
+
+  async function saveToolchainPath(kind) {
+    const input = document.querySelector(`input[data-toolchain-path="${kind}"]`);
+    if (!input) return;
+    const body = kind === "cuda" ? { cuda_path: input.value.trim() } : { rocm_path: input.value.trim() };
+    try {
+      const payload = await api("/router/setup/paths", { method: "POST", body: JSON.stringify(body) });
+      state.setup = payload;
+      renderSetup();
+      toast(`${kind === "cuda" ? "CUDA" : "ROCm"} 路径已保存`, "ok");
+      loadEnginePaths();
+    } catch (error) {
+      toast(error.message, "bad");
+    }
+  }
+
+  async function installToolchain(kind) {
+    const key = `toolchain:${kind}`;
+    const select = document.querySelector(`select[data-toolchain-version="${kind}"]`);
+    const useProxy = !!(state.setupProxy && state.setupProxy[key]);
+    try {
+      const job = await api("/router/setup/toolchain/install", {
+        method: "POST",
+        body: JSON.stringify({ kind, version: select ? select.value : "", use_proxy: useProxy }),
+      });
+      state.setupJobs[key] = job;
+      renderSetup();
+      pollSetupJob(key, job.id).catch((error) => toast(error.message, "bad"));
+    } catch (error) {
+      toast(error.message, "bad");
+    }
+  }
+
+  async function startEngineSetup(engine, op, force) {
+    const key = `engine:${engine}`;
+    const useProxy = !!(state.setupProxy && state.setupProxy[key]);
+    const body = { engine, use_proxy: useProxy };
+    if (force) body.force = true;
+    try {
+      const job = await api(`/router/setup/engine/${op === "update" ? "update" : "install"}`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      state.setupJobs[key] = job;
+      renderSetup();
+      pollSetupJob(key, job.id).catch((error) => toast(error.message, "bad"));
+    } catch (error) {
+      toast(error.message, "bad");
+    }
+  }
+
   async function loadEnginePaths() {
     if (state.pathsLoading || state.pathsBusy) return;
     state.pathsLoading = true;
     try {
       state.paths = await api("/router/engines/paths");
       renderEnginePaths();
+      loadSetup().catch(() => {});
     } catch (error) {
       $("engine-paths").innerHTML =
         `<div class="empty">无法读取引擎配置：${esc(error.message)}</div>`;
@@ -3438,14 +3747,10 @@
             : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
     $("add-model-hint").textContent = ninfer
       ? ".ninfer 文件，必填"
-      : kvllama || kv || strata
-        ? "模型目录或 .gguf 文件，必填（目录自动挑选最大 GGUF 与 mmproj）"
-        : ".gguf 文件，必填";
+      : "模型目录或 .gguf 文件，必填（目录自动挑选最大 GGUF 与 mmproj）";
     $("add-model").placeholder = ninfer
       ? "/path/to/model.ninfer"
-      : kvllama || kv || strata
-        ? "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf"
-        : "/path/to/model.gguf";
+      : "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf";
     $("add-vision-field").hidden = ninfer;
     $("add-draft-field").hidden = !strata;
     if (!strata) $("add-draft").value = "";
@@ -3902,6 +4207,26 @@
   });
   $("engine-use-proxy").addEventListener("change", () => {
     state.engineUseProxy = engineUseProxy();
+  });
+  $("engine-provision").addEventListener("change", (event) => {
+    const box = event.target.closest("input[data-setup-proxy]");
+    if (!box) return;
+    state.setupProxy[box.dataset.setupProxy] = box.checked;
+  });
+  $("engine-provision").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-setup-action]");
+    if (!button || button.disabled) return;
+    const action = button.dataset.setupAction;
+    if (action === "save-path") {
+      saveToolchainPath(button.dataset.kind).catch((error) => toast(error.message, "bad"));
+    } else if (action === "toolchain") {
+      installToolchain(button.dataset.kind).catch((error) => toast(error.message, "bad"));
+    } else if (action === "engine") {
+      startEngineSetup(button.dataset.engine, button.dataset.op || "install", button.dataset.force === "1")
+        .catch((error) => toast(error.message, "bad"));
+    } else if (action === "cancel") {
+      cancelSetupJob(button.dataset.job).catch((error) => toast(error.message, "bad"));
+    }
   });
   $("btn-reload").addEventListener("click", reloadRegistry);
   $("btn-stop").addEventListener("click", stopEngine);

@@ -41,6 +41,8 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import requests
 
+from engine_setup import EngineSetup, SetupError
+
 
 VERSION = "0.4.3"
 
@@ -1117,6 +1119,29 @@ def kvmem_llama_engine_schema() -> list[dict[str, Any]]:
 # strata-poly --help).  The router copies the Ornith template for each new
 # model, so leaving a field empty keeps the template value.
 
+
+def provisioned_tool_from_exe(exe: Path, tool: str) -> Path:
+    """Resolve a companion executable that lives beside the engine binaries.
+
+    KVMem model configs run bin/kvmem[/<variant>]/strata-poly (the alias its
+    serve.server recognizes as the PolyStrata worker); the vision encoder
+    stays in bin/ itself, with a -cuda/-rocm suffix when both are installed.
+    """
+    parent = exe.parent
+    variant = ""
+    if parent.name in ("cuda", "rocm") and parent.parent.name == "kvmem":
+        variant = f"-{parent.name}"
+        root = parent.parent.parent
+    elif parent.name == "kvmem":
+        root = parent.parent
+    else:
+        root = parent
+        for suffix in ("-cuda", "-rocm"):
+            if exe.name.endswith(suffix):
+                variant = suffix
+                break
+    return root / f"{tool}{variant}"
+
 POLYSTRATA_ENGINE_GROUPS = (
     ("context", "上下文"),
     ("core", "预算与保留"),
@@ -1371,7 +1396,7 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     # -- engine / experts --------------------------------------------------
     _kv_engine_spec(
         "expert_profile", "--expert-profile", "专家使用统计文件", "engine", "string",
-        note="读取以挑选缓存专家，退出或服务时写回",
+        note="读取以挑选缓存专家；strata-poly 在退出和作答后自动写回该文件",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
@@ -2848,6 +2873,52 @@ def kvmem_poly_engine_values(
         else:
             value = raw
         out[key] = value
+    return out
+
+
+def kvmem_poly_apply_config_values(config: dict[str, Any], values: dict[str, Any]) -> None:
+    """Write PolyStrata options that live in the JSON (not in argv)."""
+    for key, value in values.items():
+        spec = POLYSTRATA_ENGINE_BY_KEY.get(key)
+        if spec is None or not spec.get("config_path"):
+            continue
+        path = list(spec["config_path"])
+        if path[:1] == ["vision"]:
+            # The vision block has its own validated write path.
+            continue
+        node: Any = config
+        for part in path[:-1]:
+            child = node.get(part)
+            if not isinstance(child, dict):
+                if value is None:
+                    node = None
+                    break
+                child = {}
+                node[part] = child
+            node = child
+        if node is None:
+            continue
+        if value is None:
+            node.pop(path[-1], None)
+        else:
+            node[path[-1]] = value
+
+
+def kvmem_poly_strip_expert_save(
+    args: list[str], config: dict[str, Any] | None = None
+) -> list[str]:
+    """Drop the Strata-only expert-profile save flags from a PolyStrata config.
+
+    strata-poly writes the counters of ``--expert-profile`` back itself (on
+    exit and by --serve after an answer); ``--expert-profile-save`` is the
+    Strata project's separate engine and the worker exits on it.
+    """
+    out = [str(item) for item in args]
+    for flag in ("--expert-profile-save", "--expert-profile-save-every"):
+        out = _config_arg_remove(out, flag)
+    if config is not None:
+        for key in ("expert_profile_save", "expert_profile_save_every"):
+            config.pop(key, None)
     return out
 
 
@@ -4380,8 +4451,16 @@ def _config_arg_remove(args: list[str], flag: str) -> list[str]:
 
 
 def kvmem_reference_config(engine_cfg: dict[str, Any]) -> tuple[Path | None, dict[str, Any] | None]:
-    """The Ornith 1.5 strata config used as the template for added models."""
+    """The strata config that seeds newly added KVMem models.
+
+    The install writes config/polystrata/strata-reference.json as the
+    canonical option template (its --model is empty and gets replaced); older
+    trees that predate it fall back to a saved Ornith entry."""
     config_dir = Path(str((engine_cfg.get("models") or {}).get("dir") or ""))
+    reference = config_dir / "strata-reference.json"
+    cfg = read_json(reference)
+    if isinstance(cfg, dict) and cfg.get("exe") and isinstance(cfg.get("args"), list):
+        return reference, cfg
     paths = sorted(config_dir.glob("strata-*.json"))
     ordered: list[Path] = []
     preferred = config_dir / "strata-ornith-1.5.json"
@@ -4684,9 +4763,15 @@ def discover_kvmem_models(engine_cfg: dict[str, Any]) -> list[Model]:
     extra = read_json(meta_path, {})
     if not isinstance(extra, dict):
         extra = {}
+    # strata-reference.json supplies the poly worker's default options; it is
+    # not a routable model (its --model is empty), so keep it out of the list.
+    reference = config_dir / "strata-reference.json"
+    reference_abs = os.path.abspath(str(reference)) if reference.is_file() else ""
     candidates = []
     try:
         for path in config_dir.glob("strata-*.json"):
+            if reference_abs and os.path.abspath(str(path)) == reference_abs:
+                continue
             try:
                 candidates.append((path.stat().st_mtime, path))
             except OSError:
@@ -5382,7 +5467,7 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "port": 18080,
         "start_timeout_s": 120,
         "probe_timeout_s": 15,
-        "log_path": "logs/llama-engine.log",
+        "log_path": "log/llama-engine.log",
     },
     "strata": {
         "category": "Strata",
@@ -5396,7 +5481,7 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "port": 18084,
         "start_timeout_s": 900,
         "probe_timeout_s": 30,
-        "log_path": "logs/strata-engine.log",
+        "log_path": "log/strata-engine.log",
     },
     "kvmem": {
         "category": "kvmem",
@@ -5410,7 +5495,7 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "port": 18081,
         "start_timeout_s": 900,
         "probe_timeout_s": 30,
-        "log_path": "logs/kvmem-engine.log",
+        "log_path": "log/kvmem-engine.log",
     },
     "ninfer": {
         "category": "kvmem",
@@ -5424,7 +5509,7 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "port": 18082,
         "start_timeout_s": 900,
         "probe_timeout_s": 30,
-        "log_path": "logs/ninfer-engine.log",
+        "log_path": "log/ninfer-engine.log",
     },
     "kvmem_llama": {
         "category": "kvmem",
@@ -5438,7 +5523,7 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "port": 18083,
         "start_timeout_s": 900,
         "probe_timeout_s": 30,
-        "log_path": "logs/kvmem-llama-engine.log",
+        "log_path": "log/kvmem-llama-engine.log",
     },
 }
 # Display order: the management page groups slots by ``category`` and lists
@@ -5452,8 +5537,70 @@ KV_PROBE_MARKER = "LLM_ROUTER_KVPROBE_42"
 
 
 def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
-    """Conventional sibling-directory layout, used to prefill a new engine."""
+    """Conventional layout, used to prefill a new engine.
+
+    When the setup subsystem has produced binaries in ``bin/`` the defaults
+    follow that layout (bin/config/engine); otherwise the historical sibling
+    directories are suggested.
+    """
     root = base_dir.parent
+    bin_dir = base_dir / "bin"
+    config_dir = base_dir / "config"
+
+    def provisioned(name: str) -> str:
+        for candidate in (
+            bin_dir / name,
+            bin_dir / f"{name}-cuda",
+            bin_dir / f"{name}-rocm",
+        ):
+            if candidate.is_file():
+                return str(candidate)
+        return ""
+
+    if engine_id == "llama" and provisioned("llama-server"):
+        engine_root = base_dir / "engine" / "llama.cpp"
+        return {
+            "binary": provisioned("llama-server"),
+            "cwd": str(engine_root),
+            "models_dir": str(base_dir / "models"),
+            "preset": str(config_dir / "llama.cpp" / "model.ini"),
+        }
+    if engine_id == "strata":
+        engine_root = base_dir / "engine" / "Strata"
+        python = engine_root / ".venv" / "bin" / "python"
+        if provisioned("strata") and python.is_file():
+            return {
+                "binary": str(python),
+                "cwd": str(engine_root),
+                "models_dir": str(config_dir / "strata"),
+                "template": str(config_dir / "strata" / "strata-template.json"),
+            }
+    if engine_id == "kvmem":
+        engine_root = base_dir / "engine" / "kvmem"
+        python = engine_root / ".venv" / "bin" / "python"
+        if provisioned("kvmem-strata-poly") and python.is_file():
+            return {
+                "binary": str(python),
+                "cwd": str(engine_root / "backends" / "polystrata"),
+                "models_dir": str(config_dir / "polystrata"),
+                "meta": str(config_dir / "polystrata" / "models.json"),
+            }
+    if engine_id == "ninfer" and provisioned("kvmem-ninfer-serve"):
+        engine_root = base_dir / "engine" / "kvmem"
+        return {
+            "binary": provisioned("kvmem-ninfer-serve"),
+            "cwd": str(engine_root),
+            "models_dir": str(config_dir / "ninfer"),
+            "template": str(config_dir / "ninfer" / "ninfer.template.json"),
+        }
+    if engine_id == "kvmem_llama" and provisioned("kvmem-llama-server"):
+        engine_root = base_dir / "engine" / "kvmem"
+        return {
+            "binary": provisioned("kvmem-llama-server"),
+            "cwd": str(engine_root),
+            "models_dir": str(config_dir / "kvmem-llama"),
+            "template": str(config_dir / "kvmem-llama" / "kvmem-llama.template.json"),
+        }
     if engine_id == "llama":
         cwd = root / "llama.cpp"
         return {
@@ -5771,6 +5918,48 @@ def _probe_tail(text: str, limit: int = 600) -> str:
     return compact[-limit:]
 
 
+def probe_runtime_libs(binary: str) -> list[Path]:
+    """Shared objects a provisioned bin/ executable needs at probe time.
+
+    The install puts each engine's shared objects under bin/libs/<engine>/
+    [<variant>|default]; EngineManager adds them at start, and the probe must
+    see the same directories or a valid binary looks broken (libllama-common
+    is not found for bin/kvmem-llama-server)."""
+    path = Path(str(binary or ""))
+    if not path.is_absolute():
+        return []
+    root: Path | None = None
+    parent = path.parent
+    for _ in range(4):
+        if parent.name == "bin":
+            root = parent
+            break
+        if parent.parent == parent:
+            break
+        parent = parent.parent
+    if root is None:
+        return []
+    libs = root / "libs"
+    if not libs.is_dir():
+        return []
+    name = path.name.split(".")[0]
+    variant = ""
+    for suffix in ("-cuda", "-rocm"):
+        if name.endswith(suffix):
+            variant = suffix[1:]
+            name = name[: -len(suffix)]
+            break
+    engine = EngineManager._artifact_engine(name)
+    if not engine:
+        return []
+    out: list[Path] = []
+    if variant and (libs / engine / variant).is_dir():
+        out.append(libs / engine / variant)
+    if (libs / engine / "default").is_dir():
+        out.append(libs / engine / "default")
+    return out
+
+
 def probe_engine_binary(
     engine_id: str,
     fields: dict[str, str],
@@ -5797,6 +5986,13 @@ def probe_engine_binary(
     if isinstance(extra, dict):
         env.update({str(key): str(value) for key, value in extra.items()})
     env.setdefault("PYTHONUNBUFFERED", "1")
+    lib_dirs = probe_runtime_libs(binary)
+    if lib_dirs:
+        current = env.get("LD_LIBRARY_PATH")
+        values = [str(item) for item in lib_dirs]
+        if current:
+            values.append(current)
+        env["LD_LIBRARY_PATH"] = ":".join(values)
     timeout = float(spec.get("probe_timeout_s") or 15)
     try:
         proc = subprocess.run(
@@ -6381,6 +6577,31 @@ def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
 # engine supervisor
 
 
+def toolchain_runtime_libs(config: dict[str, Any]) -> list[str]:
+    """Library directories of the configured GPU toolchains.
+
+    Built engines (notably Strata) link the vendor runtime without an rpath,
+    so the started engine and its helpers need the toolchain's lib dir on
+    LD_LIBRARY_PATH."""
+    setup_cfg = config.get("setup") if isinstance(config.get("setup"), dict) else {}
+    dirs: list[str] = []
+    for key, env_key, defaults in (
+        ("cuda_path", "CUDA_HOME", ("/usr/local/cuda", "/opt/cuda")),
+        ("rocm_path", "ROCM_PATH", ("/opt/rocm",)),
+    ):
+        raw = str(setup_cfg.get(key) or os.environ.get(env_key) or "").strip()
+        for root in ([raw] if raw else []) + list(defaults):
+            base = Path(root).expanduser()
+            if not base.is_dir():
+                continue
+            for sub in ("lib64", "lib"):
+                lib = base / sub
+                if lib.is_dir() and str(lib) not in dirs:
+                    dirs.append(str(lib))
+            break
+    return dirs
+
+
 class EngineManager:
     def __init__(
         self,
@@ -6390,6 +6611,7 @@ class EngineManager:
         timeouts: dict[str, Any],
         state_path: Path,
         log: logging.Logger,
+        runtime_lib_dirs: list[str] | None = None,
     ):
         self.engine_id = engine_id
         self.cfg = cfg
@@ -6397,6 +6619,7 @@ class EngineManager:
         self.timeouts = timeouts
         self.state_path = state_path
         self.log = log
+        self.runtime_lib_dirs = list(runtime_lib_dirs or [])
         self.host = str(cfg.get("host") or "127.0.0.1")
         self.port = int(cfg.get("port") or 0)
         self.kind = str(cfg.get("kind") or "")
@@ -6575,6 +6798,54 @@ class EngineManager:
             out.append(value)
         return out
 
+    @staticmethod
+    def _artifact_engine(name: str) -> str:
+        """Map a provisioned executable name to the engine whose shared
+        objects it must load. KVMem bundles a pinned llama.cpp build whose
+        libraries are ABI-incompatible with upstream llama.cpp, so the two
+        engines keep separate lib directories."""
+        if name == "ninfer-serve" or name.startswith("kvmem-"):
+            return "kvmem"
+        # bin/kvmem/strata-poly is the alias model configs point at (kvmem's
+        # serve.server recognizes the PolyStrata worker by that exact stem).
+        if name == "strata-poly":
+            return "kvmem"
+        if name.startswith("llama-"):
+            return "llama"
+        if name == "strata" or name.startswith("strata-"):
+            return "strata"
+        return ""
+
+    def _provisioned_lib_dir(self, value: Any) -> list[Path]:
+        """Shared objects installed beside a bin/ executable live in
+        bin/libs/<engine>/[<variant>|default]."""
+        if not value:
+            return []
+        path = Path(str(value))
+        if not path.is_absolute():
+            return []
+        try:
+            path.relative_to(self.base_dir / "bin")
+        except ValueError:
+            return []
+        libs = self.base_dir / "bin" / "libs"
+        name = path.name.split(".")[0]
+        variant = ""
+        for suffix in ("-cuda", "-rocm"):
+            if name.endswith(suffix):
+                variant = suffix[1:]
+                name = name[: -len(suffix)]
+                break
+        engine = self._artifact_engine(name)
+        if not engine:
+            return []
+        out: list[Path] = []
+        if variant and (libs / engine / variant).is_dir():
+            out.append(libs / engine / variant)
+        if (libs / engine / "default").is_dir():
+            out.append(libs / engine / "default")
+        return out
+
     def _environment(self, entry: Model) -> dict[str, str]:
         env = os.environ.copy()
         extra = self.cfg.get("env")
@@ -6584,12 +6855,59 @@ class EngineManager:
             cfg = read_json(Path(entry.config_path))
             if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict):
                 env.update({str(k): str(v) for k, v in cfg["env"].items()})
+            if isinstance(cfg, dict):
+                lib_dirs: list[Path] = []
+                lib_dirs.extend(self._provisioned_lib_dir(cfg.get("exe")))
+                vision = cfg.get("vision")
+                if isinstance(vision, dict):
+                    lib_dirs.extend(self._provisioned_lib_dir(vision.get("exe")))
+                if lib_dirs:
+                    current = env.get("LD_LIBRARY_PATH")
+                    values = [str(item) for item in lib_dirs]
+                    if current:
+                        values.append(current)
+                    env["LD_LIBRARY_PATH"] = ":".join(values)
+        lib_dirs = self._provisioned_lib_dir(
+            (self.cfg.get("command") or [""])[0] if isinstance(self.cfg.get("command"), list) else ""
+        )
+        prefix = list(self.runtime_lib_dirs) + [str(item) for item in lib_dirs]
+        if prefix:
+            current = env.get("LD_LIBRARY_PATH")
+            values = list(dict.fromkeys(prefix))
+            if current:
+                values.append(current)
+            env["LD_LIBRARY_PATH"] = ":".join(values)
         env.setdefault("PYTHONUNBUFFERED", "1")
         return env
+
+    def _strip_kvmem_expert_save(self, entry: Model) -> None:
+        """Migrate old model JSONs: the PolyStrata worker writes the
+        --expert-profile counters back on its own and exits on the Strata
+        project's --expert-profile-save flags, which earlier configs carry."""
+        if not entry.config_path:
+            return
+        path = Path(entry.config_path)
+        cfg = read_json(path)
+        if not isinstance(cfg, dict):
+            return
+        args = cfg.get("args")
+        if not isinstance(args, list):
+            return
+        original = [str(item) for item in args]
+        stripped = kvmem_poly_strip_expert_save(original, cfg)
+        if stripped != original:
+            cfg["args"] = stripped
+            try:
+                write_json_atomic(path, cfg)
+                self.log.info("%s: removed --expert-profile-save options", entry.id)
+            except OSError as exc:
+                self.log.warning("%s: cannot write %s: %s", self.engine_id, path, exc)
 
     def start(self, entry: Model) -> None:
         if self.alive():
             raise EngineFailure(f"{self.engine_id}: engine is already running")
+        if self.kind == "kvmem":
+            self._strip_kvmem_expert_save(entry)
         if not port_free(self.host, self.port):
             raise EngineFailure(
                 f"{self.engine_id}: internal port {self.host}:{self.port} is already in use; "
@@ -7332,6 +7650,14 @@ class Gateway:
         self.download_procs: dict[str, subprocess.Popen[Any]] = {}
         self.download_logs: dict[str, Path] = {}
         self.engine_update_lock = threading.Lock()
+        self.engine_setup = EngineSetup(
+            base_dir,
+            log,
+            config,
+            persist=self._persist_config,
+            proxy_cfg=self._setup_proxy,
+            stop_engine=self._stop_engine_for_setup,
+        )
         self.smoke_image_path = resolve_path(
             base_dir, config.get("smoke_image") or "smoke.png"
         )
@@ -7901,6 +8227,14 @@ class Gateway:
             "strata_dir": "strata",
         }.get(str(kind), "")
 
+    def _persist_config(self) -> None:
+        with self._config_lock:
+            write_json_atomic(self.config_path, self.config)
+
+    def _setup_proxy(self) -> dict[str, Any] | None:
+        proxy = self.config.get("proxy")
+        return proxy if isinstance(proxy, dict) else None
+
     def _engine_config_label(self) -> str:
         try:
             return str(self.config_path.relative_to(self.base_dir))
@@ -7918,6 +8252,57 @@ class Gateway:
             index += 1
         target.write_bytes(self.config_path.read_bytes())
         return target
+
+    def setup_view(self) -> dict[str, Any]:
+        data = self.engine_setup.view()
+        data["proxy_configured"] = self._proxy_configured()
+        return data
+
+    def save_setup_toolchains(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            data = self.engine_setup.save_paths(payload)
+        except SetupError as exc:
+            raise BadRequest(str(exc)) from exc
+        data["proxy_configured"] = self._proxy_configured()
+        data["engines"] = self.engine_setup.view()["engines"]
+        return data
+
+    def _stop_engine_for_setup(self) -> bool:
+        """Compiling needs the machine's RAM and the card, so a setup build
+        stops whatever engine is serving first.  Returns True if one ran."""
+        with self.cond:
+            alive = bool(self.engine is not None and self.engine.alive())
+        if not alive:
+            return False
+        self.log.info("setup: stopping the running engine before compiling")
+        self.stop_engine()
+        return True
+
+    def start_setup_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        action = str(payload.get("action") or "install").strip().lower()
+        engine_id = payload.get("engine")
+        engine_id = str(engine_id).strip() if isinstance(engine_id, str) else None
+        use_proxy = payload.get("use_proxy") is True
+        try:
+            return self.engine_setup.start_job(
+                action,
+                engine_id,
+                use_proxy,
+                force=payload.get("force") is True,
+                kind=str(payload.get("kind") or "").strip() or None,
+                version=str(payload.get("version") or "").strip() or None,
+            )
+        except SetupError as exc:
+            raise BadRequest(str(exc)) from exc
+
+    def setup_job_view(self, job_id: str) -> dict[str, Any] | None:
+        return self.engine_setup.job_view(job_id)
+
+    def cancel_setup_job(self, job_id: str) -> dict[str, Any] | None:
+        return self.engine_setup.cancel(job_id)
+
+    def check_setup_updates(self, use_proxy: bool) -> dict[str, Any]:
+        return self.engine_setup.check_updates(use_proxy is True)
 
     def engine_paths_view(self) -> dict[str, Any]:
         engines_cfg = self.config.get("engines")
@@ -8047,6 +8432,7 @@ class Gateway:
                     self.timeouts,
                     self.state_path,
                     self.log,
+                    runtime_lib_dirs=toolchain_runtime_libs(self.config),
                 )
             else:
                 manager.cfg = cfg
@@ -8993,7 +9379,7 @@ class Gateway:
             "--max-workers", "4",
         ] + [item["path"] for item in selected]
         job_id = uuid.uuid4().hex[:12]
-        log_dir = self.base_dir / "logs" / "downloads"
+        log_dir = self.base_dir / "log" / "downloads"
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -9515,8 +9901,14 @@ class Gateway:
             steps[2]["label"] = "选择 KV 精度、MTP 与 KVMem 参数"
         if kind == "strata_dir":
             steps[2]["label"] = "复制模板并应用 Strata 参数"
+            steps.insert(3, {
+                "key": "tokenizer",
+                "label": "导出 tokenizer",
+                "status": "pending",
+                "detail": "",
+            })
             if draft_path:
-                steps.insert(3, {
+                steps.insert(4, {
                     "key": "draft",
                     "label": "准备 MTP draft",
                     "status": "pending",
@@ -10192,6 +10584,43 @@ class Gateway:
             raise BadRequest(f"draft 转换未生成 {', '.join(missing)}：{runtime}")
         return runtime, False
 
+    def _strata_export_tokenizer(
+        self, engine_cfg: dict[str, Any], model: Path, out_root: Path, job: dict[str, Any]
+    ) -> str:
+        """Write the GGUF's own tokenizer into ``out_root/tokenizer``.
+
+        Strata's serve.server refuses to start a native GGUF without a
+        ``tokenizer/vocab.json`` directory, and its tools/strata_tokenizer.py
+        reads only the GGUF header (tokens, merges, token types, chat
+        template), so a multi-GB model is never loaded into memory."""
+        command = engine_cfg.get("command")
+        python = str(command[0]) if isinstance(command, list) and command else sys.executable
+        cwd = Path(str(engine_cfg.get("cwd") or "")).expanduser()
+        script = cwd / "tools" / "strata_tokenizer.py"
+        if not script.is_file():
+            raise BadRequest(f"找不到 Strata tokenizer 导出工具：{script}")
+        try:
+            out_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise BadRequest(f"无法创建 tokenizer 目录 {out_root}：{exc}") from exc
+        proc = subprocess.run(
+            [python, str(script), "--gguf", str(model), "--out", str(out_root)],
+            cwd=str(cwd) if cwd.is_dir() else None,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        if proc.returncode != 0:
+            lines = [line for line in (proc.stderr or proc.stdout or "").strip().splitlines()
+                     if line.strip()]
+            detail = lines[-1] if lines else f"退出码 {proc.returncode}"
+            raise BadRequest(f"tokenizer 导出失败：{detail}")
+        tokenizer = out_root / "tokenizer"
+        if not (tokenizer / "vocab.json").is_file():
+            raise BadRequest(f"tokenizer 导出结果无效：{tokenizer}")
+        stat_line = (proc.stdout or "").strip().splitlines()
+        return f"{tokenizer}" + (f"；{stat_line[-1]}" if stat_line else "")
+
     def _model_add_strata_worker(
         self,
         job: dict[str, Any],
@@ -10399,14 +10828,26 @@ class Gateway:
                 + (f"；模板 {template_path.name}" if template_path else ""),
             )
 
+            # serve.server refuses a strata start without the model's tokenizer,
+            # so export it from the GGUF metadata (no weights are read) into the
+            # config tree and point the model config at it.
+            models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+            config_dir = Path(str(models_cfg.get("dir") or ""))
+            slug = slugify_model_id(name).lower()
+            config_file = config_dir / f"strata-{slug}.json"
+            if config_file.exists():
+                raise BadRequest(f"配置已存在：{config_file}")
+            self._job_step(job, "tokenizer", "running", "从 GGUF 导出 tokenizer…")
+            tokenizer_root = config_dir / "tokenizers" / slug
+            tokenizer_note = self._strata_export_tokenizer(
+                engine_cfg, model, tokenizer_root, job
+            )
+            new_cfg["tokenizer"] = str(tokenizer_root / "tokenizer")
+            self._job_step(job, "tokenizer", "ok", tokenizer_note)
+
             self._job_step(job, "config", "running")
             params = job.get("params") or self.default_sampling(engine_id)
             self.params.replace(name, params, "strata")
-            models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
-            config_dir = Path(str(models_cfg.get("dir") or ""))
-            config_file = config_dir / f"strata-{slugify_model_id(name).lower()}.json"
-            if config_file.exists():
-                raise BadRequest(f"配置已存在：{config_file}")
             new_cfg["model_name"] = name
             new_cfg["display_name"] = str(info.get("name") or model.stem)
             new_cfg["aliases"] = [alias] if alias else []
@@ -10417,23 +10858,42 @@ class Gateway:
             old_log = str(new_cfg.get("log") or "").strip()
             if old_log:
                 new_cfg["log"] = str(Path(old_log).with_name(f"strata-{name}.log"))
-            if vision is not None:
-                vision_cfg = new_cfg.get("vision")
-                vision_cfg = dict(vision_cfg) if isinstance(vision_cfg, dict) else {}
-                vision_cfg["mmproj"] = str(vision)
-                vision_cfg["model"] = str(model)
-                vision_cfg["gpu"] = bool(vision_gpu)
-                new_cfg["vision"] = vision_cfg
-                # vision_* options only make sense once a mmproj is attached.
-                strata_apply_vision_values(new_cfg, requested_engine)
             else:
-                new_cfg.pop("vision", None)
+                # Without a log path serve.server discards the child engine's
+                # stderr, so a load failure shows only "exited before ready".
+                new_cfg["log"] = str(self.base_dir / "log" / f"strata-{name}.log")
             if not new_cfg.get("exe"):
                 command = engine_cfg.get("command")
                 if isinstance(command, list) and command:
                     new_cfg["exe"] = str(command[0])
             if not new_cfg.get("cwd"):
                 new_cfg["cwd"] = str(engine_cfg.get("cwd") or "")
+            if vision is not None:
+                vision_cfg = new_cfg.get("vision")
+                vision_cfg = dict(vision_cfg) if isinstance(vision_cfg, dict) else {}
+                vision_cfg["mmproj"] = str(vision)
+                vision_cfg["model"] = str(model)
+                vision_cfg["gpu"] = bool(vision_gpu)
+                if not vision_cfg.get("exe"):
+                    # The encoder names the main engine's binary; setup installs
+                    # strata-vision next to it (with the same variant suffix).
+                    exe_path = Path(str(new_cfg.get("exe") or ""))
+                    suffix = next(
+                        (item for item in ("-cuda", "-rocm") if exe_path.name.endswith(item)),
+                        "",
+                    )
+                    vision_cfg["exe"] = str(exe_path.with_name(f"strata-vision{suffix}"))
+                vision_cfg.setdefault("threads", max(1, (os.cpu_count() or 8) // 2))
+                vision_cfg.setdefault("max_tokens", 65536)
+                vision_box = {"vision": vision_cfg}
+                # vision_* options only make sense once a mmproj is attached.
+                strata_apply_vision_values(vision_box, requested_engine)
+                vision_cfg = vision_box["vision"]
+                if not Path(str(vision_cfg["exe"])).is_file():
+                    raise BadRequest(f"视觉编码器不存在：{vision_cfg['exe']}")
+                new_cfg["vision"] = vision_cfg
+            else:
+                new_cfg.pop("vision", None)
             write_json_atomic(config_file, new_cfg)
             job["config_path"] = str(config_file)
             self._job_step(
@@ -10539,7 +10999,7 @@ class Gateway:
         cache_override = False
         try:
             self._job_step(job, "paths", "running")
-            source_is_dir = short == "kvmem" and model.is_dir()
+            source_is_dir = short in ("llama", "kvmem") and model.is_dir()
             auto_vision = None
             if source_is_dir:
                 picked_model, auto_vision = self._pick_gguf_files(model)
@@ -10748,6 +11208,9 @@ class Gateway:
                     kv_cfg.pop("kvmem_mtp_policy", None)
                     kv_cfg.pop("kvmem_mtp_drafts_max", None)
                 kv_cfg["args"] = args
+                kvmem_poly_apply_config_values(kv_cfg, engine_values)
+                args = kvmem_poly_strip_expert_save(args, kv_cfg)
+                kv_cfg["args"] = args
                 kv_cfg["tokenizer"] = str(tokenizer)
                 kv_cfg["tokenizer_preparation"] = "explicit_export"
                 kv_cfg["warm_start"] = False
@@ -10761,7 +11224,11 @@ class Gateway:
                     vision_cfg["gpu"] = bool(vision_gpu)
                     vision_cfg.pop("video", None)
                     if not vision_cfg.get("exe"):
-                        vision_cfg["exe"] = str(Path(str(kv_cfg.get("exe"))).with_name("strata-vision"))
+                        vision_cfg["exe"] = str(
+                            provisioned_tool_from_exe(
+                                Path(str(kv_cfg.get("exe"))), "strata-vision"
+                            )
+                        )
                     vision_cfg.setdefault("threads", max(1, (os.cpu_count() or 8) // 2))
                     vision_cfg.setdefault("max_tokens", 65536)
                     vision_box = {"vision": vision_cfg}
@@ -11273,8 +11740,16 @@ class Gateway:
                     config.pop("kvmem_mtp_policy", None)
                     config.pop("kvmem_mtp_drafts_max", None)
                 kvmem_poly_apply_vision_values(config, engine_values)
+                kvmem_poly_apply_config_values(config, engine_values)
+                args = kvmem_poly_strip_expert_save(args, config)
                 config["args"] = args
                 fresh_values = kvmem_poly_engine_values(args, config)
+            elif entry.engine == "kvmem":
+                args = config.get("args")
+                if isinstance(args, list):
+                    stripped = kvmem_poly_strip_expert_save(args, config)
+                    if stripped != [str(item) for item in args]:
+                        config["args"] = stripped
             write_json_atomic(config_path, config)
             if fresh_values is not None:
                 result["engine_params"] = fresh_values
@@ -12310,6 +12785,68 @@ class Handler(BaseHTTPRequestHandler):
             result = self.gateway.delete_model(name.strip())
             self._json(200, {"status": "ok", **result})
             return
+        if normalized == "/router/setup":
+            if method not in ("GET", "HEAD"):
+                raise MethodNotAllowed("method not allowed")
+            self._json(200, self.gateway.setup_view())
+            return
+        if normalized == "/router/setup/paths":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            self._json(200, self.gateway.save_setup_toolchains(payload))
+            return
+        if normalized == "/router/setup/engine/install":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            payload["action"] = "install"
+            self._json(202, self.gateway.start_setup_job(payload))
+            return
+        if normalized == "/router/setup/engine/update":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            payload["action"] = "update"
+            self._json(202, self.gateway.start_setup_job(payload))
+            return
+        if normalized == "/router/setup/toolchain/install":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            payload["action"] = "toolchain"
+            self._json(202, self.gateway.start_setup_job(payload))
+            return
+        if normalized == "/router/setup/job":
+            if method not in ("GET", "HEAD"):
+                raise MethodNotAllowed("method not allowed")
+            values = parse_qs(query).get("id")
+            job_id = values[0].strip() if values else ""
+            if not job_id:
+                raise BadRequest('send ?id=<job id>')
+            job = self.gateway.setup_job_view(job_id)
+            if job is None:
+                raise NotFound("setup job not found")
+            self._json(200, job)
+            return
+        if normalized == "/router/setup/job/cancel":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            job_id = payload.get("id")
+            if not isinstance(job_id, str) or not job_id.strip():
+                raise BadRequest('send {"id": "..."}')
+            job = self.gateway.cancel_setup_job(job_id.strip())
+            if job is None:
+                raise NotFound("setup job not found")
+            self._json(202 if job.get("status") == "running" else 200, job)
+            return
+        if normalized == "/router/setup/check":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            self._json(200, self.gateway.check_setup_updates(payload.get("use_proxy", False)))
+            return
         if normalized == "/router/engines/paths":
             if method in ("GET", "HEAD"):
                 self._json(200, self.gateway.engine_paths_view())
@@ -12707,7 +13244,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "listen": {"host": "0.0.0.0", "port": 8080},
     "engines": {},
     "timeouts": {"queue_s": 600},
-    "log_file": "logs/router.log",
+    "log_file": "log/router.log",
     "state_file": "state.json",
     "pid_file": "router.pid",
     "model_params_file": "model-params.json",
@@ -12729,6 +13266,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "modelscope": {"use_proxy": False},
         },
     },
+    "setup": {"cuda_path": "", "rocm_path": ""},
 }
 
 
@@ -12780,7 +13318,10 @@ def main(argv: list[str] | None = None) -> int:
     state_path = base_dir / str(config.get("state_file") or "state.json")
     engines: dict[str, EngineManager] = {}
     for engine_id, engine_cfg in config.get("engines", {}).items():
-        engines[engine_id] = EngineManager(engine_id, engine_cfg, base_dir, timeouts, state_path, log)
+        engines[engine_id] = EngineManager(
+            engine_id, engine_cfg, base_dir, timeouts, state_path, log,
+            runtime_lib_dirs=toolchain_runtime_libs(config),
+        )
     gateway = Gateway(config, registry, engines, state_path, base_dir, log, config_path)
     Handler.gateway = gateway
 
