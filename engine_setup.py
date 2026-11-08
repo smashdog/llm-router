@@ -898,6 +898,24 @@ class EngineSetup:
             variants["rocm"] = reports["rocm"]
         return variants
 
+    def installed_products(self) -> dict[str, bool]:
+        """Engine products whose managed binaries are all present.
+
+        Used to keep engines that were never installed out of the model
+        dialogs, even if a stale runtime slot still exists in config.json.
+        """
+        variants = self.active_variants() or {"cuda": {}}
+        out: dict[str, bool] = {}
+        for engine_id in ENGINE_IDS:
+            complete = False
+            for variant in variants:
+                binaries = self._bin_paths(engine_id, variant)
+                if binaries and all(path.is_file() for _, path in binaries):
+                    complete = True
+                    break
+            out[engine_id] = complete
+        return out
+
     # -- status ------------------------------------------------------------
     def _engine_dir(self, engine_id: str) -> Path:
         return self.dir_engine / ("llama.cpp" if engine_id == "llama" else "Strata" if engine_id == "strata" else "kvmem")

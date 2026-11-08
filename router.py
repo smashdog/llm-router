@@ -31,6 +31,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from email.utils import formatdate
@@ -425,6 +426,11 @@ SAMPLING_GENERATION_PATHS = {"/v1/chat/completions", "/v1/completions"}
 
 # Generation endpoints whose usage/timings feed the console statistics card.
 STATS_PATHS = {"/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/messages"}
+
+# llama.cpp-derived engines understand these stream options; asking for them
+# lets the console show live prefill progress and per-token generation speed
+# even when the client did not request them.  Clients ignore the extra fields.
+STREAM_TIMING_ENGINES = {"llama", "strata", "kvmem", "kvmem_llama"}
 
 # Sampling defaults for a model added from the console: the values the two
 # reference models run with (llama.cpp: LFM3-Omni-2B, KVMem: Ornith 1.5).
@@ -7399,19 +7405,30 @@ class EngineManager:
 
 
 class RequestStats:
-    """The most recent completed generation, from upstream usage/timings."""
+    """Live counters for the current generation and the last finished one."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.last: dict[str, Any] | None = None
+        self.live: dict[str, Any] | None = None
 
     def record(self, data: dict[str, Any]) -> None:
         with self.lock:
             self.last = data
+            self.live = None
+
+    def update_live(self, data: dict[str, Any]) -> None:
+        with self.lock:
+            self.live = data
 
     def view(self) -> dict[str, Any]:
         with self.lock:
-            return {"last": dict(self.last)} if self.last else {}
+            out: dict[str, Any] = {}
+            if self.last:
+                out["last"] = dict(self.last)
+            if self.live:
+                out["live"] = dict(self.live)
+            return out
 
 
 class ProxyTrace:
@@ -7419,7 +7436,8 @@ class ProxyTrace:
 
     Reads both non-streaming JSON bodies and SSE ``data:`` lines while the
     bytes pass through unchanged, and records the first content delta so the
-    console can show time-to-first-token.
+    console can show time-to-first-token.  Streamed chunks also feed the live
+    statistics: prompt progress, thinking/decode phase, and current tok/s.
     """
 
     def __init__(self, gateway: "Gateway", entry: Model, started: float):
@@ -7431,6 +7449,21 @@ class ProxyTrace:
         self.timings: dict[str, Any] | None = None
         self.first_token_s: float | None = None
         self.stream = False
+        self.live_id = id(self)
+        self.phase = "prefill"
+        self.prefill_tokens = 0
+        self.prefill_total = 0
+        self.prefill_ms: float | None = None
+        self.prefill_rate: float | None = None
+        self.cached_n = 0
+        self.predicted_n = 0
+        self.predicted_cum_rate: float | None = None
+        self.think_tokens = 0
+        self.decode_tokens = 0
+        self.delta_count = 0
+        self.rate_events: deque[tuple[float, float]] = deque(maxlen=2048)
+        self.delta_events: deque[tuple[float, float]] = deque(maxlen=2048)
+        self.last_live_at = 0.0
 
     def feed(self, chunk: bytes) -> None:
         self.stream = True
@@ -7472,6 +7505,10 @@ class ProxyTrace:
             self._object(obj)
 
     def _object(self, obj: dict[str, Any]) -> None:
+        now = time.monotonic()
+        progress = obj.get("prompt_progress")
+        if isinstance(progress, dict):
+            self._progress(progress)
         usage = obj.get("usage")
         if not isinstance(usage, dict):
             for key in ("response", "message"):
@@ -7488,8 +7525,132 @@ class ProxyTrace:
             merged = dict(self.timings or {})
             merged.update(timings)
             self.timings = merged
+            self._timings(timings, now)
+        self._delta(obj, now)
         if self.first_token_s is None and self._has_text(obj):
-            self.first_token_s = max(0.0, time.monotonic() - self.started)
+            self.first_token_s = max(0.0, now - self.started)
+        self._publish_live(now)
+
+    def _progress(self, progress: dict[str, Any]) -> None:
+        processed = self._number(progress.get("processed"))
+        total = self._number(progress.get("total"))
+        cached = self._number(progress.get("cache"))
+        elapsed_ms = self._number(progress.get("time_ms"))
+        if processed is not None:
+            self.prefill_tokens = int(processed)
+        if total is not None:
+            self.prefill_total = int(total)
+        if cached is not None:
+            self.cached_n = int(cached)
+        if elapsed_ms and elapsed_ms > 0:
+            self.prefill_ms = elapsed_ms
+            # Cached prefix tokens are not evaluated again; do not let them
+            # inflate the prompt processing speed.
+            fresh = max(0, self.prefill_tokens - self.cached_n)
+            if fresh and elapsed_ms >= 200:
+                self.prefill_rate = fresh / elapsed_ms * 1000.0
+        if self.predicted_n == 0:
+            self.phase = "prefill"
+
+    def _timings(self, timings: dict[str, Any], now: float) -> None:
+        prompt_ms = self._number(timings.get("prompt_ms"))
+        prompt_n = self._number(timings.get("prompt_n"))
+        prompt_rate = self._number(timings.get("prompt_per_second"))
+        predicted_n = self._number(timings.get("predicted_n"))
+        predicted_rate = self._number(timings.get("predicted_per_second"))
+        if prompt_ms is not None:
+            self.prefill_ms = prompt_ms
+        if prompt_n:
+            self.prefill_tokens = int(prompt_n)
+        if prompt_rate:
+            self.prefill_rate = prompt_rate
+        elif prompt_n and prompt_ms and self.prefill_rate is None:
+            self.prefill_rate = prompt_n / prompt_ms * 1000.0
+        if predicted_n is not None:
+            self.predicted_n = int(predicted_n)
+            if predicted_n > 0:
+                self.rate_events.append((now, predicted_n))
+        if predicted_rate:
+            self.predicted_cum_rate = predicted_rate
+
+    def _delta(self, obj: dict[str, Any], now: float) -> None:
+        choices = obj.get("choices")
+        delta: dict[str, Any] = {}
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            raw = choices[0].get("delta")
+            if isinstance(raw, dict):
+                delta = raw
+        thinking = delta.get("reasoning_content")
+        content = delta.get("content")
+        count = False
+        if thinking:
+            self.think_tokens += 1
+            self.phase = "think"
+            count = True
+        elif content or delta.get("tool_calls"):
+            self.decode_tokens += 1
+            self.phase = "decode"
+            count = True
+        if count:
+            self.delta_count += 1
+            self.delta_events.append((now, self.delta_count))
+
+    @staticmethod
+    def _window_rate(events: deque[tuple[float, float]], window: float = 3.0) -> float | None:
+        now = time.monotonic()
+        while events and now - events[0][0] > window:
+            events.popleft()
+        if len(events) < 2:
+            return None
+        span = events[-1][0] - events[0][0]
+        tokens = events[-1][1] - events[0][1]
+        if span <= 0.2 or tokens <= 0:
+            return None
+        return tokens / span
+
+    def _publish_live(self, now: float) -> None:
+        if now - self.last_live_at < 0.2:
+            return
+        self.last_live_at = now
+        rate = self._window_rate(self.rate_events)
+        if rate is None:
+            rate = self._window_rate(self.delta_events)
+        if rate is None and self.predicted_n > 0:
+            rate = self.predicted_cum_rate
+        if self.phase == "prefill":
+            phase_tokens = self.prefill_tokens
+            if rate is None:
+                rate = self.prefill_rate
+        elif self.phase == "think":
+            phase_tokens = self.think_tokens
+        else:
+            phase_tokens = self.decode_tokens
+        self.gateway.stats.update_live(
+            {
+                "id": self.live_id,
+                "updated": time.time(),
+                "engine": self.entry.engine,
+                "model": self.entry.id,
+                "phase": self.phase,
+                "rate": round(rate, 1) if rate is not None else None,
+                "tokens": int(phase_tokens),
+                "think_tokens": self.think_tokens,
+                "decode_tokens": self.decode_tokens,
+                "gen_tokens": self.predicted_n or (self.think_tokens + self.decode_tokens),
+                "prefill_tokens": self.prefill_tokens,
+                "prefill_total": self.prefill_total,
+                "prefill_rate": round(self.prefill_rate, 1) if self.prefill_rate is not None else None,
+                "prefill_ms": round(self.prefill_ms, 1) if self.prefill_ms is not None else None,
+                "cached_tokens": self.cached_n,
+                "first_token_ms": (
+                    round(self.first_token_s * 1000.0, 1)
+                    if self.first_token_s is not None
+                    else None
+                ),
+                "context_length": self.entry.context_length,
+                "elapsed_s": round(now - self.started, 1),
+            }
+        )
 
     @staticmethod
     def _has_text(obj: dict[str, Any]) -> bool:
@@ -9725,8 +9886,19 @@ class Gateway:
     def model_manage_view(self) -> dict[str, Any]:
         with self.model_jobs_lock:
             jobs = [json.loads(json.dumps(job)) for job in list(self.model_jobs.values())[-10:]]
+        engines = self.manage_engines()
+        try:
+            installed = self.engine_setup.installed_products()
+        except Exception:
+            self.log.exception("cannot determine installed engine products")
+            installed = {}
+        product_for_slot = {"kvmem": "kvmem", "kvmem_llama": "kvmem", "ninfer": "kvmem"}
+        for slot, entry in engines.items():
+            product = product_for_slot.get(slot, slot)
+            if product in installed:
+                entry["installed"] = bool(installed[product])
         return {
-            "engines": self.manage_engines(),
+            "engines": engines,
             "param_schema": {
                 kind: sampling_schema(kind)
                 for kind in ("llama", "kvmem", "ninfer", "kvmem_llama", "strata")
@@ -13085,6 +13257,19 @@ class Handler(BaseHTTPRequestHandler):
             and self.gateway.params.apply(entry.engine, entry.id, payload)
         ):
             payload_changed = True
+        if (
+            isinstance(payload, dict)
+            and payload.get("stream") is True
+            and path.rstrip("/") in STATS_PATHS
+            and entry.engine in STREAM_TIMING_ENGINES
+        ):
+            # Live console statistics: progress during prompt processing and
+            # timing on every streamed token.  Respect an explicit client
+            # choice, otherwise ask the engine for both.
+            for key in ("return_progress", "timings_per_token"):
+                if payload.get(key) is None:
+                    payload[key] = True
+                    payload_changed = True
         trace = (
             ProxyTrace(self.gateway, entry, started)
             if isinstance(payload, dict) and path.rstrip("/") in STATS_PATHS

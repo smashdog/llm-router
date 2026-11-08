@@ -437,16 +437,21 @@
   .section-head .hint { color: var(--muted); font-size: 12px; }
   .section-head .spacer { margin-left: auto; }
 
-  .overview { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 12px; align-items: stretch; }
+  .overview { display: flex; flex-direction: column; gap: 12px; }
   .overview-pane { display: flex; flex-direction: column; min-width: 0; }
   .overview-pane > .section-head { align-items: center; min-height: 34px; }
   .overview .head-actions { width: auto; margin-left: auto; }
-  .overview .engines { flex: 1; grid-template-columns: 1fr; }
-  .overview .engines > .empty { height: 100%; display: grid; place-items: center; }
-  .overview .engine { height: 100%; }
   .overview .stats-grid { flex: 1; }
   .overview .stats-placeholder { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; }
-  @media (max-width: 900px) { .overview { grid-template-columns: 1fr; } }
+  .engine-line {
+    display: flex; align-items: center; gap: 10px; min-width: 0;
+    padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px;
+    background: linear-gradient(180deg, rgba(94,234,212,.05), rgba(0,0,0,0));
+  }
+  .engine-line-text { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .engine-line-text b { color: var(--text); font-weight: 600; }
+  .engine-line-text .sep { margin: 0 2px; }
+  .engine-line .btn { margin-left: auto; flex: none; }
   .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
   .stat-card {
     padding: 14px 16px; border-radius: 14px; background: var(--panel);
@@ -487,15 +492,6 @@
   @media (max-width: 900px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 520px) { .stats-grid { grid-template-columns: 1fr; } }
 
-  .engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
-  .engine {
-    padding: 16px; border-radius: 14px; background: var(--panel);
-    border: 1px solid var(--line); position: relative;
-  }
-  .engine.active { border-color: rgba(94,234,212,.34); background: linear-gradient(160deg, rgba(94,234,212,.07), var(--panel) 60%); }
-  .engine-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
-  .engine-head h3 { margin: 0; font-size: 15px; text-transform: none; }
-  .engine-head .tag { margin-left: auto; }
   .tag {
     display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px;
     border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
@@ -729,20 +725,15 @@
   <main id="console-view">
   <div id="console-content" hidden>
   <section class="block overview" aria-label="引擎与运行状态">
-    <div class="overview-pane" aria-labelledby="engines-title">
-      <div class="section-head">
-        <h2 id="engines-title">引擎</h2>
-        <span class="hint">只显示当前运行的引擎</span>
-      </div>
-      <div class="engines" id="engines"></div>
+    <div class="engine-line" id="engine-line" hidden>
+      <span class="dot ok" aria-hidden="true"></span>
+      <span class="engine-line-text">引擎：<b id="engine-line-name">—</b><span class="sep">，</span>模型：<b id="engine-line-model" class="code">—</b></span>
+      <button class="btn danger sm" id="btn-stop" type="button">停止引擎</button>
     </div>
     <div class="overview-pane" aria-labelledby="stats-title" id="stats-section">
       <div class="section-head">
         <h2 id="stats-title">运行状态</h2>
         <span class="hint" id="stats-meta">最近一次生成</span>
-        <div class="head-actions">
-          <button class="btn danger" id="btn-stop" type="button">停止引擎</button>
-        </div>
       </div>
       <div class="stats-grid" id="stats"></div>
     </div>
@@ -765,11 +756,6 @@
       </div>
       <div class="chips" id="engine-filter" role="group" aria-label="按引擎筛选">
         <button class="chip on" data-engine="all" type="button">全部</button>
-        <button class="chip" data-engine="llama" type="button">llama.cpp</button>
-        <button class="chip" data-engine="strata" type="button">Strata</button>
-        <button class="chip" data-engine="kvmem" type="button">KVMem</button>
-        <button class="chip" data-engine="ninfer" type="button">NInfer</button>
-        <button class="chip" data-engine="kvmem_llama" type="button">KVMem + llama.cpp</button>
       </div>
       <span class="count" id="model-count"></span>
     </div>
@@ -2738,28 +2724,39 @@
 
   function renderEngines() {
     const status = state.status;
-    const host = $("engines");
-    if (!status) { host.innerHTML = '<div class="empty">等待网关状态…</div>'; return; }
+    const line = $("engine-line");
+    if (!line) return;
+    if (!status) { line.hidden = true; return; }
     const engines = status.engines || {};
     const runningIds = Object.keys(engines).filter((id) => engines[id] && engines[id].alive);
-    if (!runningIds.length) { host.innerHTML = '<div class="empty">无引擎运行</div>'; return; }
+    if (!runningIds.length) { line.hidden = true; return; }
     const id = runningIds.includes(status.active_engine) ? status.active_engine : runningIds[0];
-    const e = engines[id] || {};
-    host.innerHTML = `
-      <article class="engine active">
-        <div class="engine-head">
-          <span class="dot ok"></span>
-          <h3>${esc(ENGINE_LABELS[id] || id)}</h3>
-          <span class="tag green">运行中</span>
-        </div>
-        <div class="kv">
-          <span class="k">类型</span><span class="v">${esc(e.kind || "—")}</span>
-          <span class="k">内部地址</span><span class="v code">${esc(e.host || "—")}:${esc(e.port || "—")}</span>
-          <span class="k">PID</span><span class="v code">${esc(e.pid || "—")}</span>
-          <span class="k">已加载模型</span><span class="v code">${esc(e.model || "—")}</span>
-          <span class="k">启动时间</span><span class="v">${esc(fmtTime(e.started_at))}</span>
-        </div>
-      </article>`;
+    const entry = engines[id] || {};
+    const model = state.models.find((m) => m.id === status.active_model) || null;
+    const modelName = (model && (model.display_name || model.name || model.id))
+      || entry.model || "—";
+    $("engine-line-name").textContent = ENGINE_LABELS[id] || id;
+    $("engine-line-model").textContent = modelName;
+    line.hidden = false;
+  }
+
+  function renderEngineFilter() {
+    const host = $("engine-filter");
+    if (!host) return;
+    const configured = Object.keys((state.status && state.status.engines) || {});
+    if (state.filter !== "all" && !configured.includes(state.filter)) state.filter = "all";
+    const ids = ["all", ...configured];
+    const key = ids.join("|");
+    if (host.dataset.key !== key) {
+      host.dataset.key = key;
+      host.innerHTML = ids.map((id) => {
+        const label = id === "all" ? "全部" : (ENGINE_LABELS[id] || id);
+        return `<button class="chip" data-engine="${esc(id)}" type="button">${esc(label)}</button>`;
+      }).join("");
+    }
+    host.querySelectorAll(".chip").forEach((chip) => {
+      chip.classList.toggle("on", chip.dataset.engine === state.filter);
+    });
   }
 
   function renderModels() {
@@ -2859,32 +2856,39 @@
     const section = $("stats-section");
     const host = $("stats");
     if (!section || !host) return;
-    const stats = state.status && state.status.stats && state.status.stats.last;
-    if (!stats) {
+    const stats = state.status && state.status.stats;
+    const live = stats && stats.live;
+    if (live) {
+      renderLiveStats(live);
+      return;
+    }
+    const last = stats && stats.last;
+    if (!last) {
       section.hidden = false;
       $("stats-meta").textContent = "最近一次生成";
       host.innerHTML = '<div class="empty stats-placeholder">还没有生成数据</div>';
       return;
     }
     section.hidden = false;
-    const scope = [stats.model, ENGINE_LABELS[stats.engine] || stats.engine].filter(Boolean).join(" · ");
+    const statsData = last;
+    const scope = [statsData.model, ENGINE_LABELS[statsData.engine] || statsData.engine].filter(Boolean).join(" · ");
     $("stats-meta").textContent = scope ? `${scope} · 最近一次生成` : "最近一次生成";
-    const prompt = Number(stats.prompt_tokens) || 0;
-    const completion = Number(stats.completion_tokens) || 0;
-    const total = Number(stats.total_tokens) || prompt + completion;
-    const context = Number(stats.context_length) || 0;
-    const cached = Number(stats.cached_tokens) || 0;
+    const prompt = Number(statsData.prompt_tokens) || 0;
+    const completion = Number(statsData.completion_tokens) || 0;
+    const total = Number(statsData.total_tokens) || prompt + completion;
+    const context = Number(statsData.context_length) || 0;
+    const cached = Number(statsData.cached_tokens) || 0;
     const contextPct = context ? Math.min(100, Math.max(0, total / context * 100)) : 0;
     const reusePct = prompt ? Math.min(100, Math.max(0, cached / prompt * 100)) : 0;
-    const gen = stats.gen_per_second == null ? null : Number(stats.gen_per_second);
-    const prefill = stats.prefill_per_second == null ? null : Number(stats.prefill_per_second);
+    const gen = statsData.gen_per_second == null ? null : Number(statsData.gen_per_second);
+    const prefill = statsData.prefill_per_second == null ? null : Number(statsData.prefill_per_second);
     host.innerHTML = `
       <article class="stat-card">
         <div class="stat-head"><span class="stat-label">本轮平均</span>
           <span class="stat-info" title="最近一次生成的平均解码速度">i</span></div>
         <div>
           <div class="stat-main"><span class="stat-value">${gen == null ? "—" : statNumber(gen, 1)}</span><span class="stat-unit">tok/s</span></div>
-          <div class="stat-sub">生成 ${statNumber(completion)} tokens · 总计 ${statSeconds(stats.total_ms)}</div>
+          <div class="stat-sub">生成 ${statNumber(completion)} tokens · 总计 ${statSeconds(statsData.total_ms)}</div>
         </div>
       </article>
       <article class="stat-card">
@@ -2892,7 +2896,7 @@
           <span class="stat-info" title="最近一次生成的提示词处理速度">i</span></div>
         <div>
           <div class="stat-main"><span class="stat-value">${prefill == null ? "—" : statNumber(prefill)}</span><span class="stat-unit">tok/s</span></div>
-          <div class="stat-sub">预填充 ${statSeconds(stats.prefill_ms)} · 首 token ${statSeconds(stats.first_token_ms)}</div>
+          <div class="stat-sub">预填充 ${statSeconds(statsData.prefill_ms)} · 首 token ${statSeconds(statsData.first_token_ms)}</div>
         </div>
       </article>
       <article class="stat-card">
@@ -2917,10 +2921,77 @@
       </article>`;
   }
 
+  function renderLiveStats(live) {
+    const section = $("stats-section");
+    const host = $("stats");
+    if (!section || !host) return;
+    section.hidden = false;
+    const phase = live.phase === "think" ? "思考" : live.phase === "prefill" ? "预填充" : "解码";
+    const scope = [live.model, ENGINE_LABELS[live.engine] || live.engine].filter(Boolean).join(" · ");
+    $("stats-meta").textContent = `${scope ? scope + " · " : ""}${phase}中`;
+    const rate = live.rate == null ? null : Number(live.rate);
+    const prefillRate = live.prefill_rate == null ? null : Number(live.prefill_rate);
+    const tokens = Number(live.tokens) || 0;
+    const gen = Number(live.gen_tokens) || 0;
+    const prompt = Number(live.prefill_total || live.prefill_tokens) || 0;
+    const processed = Number(live.prefill_tokens) || 0;
+    const processedTotal = Number(live.prefill_total) || 0;
+    const prefillMs = live.prefill_ms == null ? null : Number(live.prefill_ms);
+    const context = Number(live.context_length) || 0;
+    const cached = Number(live.cached_tokens) || 0;
+    const elapsed = Number(live.elapsed_s) || 0;
+    const total = prompt + gen;
+    const contextPct = context ? Math.min(100, Math.max(0, total / context * 100)) : 0;
+    const reusePct = prompt ? Math.min(100, Math.max(0, cached / prompt * 100)) : 0;
+    const prefillSub = processedTotal
+      ? `已处理 ${statNumber(processed)} / ${statNumber(processedTotal)} tokens${prefillMs == null ? "" : ` · ${statSeconds(prefillMs)}`}`
+      : processed
+        ? `已处理 ${statNumber(processed)} tokens${prefillMs == null ? "" : ` · ${statSeconds(prefillMs)}`}`
+        : "等待引擎返回进度";
+    host.innerHTML = `
+      <article class="stat-card">
+        <div class="stat-head"><span class="stat-label">实时速度</span>
+          <span class="stat-info" title="当前阶段最近几秒的平均生成速度；思考与解码分别显示">i</span></div>
+        <div>
+          <div class="stat-main"><span class="stat-value">${rate == null ? "—" : statNumber(rate, 1)}</span><span class="stat-unit">tok/s</span></div>
+          <div class="stat-sub">${phase} ${statNumber(tokens)} tokens · 已用 ${elapsed.toFixed(1)}s</div>
+        </div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-head"><span class="stat-label">预填充速度</span>
+          <span class="stat-info" title="当前请求的提示词处理速度，处理过程中实时更新">i</span></div>
+        <div>
+          <div class="stat-main"><span class="stat-value">${prefillRate == null ? "—" : statNumber(prefillRate)}</span><span class="stat-unit">tok/s</span></div>
+          <div class="stat-sub">${prefillSub}</div>
+        </div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-head"><span class="stat-label">逻辑上下文</span>
+          <span class="stat-info" title="本次请求总 token 占模型上下文长度的比例">i</span></div>
+        <div class="stat-ring-row">
+          <div class="stat-ring" style="--pct:${contextPct.toFixed(1)}"><span>${contextPct.toFixed(0)}%</span></div>
+          <div>
+            <div class="stat-inline">${prompt ? statNumber(total) : "—"} / ${statNumber(context)}</div>
+            <div class="stat-sub">输入 ${prompt ? statNumber(prompt) : "—"} · 输出 ${statNumber(gen)}</div>
+          </div>
+        </div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-head"><span class="stat-label">输入 token 复用</span>
+          <span class="stat-info" title="命中 KV/前缀缓存的输入 token 占比">i</span></div>
+        <div>
+          <div class="stat-main"><span class="stat-value">${prompt ? reusePct.toFixed(0) + "%" : "—"}</span></div>
+          <div class="stat-sub">${prompt ? `${statNumber(cached)} / ${statNumber(prompt)} tokens` : "等待预填充进度"}</div>
+          <div class="stat-bar"><i style="width:${prompt ? reusePct.toFixed(1) : 0}%"></i></div>
+        </div>
+      </article>`;
+  }
+
   function render() {
     renderConsoleState();
     renderStats();
     renderEngines();
+    renderEngineFilter();
     renderModels();
     renderAuth();
   }
@@ -3419,7 +3490,8 @@
   }
 
   function addEngineGroups() {
-    const engines = Object.values((state.manage && state.manage.engines) || {});
+    const engines = Object.values((state.manage && state.manage.engines) || {})
+      .filter((engine) => engine.installed !== false);
     const groups = new Map();
     engines.forEach((engine) => {
       const category = String(engine.category || engine.label || engine.engine || "其他");
