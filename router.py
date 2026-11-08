@@ -1202,7 +1202,7 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     ),
     _kv_engine_spec(
         "kvmem_block_tokens", "--kvmem-block-tokens", "检索块 block", "core", "enum",
-        default="32",
+        default="64",
         choices=[
             {"value": "32", "label": "32"},
             {"value": "64", "label": "64"},
@@ -1212,7 +1212,7 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     ),
     _kv_engine_spec(
         "kvmem_host_mib", "--kvmem-host-mib", "Host KV 预算（MiB）", "core",
-        default=4096, low=1, step=1,
+        default=16384, low=1, step=1,
         note="共享原生 K/V 的 RAM 硬预算",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
@@ -1357,7 +1357,7 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
-        "threads", ("-t", "--threads"), "CPU 线程", "runtime",
+        "threads", ("--threads", "-t"), "CPU 线程", "runtime",
         low=-1, step=1, note="≤0 使用全部可用线程",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
@@ -1484,7 +1484,8 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     ),
     _kv_engine_spec(
         "tail_skip", "--tail-skip", "尾部专家跳过位置", "engine",
-        low=0, step=1, note="0 表示不跳过",
+        default=6, low=0, step=1,
+        note="0 表示不跳过；6 实测 8K..21K 解码 +13%..20%",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
     _kv_engine_spec(
@@ -1494,7 +1495,7 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     ),
     _kv_engine_spec(
         "cache_bias", "--cache-bias", "缓存专家路由加权", "engine", "number",
-        low=-100.0, high=100.0, step=0.01,
+        default=0.5, low=-100.0, high=100.0, step=0.01,
         note="qwen35moe：给已在显存的专家加权，会改变回答",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
@@ -4451,14 +4452,26 @@ def _config_arg_remove(args: list[str], flag: str) -> list[str]:
     return out
 
 
+# Tuned on book (RTX 4070 Laptop 8 GB, Qwen3.6-35B-A3B qwen35moe, 2026-11-08):
+# block 64 / B 32768 / host 16384 hold the working set; prompt batch 1024 beats
+# 2048 at long context (2048 leaves fewer experts in VRAM); --tail-skip 6 is
+# +13%..20% decode at 8K..21K; --cache-bias 0.5 keeps resident experts warm.
+# MTP is offered by default: the add/edit path turns it off (window 1,
+# --no-draft) when the GGUF has no embedded nextn draft block.
 KVMEM_POLY_DEFAULT_ARGS = [
     "--model", "", "--max-context", "32768",
-    "--prompt-batch", "512", "--window", "1",
-    "--no-draft", "--lookup", "0",
-    "--kvmem-budget", "16384", "--kvmem-gen-reserve", "4096",
-    "--kvmem-block-tokens", "32", "--kvmem-host-mib", "4096",
+    "--prompt-batch", "1024", "--window", "2",
+    "--kvmem-mtp", "--lookup", "0",
+    "--kvmem-budget", "32768", "--kvmem-gen-reserve", "4096",
+    "--kvmem-block-tokens", "64", "--kvmem-host-mib", "16384",
     "--kvmem-sink-tokens", "64", "--kvmem-recent-tokens", "64",
-    "--kv", "q8_0", "--vram-reserve-mib", "512",
+    "--kvmem-sessions", "4", "--kvmem-history-reuse",
+    "--kvmem-query-max-tokens", "8192",
+    "--kvmem-query-replay-max-tokens", "65536",
+    "--kv", "q8_0", "--vram-reserve-mib", "256",
+    "--prompt-cache", "0", "--conversation-cache-mib", "0",
+    "--conversation-cache-slots", "0",
+    "--tail-skip", "6", "--cache-bias", "0.5",
 ]
 
 
@@ -9943,6 +9956,10 @@ class Gateway:
                 template_path, template = kvmem_reference_config(engine_cfg, self.base_dir)
                 template_args = [str(item) for item in (template or {}).get("args") or []]
                 template_params = kvmem_poly_engine_values(template_args)
+                # The add flow writes --max-context from the new model's GGUF;
+                # prefilling the template's value would silently cap a 262K
+                # model at 32K.
+                template_params.pop("max_context", None)
                 # MTP depends on the model's own GGUF, so the add dialog starts
                 # blank there and the worker decides from nextn_predict_layers.
                 template_params.pop("kvmem_mtp", None)
