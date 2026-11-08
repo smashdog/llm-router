@@ -4,7 +4,6 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>LLM Router 控制台</title>
-<link rel="icon" href="/ui/favicon.svg" type="image/svg+xml" />
 <style>
   :root {
     color-scheme: dark;
@@ -717,7 +716,6 @@
           <div class="download-popover-list" id="download-popover-list"></div>
         </div>
       </div>
-      <a class="btn ghost" href="/ui/" target="_blank" rel="noopener">打开聊天 UI</a>
       <button class="btn" id="btn-manage" type="button" aria-pressed="false">管理</button>
     </div>
   </header>
@@ -764,7 +762,7 @@
 
   <footer class="footer">
     <span>LLM Router</span>
-    <span>推理接口 /v1 与聊天 UI 的 /props 需要服务端 API Key（可在管理页配置）；控制台与 /models 无鉴权，仅限可信内网使用，请勿直接暴露到公网。</span>
+    <span>推理接口 /v1 需要服务端 API Key（可在管理页配置）；控制台与 /models 无鉴权，仅限可信内网使用，请勿直接暴露到公网。</span>
   </footer>
   </div>
 
@@ -815,7 +813,7 @@
         </section>
         <section class="manage-panel" data-panel="auth" aria-labelledby="auth-title" hidden>
           <h2 id="auth-title">API 密钥管理</h2>
-          <p class="panel-hint">保护 /v1 推理接口和聊天 UI 的 /props 探测；聊天设置里填写的密钥只保存在浏览器，不会修改这里。</p>
+          <p class="panel-hint">保护 /v1 推理接口；密钥只保存在服务端 api-key 文件中。</p>
           <div class="auth-panel">
             <div class="auth-summary">
               <span class="tag" id="auth-state">读取中</span>
@@ -834,7 +832,7 @@
               </div>
             </form>
             <p class="auth-error" id="auth-error" hidden></p>
-            <p class="auth-note">密钥保存在服务端 api-key 文件中，保存后立即生效。聊天 UI 的 API Key 只作为客户端 Authorization 请求头发送，不会写入服务端。</p>
+            <p class="auth-note">密钥保存在服务端 api-key 文件中，保存后立即生效；/v1 请求需携带 Authorization: Bearer 密钥。</p>
           </div>
         </section>
         <section class="manage-panel" data-panel="proxy" aria-labelledby="proxy-title" hidden>
@@ -968,7 +966,7 @@
       </div>
       <div class="params-panel" data-param-panel="basic">
         <div id="params-name">
-          <p class="params-group-title">模型名称 <span>只用于控制台与聊天 UI 显示，不改变模型 ID</span></p>
+          <p class="params-group-title">模型名称 <span>只用于控制台显示，不改变模型 ID</span></p>
           <div class="params-grid">
             <label>显示名称 <span class="name">display-name</span>
               <textarea id="params-name-input" rows="2" spellcheck="false" placeholder=""></textarea></label>
@@ -1590,8 +1588,8 @@
     tag.className = "tag " + (auth.configured ? "green" : "");
     const where = auth.source === "config" ? "配置文件" : (auth.key_file || "api-key 文件");
     detail.textContent = auth.configured
-      ? `密钥 ${auth.hint || "****"} · 存储于 ${where} · 聊天 UI 需要填写同一密钥`
-      : "推理接口当前无需鉴权；设置后 /v1 与 /props 会要求 Bearer 密钥。";
+      ? `密钥 ${auth.hint || "****"} · 存储于 ${where}`
+      : "推理接口当前无需鉴权；设置后 /v1 会要求 Bearer 密钥。";
     $("auth-current-field").hidden = !auth.configured;
     $("auth-current").required = !!auth.configured;
     $("auth-current").disabled = state.authBusy;
@@ -1645,7 +1643,7 @@
     }
     const ok = await askConfirm(
       "清除服务端 API 密钥",
-      "清除后 /v1 推理接口和 /props 将不再要求 API Key，聊天 UI 中已保存的密钥会被服务端忽略。",
+      "清除后 /v1 推理接口将不再要求 API Key。",
       "清除",
       true,
     );
@@ -2634,12 +2632,38 @@
     });
   }
 
+  function mergeSetupProxy(map) {
+    if (!map || typeof map !== "object") return;
+    state.setupProxy = {};
+    for (const [key, value] of Object.entries(map)) state.setupProxy[key] = value === true;
+  }
+
+  async function persistSetupProxy(key, enabled) {
+    const previous = !!state.setupProxy[key];
+    state.setupProxy[key] = enabled;
+    try {
+      const payload = await api("/router/setup/proxy", {
+        method: "POST",
+        body: JSON.stringify({ key, enabled }),
+      });
+      mergeSetupProxy(payload && payload.setup_proxy);
+      if (state.setup && payload && payload.setup_proxy) {
+        state.setup.setup_proxy = payload.setup_proxy;
+      }
+    } catch (error) {
+      state.setupProxy[key] = previous;
+      toast(`代理勾选保存失败：${error.message}`, "bad");
+    }
+    renderSetup();
+  }
+
   async function loadSetup() {
     if (state.setupLoading) return;
     state.setupLoading = true;
     try {
       state.setup = await api("/router/setup");
       mergeSetupJobs(state.setup.jobs);
+      mergeSetupProxy(state.setup && state.setup.setup_proxy);
       renderSetup();
     } catch (error) {
       const host = $("toolchain-rows");
@@ -3874,7 +3898,7 @@
   $("engine-provision").addEventListener("change", (event) => {
     const box = event.target.closest("input[data-setup-proxy]");
     if (!box) return;
-    state.setupProxy[box.dataset.setupProxy] = box.checked;
+    persistSetupProxy(box.dataset.setupProxy, box.checked).catch((error) => toast(error.message, "bad"));
   });
   $("engine-provision").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-setup-action]");

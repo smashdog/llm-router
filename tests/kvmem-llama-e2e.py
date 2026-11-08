@@ -145,10 +145,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"object": "list", "data": [
                 {"id": alias, "object": "model", "status": "loaded"},
             ]})
-        elif self.path.rstrip("/") == "/props":
-            # Backends run with --no-ui; the gateway must re-enable the flag so
-            # its bundled chat UI keeps loaded models selectable.
-            self.send_json(200, {"model_path": model, "alias": alias, "ui": False})
         else:
             self.send_json(404, {"error": {"message": "not found"}})
 
@@ -235,12 +231,10 @@ config = {
     "log_file": "logs/router.log",
     "model_params_file": "model-params.json",
     "smoke_image": "smoke.png",
-    "webui": {
+    "console": {
         "enabled": True,
-        "root": str(ROOT / "webui"),
-        "console": "index.html",
-        "ui_dir": "llama-ui",
-        "ui_path": "/ui",
+        "root": str(ROOT / "console"),
+        "file": "index.html",
     },
     "engines": {},
 }
@@ -838,8 +832,6 @@ try:
     switched = starts()[-1]
     assert switched["alias"] == model_id and switched["model"] == str(main_model), switched
     assert switched["mmproj"] == str(mmproj), switched
-    props = requests.get(url + "/props", params={"model": model_id}, timeout=10).json()
-    assert props["ui"] is True, props
     unloaded = requests.post(url + "/models/unload", json={"model": model_id}, timeout=20)
     assert unloaded.status_code in (200, 202), unloaded.text
     wait_idle()

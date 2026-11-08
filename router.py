@@ -42,7 +42,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import requests
 
-from engine_setup import EngineSetup, SetupError, detect_installed_toolchain
+from engine_setup import ENGINE_CATALOG, EngineSetup, SetupError, detect_installed_toolchain
 
 
 VERSION = "0.4.3"
@@ -61,15 +61,10 @@ STATIC_TYPES = {
     ".webmanifest": "application/manifest+json; charset=utf-8",
     ".woff2": "font/woff2",
 }
-UI_API_PREFIXES = (
-    "/v1/",
-    "/models",
-    "/props",
-    "/slots",
-    "/tools",
-    "/health",
-    "/router",
-    "/version",
+# Per-card "use proxy" choices on the engine page survive restarts.
+SETUP_PROXY_KEYS = frozenset(
+    [f"toolchain:{kind}" for kind in ("cuda", "rocm")]
+    + [f"engine:{engine_id}" for engine_id in ENGINE_CATALOG]
 )
 
 OPENAI_JSON_PATHS = {
@@ -4456,12 +4451,123 @@ def _config_arg_remove(args: list[str], flag: str) -> list[str]:
     return out
 
 
-def kvmem_reference_config(engine_cfg: dict[str, Any]) -> tuple[Path | None, dict[str, Any] | None]:
+KVMEM_POLY_DEFAULT_ARGS = [
+    "--model", "", "--max-context", "32768",
+    "--prompt-batch", "512", "--window", "1",
+    "--no-draft", "--lookup", "0",
+    "--kvmem-budget", "16384", "--kvmem-gen-reserve", "4096",
+    "--kvmem-block-tokens", "32", "--kvmem-host-mib", "4096",
+    "--kvmem-sink-tokens", "64", "--kvmem-recent-tokens", "64",
+    "--kv", "q8_0", "--vram-reserve-mib", "512",
+]
+
+
+def kvmem_generated_reference(
+    engine_cfg: dict[str, Any], base_dir: Path | None = None
+) -> dict[str, Any] | None:
+    """Synthesize a strata config when no template file exists.
+
+    The engine's models.dir is often a legacy directory that only has stale
+    per-model files, while the managed install keeps its binaries in
+    ``bin/`` and its sources in ``engine/kvmem``.  This walks both places so
+    a new model can always be created from the console's 更多参数 values."""
+    models = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+    config_dir = Path(str(models.get("dir") or ""))
+    engine_cwd = Path(str(engine_cfg.get("cwd") or "."))
+    exe: Path | None = None
+    cwd: Path | None = None
+    vision: Path | None = None
+    try:
+        existing = sorted(config_dir.glob("strata-*.json*"))
+    except OSError:
+        existing = []
+    # Stale backups (.bak-*) still record the binary this deployment used.
+    for path in existing:
+        cfg = read_json(path)
+        if not isinstance(cfg, dict):
+            continue
+        candidate = Path(str(cfg.get("exe") or ""))
+        if not candidate.is_file():
+            continue
+        exe = candidate
+        raw_cwd = str(cfg.get("cwd") or "").strip()
+        if raw_cwd and Path(raw_cwd).is_dir():
+            cwd = Path(raw_cwd)
+        vision_cfg = cfg.get("vision")
+        if isinstance(vision_cfg, dict):
+            candidate_vision = Path(str(vision_cfg.get("exe") or ""))
+            if candidate_vision.is_file():
+                vision = candidate_vision
+        break
+    if base_dir is not None:
+        for candidate in (
+            base_dir / "bin" / "kvmem" / "strata-poly",
+            base_dir / "bin" / "kvmem" / "cuda" / "strata-poly",
+            base_dir / "bin" / "kvmem" / "rocm" / "strata-poly",
+            base_dir / "bin" / "kvmem-strata-poly",
+        ):
+            if exe is None and candidate.is_file():
+                exe = candidate
+        managed_cwd = base_dir / "engine" / "kvmem" / "backends" / "polystrata"
+        if cwd is None and managed_cwd.is_dir():
+            cwd = managed_cwd
+        for candidate in (
+            base_dir / "bin" / "strata-vision",
+            base_dir / "bin" / "strata-vision-cuda",
+            base_dir / "bin" / "strata-vision-rocm",
+        ):
+            if vision is None and candidate.is_file():
+                vision = candidate
+    if exe is None:
+        return None
+    if cwd is None:
+        cwd = engine_cwd
+    cfg: dict[str, Any] = {
+        "model_name": "template",
+        "display_name": "自动生成的 PolyStrata 模板",
+        "aliases": [],
+        "args": list(KVMEM_POLY_DEFAULT_ARGS),
+        "exe": str(exe),
+        "cwd": str(cwd),
+        "vision": {"exe": str(vision)} if vision is not None else {},
+        "host": str(engine_cfg.get("host") or "127.0.0.1"),
+        "port": parse_int(engine_cfg.get("port")) or 18081,
+    }
+    if base_dir is not None:
+        cfg["log"] = str(base_dir / "log" / "polystrata-generated.log")
+    return cfg
+
+
+def kvmem_cache_supported(
+    template: dict[str, Any] | None, engine_cfg: dict[str, Any]
+) -> bool:
+    """PolyStrata quantizes the KV cache with --kv (q8_0).
+
+    The flag is on by default: the managed reference, and every build this
+    project ships, accepts it.  Only a readable --help that clearly lacks the
+    flag (older binaries) falls back to the engine's own KV precision."""
+    if template is None:
+        return False
+    exe = Path(str(template.get("exe") or ""))
+    if not exe.is_file():
+        return True
+    cwd = Path(str(template.get("cwd") or engine_cfg.get("cwd") or "."))
+    help_text = binary_help_text(exe, cwd)
+    if not help_text.strip():
+        return True
+    return re.search(r"(?<![\w-])--kv(?![\w-])", help_text) is not None
+
+
+def kvmem_reference_config(
+    engine_cfg: dict[str, Any], base_dir: Path | None = None
+) -> tuple[Path | None, dict[str, Any] | None]:
     """The strata config that seeds newly added KVMem models.
 
     The install writes config/polystrata/strata-reference.json as the
     canonical option template (its --model is empty and gets replaced); older
-    trees that predate it fall back to a saved Ornith entry."""
+    trees that predate it fall back to a saved Ornith entry.  When the
+    engine's models.dir has no usable template at all, the managed tree's
+    reference and then a synthesized config are used instead."""
     config_dir = Path(str((engine_cfg.get("models") or {}).get("dir") or ""))
     reference = config_dir / "strata-reference.json"
     cfg = read_json(reference)
@@ -4486,7 +4592,22 @@ def kvmem_reference_config(engine_cfg: dict[str, Any]) -> tuple[Path | None, dic
             return path, cfg
         if "ornith" in str(cfg.get("model_name") or path.name).lower():
             return path, cfg
-    return fallback if fallback else (None, None)
+    if fallback is not None:
+        return fallback
+    if base_dir is not None:
+        managed = base_dir / "config" / "polystrata" / "strata-reference.json"
+        cfg = read_json(managed)
+        if (
+            isinstance(cfg, dict)
+            and cfg.get("exe")
+            and isinstance(cfg.get("args"), list)
+            and Path(str(cfg["exe"])).is_file()
+        ):
+            return managed, cfg
+    generated = kvmem_generated_reference(engine_cfg, base_dir)
+    if generated is not None:
+        return None, generated
+    return None, None
 
 
 def ninfer_reference_config(engine_cfg: dict[str, Any]) -> tuple[Path | None, dict[str, Any] | None]:
@@ -7928,7 +8049,7 @@ class Gateway:
             "source": source,
             "hint": self._key_hint(key) if key else None,
             "key_file": self._auth_key_label(),
-            "protected": ["/v1/*", "/props"],
+            "protected": ["/v1/*"],
         }
 
     def _write_auth_file(self, key: str) -> None:
@@ -8458,9 +8579,28 @@ class Gateway:
         target.write_bytes(self.config_path.read_bytes())
         return target
 
+    def _setup_proxy_view(self) -> dict[str, bool]:
+        stored = self.config.get("setup_proxy")
+        stored = stored if isinstance(stored, dict) else {}
+        return {key: stored.get(key) is True for key in sorted(SETUP_PROXY_KEYS)}
+
+    def set_setup_proxy(self, key: str, enabled: bool) -> dict[str, bool]:
+        if key not in SETUP_PROXY_KEYS:
+            raise BadRequest(f"unknown proxy key {key!r}")
+        with self._config_lock:
+            stored = self.config.get("setup_proxy")
+            stored = dict(stored) if isinstance(stored, dict) else {}
+            stored[key] = bool(enabled)
+            self.config["setup_proxy"] = {
+                name: value for name, value in stored.items() if name in SETUP_PROXY_KEYS
+            }
+            write_json_atomic(self.config_path, self.config)
+        return self._setup_proxy_view()
+
     def setup_view(self) -> dict[str, Any]:
         data = self.engine_setup.view()
         data["proxy_configured"] = self._proxy_configured()
+        data["setup_proxy"] = self._setup_proxy_view()
         return data
 
     def _stop_engine_for_setup(self) -> bool:
@@ -9800,7 +9940,7 @@ class Gateway:
                     "default_params": self.default_sampling(engine_id),
                 }
             elif kind == "kvmem_dir":
-                template_path, template = kvmem_reference_config(engine_cfg)
+                template_path, template = kvmem_reference_config(engine_cfg, self.base_dir)
                 template_args = [str(item) for item in (template or {}).get("args") or []]
                 template_params = kvmem_poly_engine_values(template_args)
                 # MTP depends on the model's own GGUF, so the add dialog starts
@@ -11296,13 +11436,10 @@ class Gateway:
                 else:
                     cache_override = "--cache-type-k" in help_text and "--cache-type-v" in help_text
             else:
-                cache_override = False
-                _, kv_template = kvmem_reference_config(engine_cfg)
-                if kv_template is not None:
-                    exe = Path(str(kv_template.get("exe") or ""))
-                    if exe.is_file():
-                        cwd = Path(str(kv_template.get("cwd") or engine_cfg.get("cwd") or "."))
-                        cache_override = "--kv" in binary_help_text(exe, cwd)
+                # PolyStrata sizes its KV cache with --kv (q8_0); only a
+                # readable help that lacks the flag forces the engine default.
+                _, kv_template = kvmem_reference_config(engine_cfg, self.base_dir)
+                cache_override = kvmem_cache_supported(kv_template, engine_cfg)
             if cache_override:
                 if short == "llama":
                     detail = (
@@ -11313,7 +11450,10 @@ class Gateway:
                     detail = "q8_0（固定）"
                 self._job_step(job, "kv", "ok", detail)
             else:
-                note = "引擎帮助不可读，保守使用引擎默认" if not help_text else "引擎不支持 k8v8"
+                if short == "llama":
+                    note = "引擎帮助不可读，保守使用引擎默认" if not help_text else "引擎不支持 k8v8"
+                else:
+                    note = "该 PolyStrata 版本不支持 --kv"
                 self._job_step(job, "kv", "warn", f"{note}，使用引擎默认 KV 精度")
 
             self._job_step(job, "config", "running")
@@ -11352,14 +11492,21 @@ class Gateway:
                 )
             else:
                 models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
-                config_dir = Path(str(models_cfg.get("dir") or ""))
-                template_path, template = kvmem_reference_config(engine_cfg)
-                if template is None or template_path is None:
-                    raise BadRequest("找不到 KVMem 模板配置（需要一份可用的 ornith strata-*.json）")
+                raw_dir = str(models_cfg.get("dir") or "").strip()
+                if not raw_dir:
+                    raise BadRequest("KVMem 引擎缺少 models.dir，请先在管理页配置引擎")
+                config_dir = Path(raw_dir)
+                template_path, template = kvmem_reference_config(engine_cfg, self.base_dir)
+                if template is None:
+                    raise BadRequest(
+                        "找不到 PolyStrata 可执行文件：请先在管理页安装/编译 kvmem 引擎，"
+                        "或在该引擎目录放置一份 strata-*.json 模板"
+                    )
                 tool = kvmem_tokenizer_tool(engine_cfg)
                 if tool is None:
                     raise BadRequest("找不到 KVMem tokenizer 导出工具 tools/polystrata/assets.py")
                 tokenizer = self._export_kvmem_tokenizer(engine_cfg, tool, model, job)
+                config_dir.mkdir(parents=True, exist_ok=True)
                 config_file = config_dir / f"strata-{slugify_model_id(name).lower()}.json"
                 if config_file.exists():
                     raise BadRequest(f"配置已存在：{config_file}")
@@ -12091,9 +12238,6 @@ class Gateway:
             pending_load = self.pending_load
             pending_unload = self.pending_unload
             operation = dict(self.async_operation) if self.async_operation else None
-            webui = self.config.get("webui")
-            if not isinstance(webui, dict):
-                webui = {}
             data = {
                 "service": "llm-router",
                 "version": VERSION,
@@ -12113,7 +12257,6 @@ class Gateway:
                 "uptime_s": round(now() - self.started_at, 1),
                 "models": len(self.registry.list()),
                 "models_by_engine": self.registry.counts(),
-                "ui_path": webui.get("ui_path") or "/ui",
             }
         data["engine"] = engine.status() if engine is not None else None
         data["engines"] = {
@@ -12416,44 +12559,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self.close_connection = True
 
-    # -- web UI and static files -------------------------------------------
+    # -- console and static files ------------------------------------------
 
-    def _webui_config(self) -> dict[str, Any]:
-        value = self.gateway.config.get("webui")
+    def _console_config(self) -> dict[str, Any]:
+        value = self.gateway.config.get("console")
         return value if isinstance(value, dict) else {}
 
-    def _webui_path(self, key: str, default: str) -> Path:
-        cfg = self._webui_config()
-        path = Path(str(cfg.get(key) or default))
-        return path if path.is_absolute() else self.gateway.base_dir / path
-
-    def _ui_root(self) -> Path:
-        cfg = self._webui_config()
-        return self._webui_path("root", "webui") / str(cfg.get("ui_dir") or "llama-ui")
-
     def _console_path(self) -> Path:
-        cfg = self._webui_config()
-        return self._webui_path("root", "webui") / str(cfg.get("console") or "index.html")
-
-    def _ui_path(self) -> str:
-        value = str(self._webui_config().get("ui_path") or "/ui").strip()
-        if not value or value == "/":
-            return "/ui"
-        if not value.startswith("/"):
-            value = "/" + value
-        return value.rstrip("/") or "/ui"
-
-    @staticmethod
-    def _is_ui_api(path: str) -> bool:
-        for prefix in UI_API_PREFIXES:
-            if path == prefix.rstrip("/"):
-                return True
-            if prefix.endswith("/"):
-                if path.startswith(prefix):
-                    return True
-            elif path.startswith(prefix + "/"):
-                return True
-        return False
+        cfg = self._console_config()
+        path = Path(str(cfg.get("root") or "console"))
+        if not path.is_absolute():
+            path = self.gateway.base_dir / path
+        return path / str(cfg.get("file") or "index.html")
 
     def _request_api_key(self) -> str:
         auth = self.headers.get("Authorization", "")
@@ -12517,8 +12634,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cache_control)
         self.send_header("Last-Modified", formatdate(stat.st_mtime, usegmt=True))
         self.send_header("X-Content-Type-Options", "nosniff")
-        if path.name == "sw.js":
-            self.send_header("Service-Worker-Allowed", self._ui_path() + "/")
         self.end_headers()
         self._response_started = True
         if method == "HEAD":
@@ -12537,7 +12652,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _serve_console(self, method: str) -> None:
-        cfg = self._webui_config()
+        cfg = self._console_config()
         path = self._console_path()
         if cfg.get("enabled", True) and path.is_file():
             self._send_file(path, method, "no-cache")
@@ -12554,34 +12669,6 @@ class Handler(BaseHTTPRequestHandler):
                 "console": "not installed",
             },
         )
-
-    def _serve_ui(self, method: str, path: str) -> None:
-        root = self._ui_root().resolve()
-        rel = unquote(path).lstrip("/")
-        if "\x00" in rel:
-            raise NotFound("not found")
-        candidate = (root / rel).resolve()
-        try:
-            candidate.relative_to(root)
-        except ValueError:
-            raise NotFound("not found")
-        if candidate.is_dir():
-            candidate = candidate / "index.html"
-        if not candidate.is_file():
-            if Path(rel).suffix:
-                raise NotFound("not found")
-            candidate = root / "index.html"
-            if not candidate.is_file():
-                raise NotFound("web UI build is not installed")
-        name = candidate.name
-        parts = candidate.parts
-        if "_app" in parts and "immutable" in parts:
-            cache = "immutable"
-        elif name in ("index.html", "sw.js", "manifest.webmanifest", "ui-build.json"):
-            cache = "no-cache"
-        else:
-            cache = "default"
-        self._send_file(candidate, method, cache)
 
     # -- SSE ---------------------------------------------------------------
 
@@ -12627,90 +12714,6 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 self.close_connection = True
 
-    # -- props -------------------------------------------------------------
-
-    def _props(self, entry: Model | None) -> dict[str, Any]:
-        with self.gateway.cond:
-            active = self.gateway.active
-            engine = self.gateway.engine
-        target = entry or active
-        if target is not None and target.context_length:
-            context = target.context_length
-        else:
-            values = [
-                m.context_length
-                for m in self.gateway.registry.list()
-                if m.context_length
-            ]
-            context = max(values) if values else 0
-        modalities = {
-            "vision": bool(target.multimodal) if target is not None else False,
-            "audio": bool(target.audio) if target is not None else False,
-            "video": bool(target.video) if target is not None else False,
-        }
-        props: dict[str, Any] = {
-            "role": "router",
-            "model_path": "none",
-            "model_alias": target.id if target is not None else "",
-            "build_info": f"llm-router {VERSION}",
-            "total_slots": 1,
-            "max_instances": 1,
-            "models_autoload": False,
-            "default_generation_settings": {"params": {}, "n_ctx": context},
-            "ui_settings": {},
-            "webui_settings": {},
-            "modalities": modalities,
-            "chat_template": "",
-            "system_prompt": "",
-        }
-        if (
-            active is not None
-            and engine is not None
-            and engine.alive()
-            and (entry is None or entry.id == active.id)
-        ):
-            manager = self.gateway.engines.get(active.engine)
-            if manager is not None:
-                try:
-                    status, body = manager._json_request(
-                        "GET",
-                        "/props?model=" + quote(active.engine_model) + "&autoload=false",
-                        entry=active,
-                        timeout=5.0,
-                    )
-                    if status == 200 and isinstance(body, dict):
-                        props.update(body)
-                        engine_modalities = body.get("modalities")
-                        if isinstance(engine_modalities, dict):
-                            # Engines such as kvmem only report the keys they
-                            # know (vision); keep router-derived capabilities
-                            # the engine omits so video/audio gates stay open.
-                            merged = dict(modalities)
-                            merged.update(engine_modalities)
-                            props["modalities"] = merged
-                except Exception:
-                    self.gateway.log.exception("cannot read /props from %s", active.engine)
-        # A router-mode UI must never treat the gateway as a single model.
-        props["role"] = "router"
-        props["model_alias"] = target.id if target is not None else ""
-        settings = props.get("default_generation_settings")
-        if not isinstance(settings, dict):
-            settings = {}
-        settings.setdefault("params", {})
-        if not isinstance(settings.get("n_ctx"), (int, float)) or not settings.get("n_ctx"):
-            settings["n_ctx"] = context
-        props["default_generation_settings"] = settings
-        if not isinstance(props.get("modalities"), dict):
-            props["modalities"] = modalities
-        if not isinstance(props.get("ui_settings"), dict):
-            props.setdefault("webui_settings", {})
-        # Backends run with --no-ui because the gateway serves the bundled
-        # llama.cpp UI itself.  Their server-wide `ui` flag is false, but this
-        # UI treats `ui == false` as "hide this model"; force it back on so
-        # loaded models stay selectable.
-        props["ui"] = True
-        return props
-
     # -- routing -----------------------------------------------------------
 
     def _json_body(self, required: bool = False) -> dict[str, Any] | None:
@@ -12730,30 +12733,6 @@ class Handler(BaseHTTPRequestHandler):
     def _route(self, method: str) -> None:
         parsed = urlsplit(self.path)
         path = parsed.path or "/"
-        ui_path = self._ui_path()
-
-        if path == ui_path:
-            if method not in ("GET", "HEAD"):
-                raise MethodNotAllowed("method not allowed")
-            location = ui_path + "/"
-            if parsed.query:
-                location += "?" + parsed.query
-            self._redirect(location)
-            return
-        if path.startswith(ui_path + "/"):
-            rest = path[len(ui_path):] or "/"
-            if rest == "/":
-                if method not in ("GET", "HEAD"):
-                    raise MethodNotAllowed("method not allowed")
-                self._serve_ui(method, "/")
-                return
-            if self._is_ui_api(rest):
-                self._api_route(method, rest, parsed.query)
-                return
-            if method not in ("GET", "HEAD"):
-                raise MethodNotAllowed("method not allowed")
-            self._serve_ui(method, rest)
-            return
         if path in ("/", ""):
             if method not in ("GET", "HEAD"):
                 raise MethodNotAllowed("method not allowed")
@@ -12764,13 +12743,10 @@ class Handler(BaseHTTPRequestHandler):
     def _api_route(self, method: str, path: str, query: str) -> None:
         normalized = path.rstrip("/") or "/"
 
-        # One key for every model; the inference API and the UI props probe are
-        # protected.  The console and control endpoints stay same-origin +
-        # trusted-LAN only, so a forgotten key can still be reset from the console.
-        if (
-            (normalized.startswith("/v1/") and normalized != "/v1/health")
-            or normalized == "/props"
-        ):
+        # One key for every model.  The console and control endpoints stay
+        # same-origin + trusted-LAN only, so a forgotten key can still be reset
+        # from the console.
+        if normalized.startswith("/v1/") and normalized != "/v1/health":
             self._check_api_key()
 
         if method in ("POST", "PUT", "PATCH", "DELETE") and (
@@ -12856,39 +12832,6 @@ class Handler(BaseHTTPRequestHandler):
             if method != "GET":
                 raise MethodNotAllowed("method not allowed")
             self._sse()
-            return
-        if normalized in ("/props", "/v1/props"):
-            if method not in ("GET", "HEAD"):
-                raise MethodNotAllowed("method not allowed")
-            values = parse_qs(query).get("model")
-            entry = None
-            if values:
-                entry = self.gateway.registry.resolve(values[0])
-                if entry is None:
-                    raise ModelNotFound(f"model {values[0]!r} is not in the registry")
-            self._json(200, self._props(entry))
-            return
-        if normalized == "/slots":
-            if method not in ("GET", "HEAD"):
-                raise MethodNotAllowed("method not allowed")
-            self._json(200, [])
-            return
-        if normalized == "/tools":
-            if method in ("GET", "HEAD"):
-                self._json(200, [])
-                return
-            if method != "POST":
-                raise MethodNotAllowed("method not allowed")
-            payload = self._json_body(required=False) or {}
-            tool = payload.get("tool") if isinstance(payload, dict) else None
-            # The gateway deliberately does not expose engine-side shell/file tools.
-            # Answer with a JSON error so the web UI can degrade gracefully.
-            self._json(
-                200,
-                {
-                    "error": f"server tool {tool or 'unknown'!r} is not available on this gateway",
-                },
-            )
             return
         if normalized == "/v1/streams/lookup":
             if method != "POST":
@@ -12996,6 +12939,18 @@ class Handler(BaseHTTPRequestHandler):
             if method not in ("GET", "HEAD"):
                 raise MethodNotAllowed("method not allowed")
             self._json(200, self.gateway.setup_view())
+            return
+        if normalized == "/router/setup/proxy":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            key = payload.get("key")
+            if not isinstance(key, str) or key not in SETUP_PROXY_KEYS:
+                raise BadRequest('send {"key": "toolchain:cuda|toolchain:rocm|engine:<id>", "enabled": true}')
+            self._json(
+                200,
+                {"setup_proxy": self.gateway.set_setup_proxy(key, payload.get("enabled") is True)},
+            )
             return
         if normalized == "/router/setup/engine/install":
             if method != "POST":
@@ -13208,7 +13163,7 @@ class Handler(BaseHTTPRequestHandler):
         if normalized == "/favicon.ico":
             if method not in ("GET", "HEAD"):
                 raise MethodNotAllowed("method not allowed")
-            icon = self._ui_root() / "favicon.ico"
+            icon = self._console_path().parent / "favicon.ico"
             if icon.is_file():
                 self._send_file(icon, method, "default")
             else:
@@ -13236,10 +13191,6 @@ class Handler(BaseHTTPRequestHandler):
         payload_changed = False
         if isinstance(payload, dict) and isinstance(payload.get("model"), str):
             model_name = payload["model"]
-        if not model_name and path in ("/props", "/v1/props"):
-            values = parse_qs(query).get("model")
-            if values:
-                model_name = values[0]
         if not model_name:
             snapshot = self.gateway.status()
             model_name = snapshot.get("active_model") or self.gateway.config.get("default_model")
@@ -13480,6 +13431,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "modelscope": {"use_proxy": False},
         },
     },
+    "console": {"enabled": True, "root": "console", "file": "index.html"},
     "setup": {},
 }
 

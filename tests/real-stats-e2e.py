@@ -113,7 +113,7 @@ def main() -> int:
     (base / "logs").mkdir(parents=True)
     (base / "llama-models").mkdir()
     shutil.copy2(ROOT / "router.py", base / "router.py")
-    (base / "webui").symlink_to(ROOT / "webui")
+    (base / "console").symlink_to(ROOT / "console")
     shutil.copy2(ROOT / "smoke.png", base / "smoke.png")
     shutil.copy2(ROOT / "api-key", base / "api-key")
     api_key = (ROOT / "api-key").read_text(encoding="utf-8").strip()
@@ -137,8 +137,7 @@ def main() -> int:
         "log_dir": "logs",
         "log_file": "logs/router.log",
         "model_params_file": "model-params.json",
-        "webui": {"enabled": True, "root": "webui", "console": "index.html",
-                  "ui_dir": "llama-ui", "ui_path": "/ui"},
+        "console": {"enabled": True, "root": "console", "file": "index.html"},
         "auth": {"api_key_file": "api-key"},
         "engines": {args.engine: engine_configs(base, preset)[args.engine]},
         "timeouts": {"load_timeout_s": 1500, "stop_timeout_s": 120,

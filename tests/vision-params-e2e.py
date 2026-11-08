@@ -143,12 +143,10 @@ config = {
     "log_dir": "logs",
     "log_file": "logs/router.log",
     "model_params_file": "model-params.json",
-    "webui": {
+    "console": {
         "enabled": True,
-        "root": str(ROOT / "webui"),
-        "console": "index.html",
-        "ui_dir": "llama-ui",
-        "ui_path": "/ui",
+        "root": str(ROOT / "console"),
+        "file": "index.html",
     },
     "engines": {
         "llama": {

@@ -206,7 +206,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         path = parsed.path
         if path in ("/", "/index.html"):
-            data = (ROOT / "webui" / "index.html").read_bytes()
+            data = (ROOT / "console" / "index.html").read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -222,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"object": "list", "config_file": "config.json", "engines": []})
         if path == "/router/auth":
             return self.send_json({"configured": False, "source": None, "hint": None,
-                                   "key_file": "api-key", "protected": ["/v1/*", "/props"]})
+                                   "key_file": "api-key", "protected": ["/v1/*"]})
         if path == "/router/proxy":
             return self.send_json(proxy_view())
         if path == "/router/downloads":

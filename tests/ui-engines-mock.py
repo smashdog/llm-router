@@ -209,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         if path in ("/", "/index.html"):
-            data = (ROOT / "webui" / "index.html").read_bytes()
+            data = (ROOT / "console" / "index.html").read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -241,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/router/auth":
             return self.send_json({"configured": False, "source": None, "hint": None,
-                                   "key_file": "api-key", "protected": ["/v1/*", "/props"]})
+                                   "key_file": "api-key", "protected": ["/v1/*"]})
         if path == "/mock/state":
             return self.send_json({
                 "config": CONFIG,
