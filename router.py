@@ -1149,6 +1149,7 @@ POLYSTRATA_ENGINE_GROUPS = (
     ("retrieval", "检索与选择"),
     ("memory", "内存与存储"),
     ("runtime", "运行与显存"),
+    ("behavior", "回答行为"),
     ("spec", "推测解码（MTP）"),
     ("engine", "专家与解码"),
     ("cache", "提示与会话缓存"),
@@ -1518,6 +1519,151 @@ POLYSTRATA_ENGINE_SPECS: list[dict[str, Any]] = [
     _kv_engine_spec(
         "conversation_cache_min_free_mib", "--conversation-cache-min-free-mib",
         "会话停放最低空闲内存（MiB）", "cache", default=2560, low=0, step=256,
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    # -- answer behavior ---------------------------------------------------
+    # These live at the top level of strata-*.json (serve/server.py's
+    # model_settings), not in argv.  Leaving a field empty keeps the engine's
+    # default; the note names the builds that document the key.
+    _kv_engine_spec(
+        "tool_call_recovery", "tool_call_recovery", "工具调用恢复", "behavior", "boolean",
+        config_path=("tool_call_recovery",),
+        note="读取模板形式之外的 tool call（<parameter=>、<tool_call> 内的 JSON 等）；"
+             "0.2.8 起默认开启，旧版默认关闭",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "reasoning_close_retry", "reasoning_close_retry", "思考未闭合重试", "behavior", "boolean",
+        config_path=("reasoning_close_retry",),
+        note="回复停在 <think> 内时补一次闭合再继续作答；默认关闭",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "reasoning_loop_recovery", "reasoning_loop_recovery", "推理循环处理", "behavior", "enum",
+        choices=[
+            {"value": "stop", "label": "stop · 直接结束"},
+            {"value": "recover", "label": "recover · 继续作答"},
+        ],
+        config_path=("reasoning_loop_recovery",),
+        note="检测到重复思考循环时的处理；留空为关闭",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "reasoning_budget_tokens", "reasoning_budget_tokens", "思考预算（token）", "behavior",
+        low=0, step=1,
+        config_path=("reasoning_budget_tokens",),
+        note="限制每个请求的思考长度；0 表示不限",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "preserve_thinking", "preserve_thinking", "保留思考历史", "behavior", "boolean",
+        config_path=("preserve_thinking",),
+        note="提示里保留前几轮的思考（模板支持时）",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "client_reasoning_history", "client_reasoning_history", "保留客户端思考历史", "behavior",
+        "boolean", config_path=("client_reasoning_history",),
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "reasoning_effort", "reasoning_effort", "默认思考强度", "behavior", "enum",
+        choices=[
+            {"value": "none", "label": "none"},
+            {"value": "low", "label": "low"},
+            {"value": "medium", "label": "medium"},
+            {"value": "high", "label": "high"},
+        ],
+        config_path=("reasoning_effort",),
+        note="请求没有指定 thinking 时使用的强度；留空用模型默认",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "anthropic_thinking", "anthropic_thinking", "Anthropic 请求默认思考", "behavior", "enum",
+        choices=[
+            {"value": "model", "label": "model · 跟随模型"},
+            {"value": "on_request", "label": "on_request · 仅按请求"},
+        ],
+        config_path=("anthropic_thinking",),
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "effort_position", "effort_position", "思考强度插入位置", "behavior", "enum",
+        choices=[
+            {"value": "start", "label": "start · 开头"},
+            {"value": "end", "label": "end · 结尾（保缓存）"},
+        ],
+        config_path=("effort_position",),
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "fit_max_tokens", "fit_max_tokens", "自动缩短 max_tokens", "behavior", "boolean",
+        config_path=("fit_max_tokens",),
+        note="max_tokens 放不进上下文时自动缩短，而不是返回 400",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "drop_oldest", "drop_oldest", "超长时丢弃最早轮次", "behavior", "boolean",
+        config_path=("drop_oldest",),
+        note="放不下时略去最早的对话轮次（系统提示与最后一轮保留）",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "repeat_stop_tokens", "repeat_stop_tokens", "重复停止 token", "behavior",
+        low=0, step=1, config_path=("repeat_stop_tokens",),
+        note="连续重复超过该 token 数时停止；0 表示关闭",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "warm_start", "warm_start", "预热首轮提示", "behavior", "boolean",
+        config_path=("warm_start",),
+        note="保留带工具的系统提示，下次启动时预填充；每个模型一个状态文件",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "codex_thread_titles", "codex_thread_titles", "Codex 线程标题", "behavior", "boolean",
+        config_path=("codex_thread_titles",),
+        note="不经过引擎直接回答 Codex 的线程标题请求",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "codex_compaction_cache", "codex_compaction_cache", "Codex 压缩缓存", "behavior", "boolean",
+        config_path=("codex_compaction_cache",),
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "answer_room", "answer_room", "回答空间不足提示", "behavior", "boolean",
+        config_path=("answer_room",),
+        note="思考占满上下文时预留回答空间；false 关闭",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "kvmem_default_max_tokens", "kvmem_default_max_tokens", "默认输出上限（token）", "behavior",
+        low=1, step=1, config_path=("kvmem_default_max_tokens",),
+        note="请求没有给 max_tokens 时 KVMem 使用的输出上限",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "api_monitor", "api_monitor", "记录最近请求", "behavior", "boolean",
+        config_path=("api_monitor",),
+        note="在内存保留最近 100 个请求的提示与回答（/api-monitor）",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "engine_silence_s", "engine_silence_s", "引擎静默超时（秒）", "behavior",
+        low=0, step=1, config_path=("engine_silence_s",),
+        note="引擎在该时间内没有任何输出就结束请求；0 表示一直等待",
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "memory_debug", "memory_debug", "内存调试输出", "behavior", "boolean",
+        config_path=("memory_debug",),
+        group_labels=POLYSTRATA_GROUP_LABELS,
+    ),
+    _kv_engine_spec(
+        "env_to_user", "env_to_user", "环境块移到用户消息", "behavior", "boolean",
+        config_path=("env_to_user",),
+        note="把 opencode 的 <env> 块从系统提示移到首条用户消息，提升前缀缓存命中",
         group_labels=POLYSTRATA_GROUP_LABELS,
     ),
 ]
@@ -2836,7 +2982,19 @@ def kvmem_poly_engine_values(
         key = spec["key"]
         if spec.get("config_path"):
             raw = _config_path_value(config, spec["config_path"])
-            if raw is None or isinstance(raw, bool):
+            if raw is None:
+                continue
+            if spec["type"] == "boolean":
+                # An explicit false must round-trip: absent means the engine's
+                # default, which is not always false.
+                out[key] = bool(raw)
+                continue
+            if key == "reasoning_loop_recovery" and isinstance(raw, bool):
+                # serve/server.py reads the older true form as "recover".
+                if raw:
+                    out[key] = "recover"
+                continue
+            if isinstance(raw, bool):
                 continue
             if spec["type"] == "integer":
                 value = parse_int(raw)
