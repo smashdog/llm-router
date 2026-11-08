@@ -231,7 +231,9 @@ ENGINE_CATALOG: dict[str, dict[str, Any]] = {
     "strata": {
         "label": "Strata",
         "repo": "https://github.com/Niko1221/Strata",
-        "needs": ("llama",),
+        # Strata fetches the exact llama.cpp/ggml commit it is verified
+        # against; it neither uses nor requires the standalone llama.cpp slot.
+        "needs": (),
         "submodules": True,
         "artifacts": {
             "cuda": (("strata", "strata"), ("strata-vision", "strata-vision")),
@@ -1609,9 +1611,6 @@ class EngineSetup:
                 env=env, step=step,
             )
         elif engine_id == "strata":
-            llama_root = self._engine_dir("llama")
-            if not (llama_root / "CMakeLists.txt").is_file():
-                raise SetupError("Strata 需要 llama.cpp 源码，请先安装 llama.cpp")
             build_dir = root / ("build-cuda" if variant == "cuda" else "build-hip")
             configure = [
                 cmake, "-S", str(root), "-B", str(build_dir), *self._cmake_generator(),
@@ -1640,9 +1639,17 @@ class EngineSetup:
             self._run(job, [cmake, "--build", str(build_dir), "--config", "Release", "--parallel", jobs, "--target", "strata"], env=env, step=step)
             vision_dir = root / ("build-vision-cuda" if variant == "cuda" else "build-vision-hip")
             # The vision tool must use the same llama.cpp/ggml checkout as the
-            # engine build (the pinned one Strata fetched), not a newer one.
+            # engine build (the pinned one Strata fetched), never the
+            # standalone llama.cpp install.
             pinned = build_dir / "_deps" / "strata_llamacpp-src"
-            vision_llama = pinned if (pinned / "CMakeLists.txt").is_file() else llama_root
+            vendored = root / "third_party" / "llama.cpp"
+            vision_llama = pinned if (pinned / "CMakeLists.txt").is_file() else vendored
+            if not (vision_llama / "CMakeLists.txt").is_file():
+                raise SetupError(
+                    "Strata 构建缺少其锁定的 llama.cpp 源码"
+                    "（_deps/strata_llamacpp-src），无法编译视觉工具；"
+                    "请重新安装 Strata 并确认依赖下载完成"
+                )
             vision = [
                 cmake, "-S", str(root / "tools" / "vision"), "-B", str(vision_dir), *self._cmake_generator(),
                 "-DCMAKE_BUILD_TYPE=Release", f"-DLLAMA_DIR={vision_llama}",
