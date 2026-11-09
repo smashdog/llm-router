@@ -23,6 +23,7 @@ __pycache__/
 # engine provisioning (sources, compiled binaries, generated configs and logs)
 engine/
 bin/
+share/
 config/
 log/
 toolchains/

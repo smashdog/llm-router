@@ -716,6 +716,8 @@
           <div class="download-popover-list" id="download-popover-list"></div>
         </div>
       </div>
+      <button class="btn" id="btn-engine-ui" type="button"
+        title="当前没有运行中的引擎">UI</button>
       <button class="btn" id="btn-manage" type="button" aria-pressed="false">管理</button>
     </div>
   </header>
@@ -3011,10 +3013,37 @@
       </article>`;
   }
 
+  function engineUiInfo(status) {
+    status = status || {};
+    const cfg = status.engine_ui || {};
+    const engines = status.engines || {};
+    const running = Object.keys(engines).filter((id) => engines[id] && engines[id].alive);
+    const target = running.includes(cfg.engine) ? cfg.engine
+      : (running.includes(status.active_engine) ? status.active_engine : running[0] || null);
+    const port = Number(cfg.port || 0);
+    const host = location.hostname || "127.0.0.1";
+    const url = cfg.listening && port ? `http://${host}:${port}/` : "";
+    return { url, engine: target };
+  }
+
+  function renderEngineUiButton() {
+    const button = $("btn-engine-ui");
+    if (!button) return;
+    const info = engineUiInfo(state.status);
+    const ready = Boolean(info.url && info.engine);
+    button.disabled = !ready;
+    button.title = ready
+      ? `打开 ${ENGINE_LABELS[info.engine] || info.engine} 自带的界面`
+      : "当前没有运行中的引擎";
+    button.dataset.url = info.url;
+    button.dataset.engine = info.engine || "";
+  }
+
   function render() {
     renderConsoleState();
     renderStats();
     renderEngines();
+    renderEngineUiButton();
     renderEngineFilter();
     renderModels();
     renderAuth();
@@ -3885,6 +3914,15 @@
     else toast("复制失败，请手动复制：" + url, "bad");
   }
 
+  $("btn-engine-ui").addEventListener("click", () => {
+    const button = $("btn-engine-ui");
+    const url = button.dataset.url || "";
+    if (!url || button.disabled) {
+      toast("当前没有运行中的引擎，请先加载模型", "bad");
+      return;
+    }
+    window.open(url, "_blank", "noopener");
+  });
   $("btn-manage").addEventListener("click", () => {
     setView($("manage-view").hidden ? "manage" : "console");
   });

@@ -6111,7 +6111,6 @@ def default_kvmem_llama_template() -> dict[str, Any]:
             "--kvmem-block-tokens", "32",
             "--kvmem-gen-reserve", "1024",
             "--kv-dtype", "q8_0",
-            "--no-ui",
         ]
     }
 
@@ -10978,8 +10977,6 @@ class Gateway:
                 + (f"复制自 {template_path.name}" if template_path else "使用内置默认")
             )
             args += cache_args
-            if "--no-ui" not in args:
-                args.append("--no-ui")
             new_cfg["args"] = args
             if vision is not None:
                 new_cfg["vision"] = {
@@ -12437,8 +12434,47 @@ class Gateway:
         data["engines"] = {
             engine_id: manager.status() for engine_id, manager in self.engines.items()
         }
+        data["engine_ui"] = self.engine_ui_status()
         data["stats"] = self.stats.view()
         return data
+
+    def engine_ui_target(self) -> "EngineManager | None":
+        """Engine whose own web UI the dedicated listener should expose.
+
+        Engine UIs use absolute paths (``/v1/models``) and install service
+        workers, so they cannot live under a path prefix of the main router.
+        A second listener forwards everything to one engine: the one serving
+        the active model, otherwise whichever engine process is still alive.
+        """
+        with self.cond:
+            manager = self.engine
+            active = self.active
+        if manager is not None and manager.alive() and active is not None:
+            return manager
+        ordered = [self.engines[e] for e in ENGINE_SLOT_ORDER if e in self.engines]
+        ordered += [m for e, m in self.engines.items() if e not in ENGINE_SLOT_ORDER]
+        for candidate in ordered:
+            if candidate.alive():
+                return candidate
+        if manager is not None and manager.alive():
+            return manager
+        return None
+
+    def engine_ui_status(self) -> dict[str, Any]:
+        cfg = self.config.get("engine_ui") or {}
+        try:
+            port = int(cfg.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        listening = bool(getattr(self, "engine_ui_listening", False))
+        target = self.engine_ui_target()
+        return {
+            "enabled": bool(cfg.get("enabled", True)) and port > 0,
+            "listening": listening,
+            "port": port,
+            "engine": target.engine_id if target is not None else None,
+            "url": f"http://{port}/" if listening else None,
+        }
 
     def _state_for(
         self,
@@ -13558,6 +13594,161 @@ class Handler(BaseHTTPRequestHandler):
             trace.commit()
 
 
+class EngineUIProxyHandler(BaseHTTPRequestHandler):
+    """Verbatim reverse proxy to the active engine's built-in web UI.
+
+    The UI bundles are single-page apps that fetch absolute paths and register
+    service workers, so they cannot be served under a prefix of the main
+    listener.  This listener sends every request (assets, ``/v1/*`` calls,
+    event streams) to the engine that currently holds the active model and
+    injects that engine's API key, which the browser does not know.
+    """
+
+    protocol_version = "HTTP/1.1"
+    server_version = f"llm-router-ui/{VERSION}"
+    gateway: Gateway
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        self.gateway.log.debug("ui-proxy %s - %s", self.address_string(), fmt % args)
+
+    def _no_engine(self, method: str) -> None:
+        data = b"no engine is running; load a model in the router console first\n"
+        self.send_response(503)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if method != "HEAD":
+            self.wfile.write(data)
+
+    def _handle(self, method: str) -> None:
+        manager = self.gateway.engine_ui_target()
+        if manager is None:
+            self._no_engine(method)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        body = self.rfile.read(length) if length > 0 else None
+        headers: dict[str, str] = {}
+        for key, value in self.headers.items():
+            lower = key.lower()
+            if lower in HOP_BY_HOP or lower in (
+                "origin", "referer", "authorization", "x-api-key",
+            ):
+                continue
+            if lower == "accept-encoding":
+                continue
+            headers[key] = value
+        # Released UIs are sometimes embedded gzip-only and answer 415 when
+        # identity is requested.  Ask for what requests can decode and strip
+        # the encoding headers when re-emitting the decoded bytes below.
+        headers["Accept-Encoding"] = "gzip, deflate"
+        engine_cfg = self.gateway.config.get("engines", {}).get(manager.engine_id, {})
+        engine_key = first_key(engine_cfg.get("api_key"))
+        if engine_key:
+            headers["Authorization"] = f"Bearer {engine_key}"
+        url = f"http://{manager.host}:{manager.port}{self.path}"
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            resp = session.request(
+                method,
+                url,
+                headers=headers,
+                data=body,
+                stream=True,
+                allow_redirects=False,
+                timeout=(
+                    float(self.gateway.timeouts.get("proxy_connect_timeout_s") or 10),
+                    float(self.gateway.timeouts.get("proxy_read_timeout_s") or 3600),
+                ),
+            )
+        except requests.RequestException as exc:
+            self.gateway.log.error(
+                "engine UI proxy %s %s -> %s:%s failed: %s",
+                method, self.path, manager.host, manager.port, exc,
+            )
+            data = f"engine UI unreachable: {exc}\n".encode("utf-8")
+            self.send_response(502)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if method != "HEAD":
+                self.wfile.write(data)
+            return
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        stream_body = "text/event-stream" in ctype
+        try:
+            self.send_response(resp.status_code)
+            for key, value in resp.headers.items():
+                lower = key.lower()
+                if lower in RESPONSE_SKIP:
+                    continue
+                if lower == "location":
+                    prefix = f"http://{manager.host}:{manager.port}"
+                    if value.startswith(prefix):
+                        host = self.headers.get("Host") or ""
+                        suffix = value[len(prefix):]
+                        value = (f"http://{host}{suffix}" if host else suffix)
+                self.send_header(key, value)
+            if method == "HEAD":
+                self.send_header("Connection", "close")
+                self.close_connection = True
+                self.end_headers()
+                return
+            if resp.status_code in (204, 304):
+                self.end_headers()
+                return
+            if stream_body:
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                self.send_header("Connection", "close")
+                self.close_connection = True
+                self.end_headers()
+                try:
+                    for chunk in resp.iter_content(chunk_size=4096):
+                        if chunk:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                except (requests.RequestException, OSError):
+                    self.close_connection = True
+                return
+            data = resp.content
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if data:
+                self.wfile.write(data)
+        except OSError:
+            self.close_connection = True
+        finally:
+            resp.close()
+            session.close()
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._handle("GET")
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._handle("HEAD")
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._handle("POST")
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._handle("PUT")
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._handle("PATCH")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._handle("DELETE")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._handle("OPTIONS")
+
+
 # ---------------------------------------------------------------------------
 # main
 
@@ -13607,6 +13798,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "console": {"enabled": True, "root": "console", "file": "index.html"},
+    "engine_ui": {"enabled": True, "host": "0.0.0.0", "port": 8081},
     "setup": {},
 }
 
@@ -13630,6 +13822,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=str(Path(__file__).resolve().parent / "config.json"))
     parser.add_argument("--host", help="listen host override (not written to config.json)")
     parser.add_argument("--port", type=int, help="listen port override (not written to config.json)")
+    parser.add_argument("--ui-port", type=int, help="engine UI proxy port override (0 disables; not written to config.json)")
     parser.add_argument("--check", action="store_true", help="scan and print models, then exit")
     args = parser.parse_args(argv)
     base_dir = Path(__file__).resolve().parent
@@ -13685,6 +13878,52 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("cannot write pid file %s", pid_path)
     cleanup_stale_state(state_path, log)
     stop_event = threading.Event()
+
+    # Engine UIs live on their own listener: the bundles fetch absolute paths
+    # and register service workers, so a path prefix under the main listener
+    # cannot work.  The listener follows whichever engine is loaded.
+    ui_cfg = config.get("engine_ui") if isinstance(config.get("engine_ui"), dict) else {}
+    try:
+        ui_port = args.ui_port if args.ui_port is not None else int(ui_cfg.get("port") or 0)
+    except (TypeError, ValueError):
+        ui_port = 0
+    ui_host = str(ui_cfg.get("host") or "0.0.0.0")
+    ui_enabled = bool(ui_cfg.get("enabled", True)) and ui_port > 0 and ui_port != port
+    ui_server: ThreadingHTTPServer | None = None
+    if ui_enabled:
+        EngineUIProxyHandler.gateway = gateway
+        try:
+            ui_server = ThreadingHTTPServer((ui_host, ui_port), EngineUIProxyHandler)
+            ui_server.daemon_threads = True
+            ui_server.allow_reuse_address = True
+            ui_server.timeout = 0.5
+        except OSError as exc:
+            log.warning(
+                "engine UI proxy cannot bind %s:%s: %s; the console UI button will be unavailable",
+                ui_host, ui_port, exc,
+            )
+            ui_server = None
+    gateway.engine_ui_listening = ui_server is not None
+
+    def _serve_engine_ui() -> None:
+        assert ui_server is not None
+        while not stop_event.is_set():
+            try:
+                ui_server.handle_request()
+            except OSError:
+                if stop_event.is_set():
+                    break
+                log.exception("engine UI proxy accept error")
+        try:
+            ui_server.server_close()
+        except Exception:
+            pass
+
+    if ui_server is not None:
+        threading.Thread(
+            target=_serve_engine_ui, name="engine-ui-proxy", daemon=True
+        ).start()
+        log.info("engine UI proxy listening on %s:%s", ui_host, ui_port)
 
     def _signal(_signum: int, _frame: Any) -> None:
         stop_event.set()

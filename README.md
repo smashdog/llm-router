@@ -8,7 +8,7 @@
 - **多引擎**：同时管理 llama.cpp（`llama-server` 路由模式）、Strata（独立 `serve.server --engine strata` 单模型服务）、KVMem（polystrata）、NInfer（`ninfer-serve` 单模型模式）与 KVMem + llama.cpp（独立的 `llama-kvmem-server` 单模型模式）五类后端。
 - **按需加载**：同一时间只保留一个引擎和一个模型；请求哪个模型就启动哪个，空闲时可手动卸载，显存随用随取。
 - **请求队列**：切换模型期间到达的请求会排队等待，不会直接失败；停止引擎前会等待进行中的生成结束。
-- **控制台**（`/`）：只展示引擎状态与模型列表；加载/卸载模型、停止引擎、重新扫描模型目录；编辑每个模型的采样参数与视觉运行位置（CPU / GPU）。右上角“下载”按钮以红色角标显示进行中的下载数量（无下载时不显示），点击浮层列出正在下载的模型，点任一项查看进度并可停止；“管理”进入管理页，左侧菜单提供“引擎”“API 密钥管理”“代理”和“模型下载”。
+- **控制台**（`/`）：只展示引擎状态与模型列表；加载/卸载模型、停止引擎、重新扫描模型目录；编辑每个模型的采样参数与视觉运行位置（CPU / GPU）。右上角“UI”按钮打开当前引擎自带的 Web 界面：`config.json` 中 `engine_ui` 配置的独立监听（默认 `0.0.0.0:8081`）把请求原样转发给当前引擎并自动注入其 API Key，浏览器无需配置密钥；按钮在引擎运行时可点，地址取当前页面主机名 + `engine_ui.port`，因此远程访问控制台时打开的也是远程引擎界面。“下载”按钮以红色角标显示进行中的下载数量（无下载时不显示），点击浮层列出正在下载的模型，点任一项查看进度并可停止；“管理”进入管理页，左侧菜单提供“引擎”“API 密钥管理”“代理”和“模型下载”。
 - **启动环境**：`START-router.sh` 默认在项目目录创建或复用 `.venv`，按 `requirements.txt` 的内容哈希安装依赖；随后检查 `hf`（Hugging Face CLI）与 `modelscope`，缺失时尝试安装到 venv，安装失败会打印明确错误但不阻止网关启动（下载页会标记工具不可用）。设置 `ROUTER_PYTHON` 时改用指定解释器，只检查不安装。
 - **引擎**：管理页按一级分类展示引擎槽位：`llama.cpp` 分类下为原生 llama.cpp；`Strata` 分类下为独立 Strata 服务；`kvmem` 分类下依次为 llama.cpp（KVMem 补丁版）、polystrata 与 ninfer。每个槽位分别配置可执行文件、工作目录、模型目录和预设/模板文件。保存时先校验路径并轻量探测二进制（llama.cpp 与 NInfer 执行 `--version`，Strata 与 KVMem 导入 `serve.server`，KVMem + llama.cpp 执行 `--kvmem-capabilities` 并要求返回 llamacpp 后端），再备份旧配置并原子写入 `config.json`；缺失的槽位可直接创建，未配置时输入框保持空白，仅以灰色占位提示约定路径（可点“填入建议路径”后修改），不会把建议值当成已保存配置；创建时若模型目录不存在会自动创建，llama.cpp 与 KVMem 还会生成空的 `models.ini` / `models.json`，Strata 与 NInfer 的模板文件必须已存在，KVMem + llama.cpp 会自动生成 `kvmem-llama.template.json`；运行中的引擎修改路径后会标记“需重启”，可一键重启生效。NInfer 与 KVMem + llama.cpp 槽位还会在二进制旁的 `lib` 目录存在时自动写入 `LD_LIBRARY_PATH`。新增模型时先选一级分类，再在右侧子引擎列表中选择具体引擎（默认选中第一项）。
 - **引擎更新**：管理页“引擎”面板顶部提供“检查更新”和“使用代理”（未配置代理时隐藏且强制直连）；工具链与各引擎卡片上的“使用代理”勾选保存在 `config.json` 的 `setup_proxy` 中，关闭网关后再次打开仍保持原选择。检查时在各引擎工作目录执行 `git fetch`，与上游比较提交数并列出落后提交；若工作目录是子模块（detached HEAD），自动改用父仓库。发现新版本后卡片出现“安装更新”：先备份当前二进制为 `<binary>.bak-<时间戳>`，再校验工作区干净后执行 `git merge --ff-only`，并根据二进制旁的 `CMakeCache.txt` 推断构建目录，用 `cmake --build` 以 Release 重新编译目标；任一步失败立即停止，编译或探测失败时恢复二进制备份并回滚源码到更新前提交。KVMem 为纯 Python 引擎，只更新源码；运行中的引擎需重启后才会使用新二进制。
@@ -62,7 +62,7 @@
 
 随后脚本检查 `hf` 与 `modelscope` 两个命令行工具，缺失时在 venv 内安装 `huggingface_hub` 和 `modelscope`；两者只服务于“模型下载”页，安装失败会打印 `llm-router: ERROR: ...` 但网关仍会启动，下载页会把对应源标记为不可用。Debian/Ubuntu 若缺少 venv 组件，按报错提示安装 `python3-venv`。需要指定其它解释器时设置 `ROUTER_PYTHON`，此时不创建 venv、不自动安装。
 
-首次启动会在当前目录自动生成最小 `config.json`（不含引擎），控制台显示“未配置引擎”引导，进入管理页的“引擎”页填写启动路径即可，无需重启网关。默认监听 `0.0.0.0:8080`，控制台为 `/`；临时换端口可用 `./START-router.sh --host 127.0.0.1 --port 8081`（不写入配置文件）。`./START-router.sh --check` 只扫描并打印模型列表后退出。
+首次启动会在当前目录自动生成最小 `config.json`（不含引擎），控制台显示“未配置引擎”引导，进入管理页的“引擎”页填写启动路径即可，无需重启网关。默认监听 `0.0.0.0:8080`，控制台为 `/`；临时换端口可用 `./START-router.sh --host 127.0.0.1 --port 8081`（不写入配置文件）。`./START-router.sh --check` 只扫描并打印模型列表后退出。`config.json` 的 `engine_ui` 段控制内置 UI 的转发监听：`enabled`（默认 `true`）、`host`（默认 `0.0.0.0`）、`port`（默认 `8081`，`--ui-port` 可临时覆盖）；端口为 0 或 `enabled: false` 时不启动第二个监听，控制台“UI”按钮随之禁用。引擎自带的界面在编译期内置：llama.cpp 打开 `LLAMA_BUILD_UI`（npm 构建或 HF 发布版资源），NInfer 用 `-DNINFER_WEBUI_DIR` 嵌入 llama.cpp 发布版 UI，KVMem 的全量 UI 构建后安装到 `share/kvmem/ui` 由 `llama-kvmem-server` 直接提供。
 
 启动脚本会检查 Python 版本、venv 依赖与下载工具。网关通过 `config.json` 指定引擎命令、模型目录、下载代理与下载目录，通过 `models.ini`（llama.cpp）、KVMem 与 Strata 的 `strata-*.json`、NInfer 的 `ninfer-*.json` 与 KVMem + llama.cpp 的 `kvmem-llama-*.json` 描述模型。
 

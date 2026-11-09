@@ -200,6 +200,10 @@ ROCM_PACKAGES: dict[str, tuple[tuple[str, str], ...]] = {
 NASM_VERSION = "2.16.03"
 NASM_URL = f"https://www.nasm.us/pub/nasm/releasebuilds/{NASM_VERSION}/nasm-{NASM_VERSION}.tar.xz"
 
+# llama.cpp's released WebUI that ninfer-serve compiles into its binary.
+# Keep in sync with backends/ninfer/scripts/fetch-webui.sh (default tag).
+NINFER_WEBUI_TAG = "b11165"
+
 ROCM_FAMILIES: tuple[tuple[str, str], ...] = (
     ("gfx1153", "gfx1153"),
     ("gfx1152", "gfx1152"),
@@ -1608,6 +1612,11 @@ class EngineSetup:
                 cmake, "-S", str(root), "-B", str(build_dir), *self._cmake_generator(),
                 "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_CURL=OFF",
                 "-DGGML_NATIVE=ON",
+                # The engine starts with its own chat UI.  Build it from the
+                # bundled Svelte sources when Node.js is available, otherwise
+                # fall back to the release assets hosted on the HF bucket
+                # (both paths are enforced below by the embedded-assets check).
+                "-DLLAMA_BUILD_UI=ON", "-DLLAMA_USE_PREBUILT_UI=ON",
             ]
             if variant == "cuda":
                 configure += [
@@ -1628,6 +1637,21 @@ class EngineSetup:
                  "--target", "llama-server", "llama-mtmd-cli"],
                 env=env, step=step,
             )
+            # llama-server silently starts without the chat UI when neither
+            # npm nor the HF asset download produced a dist tree.  Refuse to
+            # install such a binary: it would break the console "UI" button.
+            ui_header = build_dir / "tools" / "ui" / "ui.h"
+            try:
+                embedded = "#define LLAMA_UI_HAS_ASSETS 1" in ui_header.read_text(
+                    encoding="utf-8", errors="ignore"
+                )
+            except OSError:
+                embedded = False
+            if not embedded:
+                raise SetupError(
+                    "llama.cpp 编译完成但没有嵌入 Web UI；"
+                    "请启用构建代理（下载发布版 UI）或安装 Node.js/npm 后重试"
+                )
         elif engine_id == "strata":
             build_dir = root / ("build-cuda" if variant == "cuda" else "build-hip")
             configure = [
@@ -1763,6 +1787,9 @@ class EngineSetup:
                 cmake, "-S", str(backends / "ninfer"), "-B", str(ninfer_dir), *self._cmake_generator(),
                 "-DCMAKE_BUILD_TYPE=Release",
                 f"-DNINFER_KVMEM_SOURCE_DIR={root / 'kvmem'}",
+                # ninfer-serve embeds the released llama.cpp WebUI at build
+                # time; without the directory it starts with no UI at all.
+                f"-DNINFER_WEBUI_DIR={self._ensure_ninfer_webui(job, root, env, step)}",
                 f"-DCMAKE_CUDA_COMPILER={tool_root / 'bin' / 'nvcc'}",
                 f"-DCMAKE_CUDA_ARCHITECTURES={nvidia_arch_for_ninfer(self._nvidia_cap())}",
             ]
@@ -1796,6 +1823,90 @@ class EngineSetup:
                  "--jobs", jobs],
                 cwd=root, env=env, step=step,
             )
+        # The KVMem UI is a standalone SvelteKit bundle served from
+        # share/kvmem/ui.  Its default lightweight mode needs the KVMem
+        # console (/api/chat/*), so install the full upstream UI instead.
+        self._build_kvmem_ui(job, root, env, step, python)
+
+    def _build_kvmem_ui(
+        self,
+        job: dict[str, Any],
+        root: Path,
+        env: dict[str, str],
+        step: str,
+        python: Path,
+    ) -> None:
+        script = root / "scripts" / "build-webui.py"
+        if not script.is_file():
+            raise SetupError("kvmem 缺少 scripts/build-webui.py")
+        output = root / "build" / "share" / "kvmem" / "ui"
+        versions = read_json(root / "backends" / "versions.json", {})
+        pin = ""
+        if isinstance(versions, dict):
+            pin = str((versions.get("llamacpp") or {}).get("base_commit") or "")
+        manifest = read_json(output / "ui-build.json", {})
+        if not isinstance(manifest, dict):
+            manifest = {}
+        if (
+            (output / "index.html").is_file()
+            and manifest.get("mode") == "full-ui"
+            and (not pin or manifest.get("llama_commit") == pin)
+        ):
+            job["detail"] = "KVMem Web UI 已是最新（full-ui）"
+            return
+        if not shutil.which("npm", path=env.get("PATH")) or not shutil.which(
+            "npx", path=env.get("PATH")
+        ):
+            raise SetupError(
+                "构建 KVMem Web UI 需要 Node.js / npm；请安装后重试"
+            )
+        job["detail"] = "构建 KVMem Web UI（full-ui）"
+        self._run(
+            job,
+            [
+                str(python), str(script), "--full-ui",
+                "--build-dir", str(root / "build-ui"),
+                "--output", str(output),
+            ],
+            cwd=root, env=env, step=step,
+        )
+        built = read_json(output / "ui-build.json", {})
+        if not (output / "index.html").is_file() or not isinstance(built, dict) or (
+            built.get("mode") != "full-ui"
+        ):
+            raise SetupError("KVMem Web UI 构建完成，但没有生成 full-ui 资源")
+
+    def _ensure_ninfer_webui(
+        self, job: dict[str, Any], root: Path, env: dict[str, str], step: str
+    ) -> Path:
+        """Unpack llama.cpp's released UI for -DNINFER_WEBUI_DIR.
+
+        The asset lives outside the ninfer checkout: prepare-backends resets
+        and cleans that tree on every install, which would delete a download
+        stored under third_party/.
+        """
+        ui_dir = self.dir_toolchains / "ninfer-webui" / NINFER_WEBUI_TAG
+        if (ui_dir / "index.html").is_file() or (ui_dir / "index.html.gz").is_file():
+            return ui_dir
+        fetch = root / "backends" / "ninfer" / "scripts" / "fetch-webui.sh"
+        if not fetch.is_file():
+            raise SetupError("ninfer 缺少 scripts/fetch-webui.sh")
+        if not any(
+            env.get(key)
+            for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
+        ):
+            raise SetupError(
+                "NInfer 自带的 Web UI 需要从 GitHub 下载；请在安装页启用代理后重试"
+            )
+        job["detail"] = f"下载 NInfer Web UI（{NINFER_WEBUI_TAG}）"
+        self._run(
+            job,
+            ["bash", str(fetch), NINFER_WEBUI_TAG, str(ui_dir)],
+            cwd=root / "backends" / "ninfer", env=env, step=step,
+        )
+        if not ((ui_dir / "index.html").is_file() or (ui_dir / "index.html.gz").is_file()):
+            raise SetupError(f"NInfer Web UI 缺少 index.html：{ui_dir}")
+        return ui_dir
 
     def _ensure_ninfer_tools(
         self, job: dict[str, Any], root: Path, env: dict[str, str], step: str
@@ -1989,6 +2100,22 @@ class EngineSetup:
                 self._copy_artifact(job, engine_id, source, target, variant)
         if engine_id == "kvmem":
             self._sync_poly_alias()
+            self._install_kvmem_ui(job, root)
+
+    def _install_kvmem_ui(self, job: dict[str, Any], root: Path) -> None:
+        """Publish the built UI where llama-kvmem-server looks by default:
+        ``<binary_dir>/../share/kvmem/ui`` (the installed bin/ directory)."""
+        source = root / "build" / "share" / "kvmem" / "ui"
+        if not (source / "index.html").is_file():
+            raise SetupError(
+                "编译完成但找不到 KVMem Web UI（build/share/kvmem/ui/index.html）"
+            )
+        target = self.base_dir / "share" / "kvmem" / "ui"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(source, target)
+        job["detail"] = f"KVMem Web UI → {target}"
 
     # -- config stubs ------------------------------------------------------
     def _poly_alias(self, variant: str | None) -> Path:
@@ -2148,7 +2275,7 @@ class EngineSetup:
                             "-c", "8192", "-ngl", "999", "--flash-attn", "on",
                             "--kvmem", "--kvmem-budget", "32768",
                             "--kvmem-block-tokens", "32", "--kvmem-gen-reserve", "1024",
-                            "--kv-dtype", "q8_0", "--no-ui",
+                            "--kv-dtype", "q8_0",
                         ]
                     },
                 )
