@@ -27,6 +27,7 @@ import tarfile
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -53,6 +54,12 @@ CUDA_CATALOG: tuple[dict[str, Any], ...] = (
         "url": "https://developer.download.nvidia.com/compute/cuda/12.9.1/local_installers/cuda_12.9.1_575.57.08_linux.run",
         "filename": "cuda_12.9.1_575.57.08_linux.run",
         "bytes": 5_100_000_000,
+    },
+    {
+        "version": "13.4.3",
+        "url": "https://developer.download.nvidia.com/compute/cuda/13.4.3/local_installers/cuda_13.4.3_linux.run",
+        "filename": "cuda_13.4.3_linux.run",
+        "bytes": 4_191_013_652,
     },
     {
         "version": "13.5.0",
@@ -1428,9 +1435,10 @@ class EngineSetup:
         self._run(
             job,
             [
-                "sh", str(archive), "--silent", "--toolkit", "--toolkitpath", str(target),
-                "--no-opengl-libs", "--no-man-page", "--no-drm", "--override",
-                "--tmpdir", env["TMPDIR"],
+                "sh", str(archive), "--silent", "--toolkit",
+                f"--toolkitpath={target}",
+                "--no-man-page", "--override",
+                f"--tmpdir={env['TMPDIR']}",
             ],
             cwd=archive.parent, env=env, step="CUDA runfile",
         )
@@ -1572,6 +1580,70 @@ class EngineSetup:
         # bundled pip is new enough to read current wheel metadata.
         self._run(job, [str(python), "-m", "pip", "install", "-r", str(requirements)], cwd=cwd, env=env, step="pip")
         self._step(job, "deps", "ok", str(requirements))
+
+    def _ensure_strata_llama(self, job: dict[str, Any], root: Path) -> None:
+        """Fetch the llama.cpp checkout strata-vision links against.
+
+        Newer Strata builds the engine from its vendored third_party/strata-ggml
+        and no longer FetchContent's llama.cpp, but tools/vision still needs
+        mtmd from the same pinned commit.  Strata's own setup.py downloads that
+        zip lazily; replicate it here so a headless install has it before the
+        vision configure step.
+        """
+        target = root / "third_party" / "llama.cpp"
+        if (target / "CMakeLists.txt").is_file():
+            return
+        commit = ""
+        version = root / "third_party" / "ggml" / "VERSION.txt"
+        try:
+            candidate = version.read_text(encoding="utf-8", errors="ignore").split()[0]
+            if re.fullmatch(r"[0-9a-f]{40}", candidate):
+                commit = candidate
+        except (OSError, IndexError):
+            pass
+        if not commit:
+            try:
+                text = (root / "setup.py").read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                text = ""
+            match = re.search(r'LLAMA_CPP_COMMIT\s*=\s*"([0-9a-f]{40})"', text)
+            if match:
+                commit = match.group(1)
+        if not commit:
+            raise SetupError(
+                "Strata 缺少锁定的 llama.cpp 源码，且无法确定其 pin 提交；"
+                "请重新安装 Strata（需要从 GitHub 下载源码）"
+            )
+        archive = self.dir_tmp / f"llama.cpp-{commit[:7]}.zip"
+        job["detail"] = f"下载 llama.cpp 源码（{commit[:7]}，Strata 视觉工具）"
+        self._download(job, f"https://github.com/ggml-org/llama.cpp/archive/{commit}.zip", archive)
+        staging = self.dir_tmp / f"strata-llama-{commit[:7]}"
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                for member in zf.infolist():
+                    parts = member.filename.split("/", 1)
+                    if len(parts) != 2 or not parts[1]:
+                        continue
+                    relative = Path(parts[1])
+                    if relative.is_absolute() or ".." in relative.parts:
+                        continue
+                    dest = staging / relative
+                    if member.is_dir():
+                        dest.mkdir(parents=True, exist_ok=True)
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(member) as src, dest.open("wb") as out:
+                        shutil.copyfileobj(src, out)
+        except zipfile.BadZipFile as exc:
+            raise SetupError(f"llama.cpp 源码压缩包损坏：{archive}") from exc
+        if not (staging / "CMakeLists.txt").is_file():
+            raise SetupError("llama.cpp 源码压缩包结构异常（缺少 CMakeLists.txt）")
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging.replace(target)
 
     # -- builds ------------------------------------------------------------
     def _cmake_generator(self) -> list[str]:
@@ -1854,12 +1926,18 @@ class EngineSetup:
         ):
             job["detail"] = "KVMem Web UI 已是最新（full-ui）"
             return
-        if not shutil.which("npm", path=env.get("PATH")) or not shutil.which(
-            "npx", path=env.get("PATH")
-        ):
+        npm = shutil.which("npm", path=env.get("PATH"))
+        if not npm or not shutil.which("npx", path=env.get("PATH")):
             raise SetupError(
                 "构建 KVMem Web UI 需要 Node.js / npm；请安装后重试"
             )
+        # An npm shell script runs `node` from PATH, which may not be the Node
+        # that shipped next to it: desktop-bundled launchers (Electron in node
+        # mode) and nvm installs can put a different runtime first.  sharp then
+        # loads its Electron/ABI variant and the PWA icon generator segfaults.
+        npm_bin = Path(npm).parent
+        if (npm_bin / "node").is_file():
+            env["PATH"] = str(npm_bin) + os.pathsep + env.get("PATH", "")
         job["detail"] = "构建 KVMem Web UI（full-ui）"
         self._run(
             job,
@@ -1886,8 +1964,19 @@ class EngineSetup:
         stored under third_party/.
         """
         ui_dir = self.dir_toolchains / "ninfer-webui" / NINFER_WEBUI_TAG
-        if (ui_dir / "index.html").is_file() or (ui_dir / "index.html.gz").is_file():
-            return ui_dir
+
+        def unpacked() -> Path | None:
+            # The release asset stores the page under llama-<tag>/ inside the
+            # target directory; older assets extracted it directly.
+            for candidate in (ui_dir, *sorted(ui_dir.glob("llama-*"))):
+                if (candidate / "index.html").is_file() or (
+                    candidate / "index.html.gz"
+                ).is_file():
+                    return candidate
+            return None
+
+        if (found := unpacked()) is not None:
+            return found
         fetch = root / "backends" / "ninfer" / "scripts" / "fetch-webui.sh"
         if not fetch.is_file():
             raise SetupError("ninfer 缺少 scripts/fetch-webui.sh")
@@ -1904,9 +1993,10 @@ class EngineSetup:
             ["bash", str(fetch), NINFER_WEBUI_TAG, str(ui_dir)],
             cwd=root / "backends" / "ninfer", env=env, step=step,
         )
-        if not ((ui_dir / "index.html").is_file() or (ui_dir / "index.html.gz").is_file()):
+        found = unpacked()
+        if found is None:
             raise SetupError(f"NInfer Web UI 缺少 index.html：{ui_dir}")
-        return ui_dir
+        return found
 
     def _ensure_ninfer_tools(
         self, job: dict[str, Any], root: Path, env: dict[str, str], step: str
@@ -2028,6 +2118,8 @@ class EngineSetup:
                     f"{ENGINE_CATALOG[engine_id]['label']} 依赖 {ENGINE_CATALOG[dep]['label']}，请先安装 {ENGINE_CATALOG[dep]['label']}"
                 )
         root = self._ensure_source(job, engine_id)
+        if engine_id == "strata":
+            self._ensure_strata_llama(job, root)
         self._python_deps(job, engine_id, root)
         for variant in variants:
             self._build_variant(job, engine_id, root, variant)
@@ -2069,6 +2161,14 @@ class EngineSetup:
             for item in source.parent.glob(pattern):
                 if item.is_file():
                     shutil.copy2(item, lib_dir / item.name)
+        if engine_id == "kvmem":
+            # libkvmem.so sits in <build>/kvmem, which the binary reaches via
+            # its ../kvmem RUNPATH inside the build tree; once deployed to
+            # bin/ it has to be in bin/libs/kvmem like the other objects.
+            for pattern in ("*.so", "*.so.*", "*.dylib"):
+                for item in (source.parent.parent / "kvmem").glob(pattern):
+                    if item.is_file():
+                        shutil.copy2(item, lib_dir / item.name)
         job["detail"] = f"{target.name} ← {source}"
 
     def _find_artifact(self, engine_id: str, root: Path, artifact: str, variant: str) -> Path | None:
