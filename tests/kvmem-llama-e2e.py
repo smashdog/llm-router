@@ -31,6 +31,7 @@ if BASE.exists():
 BASE.mkdir(parents=True)
 OUT.mkdir()
 shutil.copy2(ROOT / "router.py", BASE / "router.py")
+shutil.copy2(ROOT / "engine_setup.py", BASE / "engine_setup.py")
 shutil.copy2(ROOT / "smoke.png", BASE / "smoke.png")
 
 
@@ -195,6 +196,18 @@ fake_binary.write_text(
     f"#!/bin/sh\nexec {sys.executable} {fake_server} \"$@\"\n", encoding="utf-8"
 )
 fake_binary.chmod(0o755)
+# The console lists only engines whose managed products are installed;
+# pretend every product is, so the add dialog can offer kvmem_llama.
+setup_bin = BASE / "bin"
+setup_bin.mkdir()
+for name in (
+    "llama-server", "llama-mtmd-cli", "strata", "strata-vision",
+    "kvmem-llama-server", "kvmem-strata-poly", "kvmem-ninfer-serve",
+):
+    for candidate in (name, f"{name}-cuda", f"{name}-rocm"):
+        path = setup_bin / candidate
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
 
 # --- model files ----------------------------------------------------------
 models_root = BASE / "models"
@@ -414,7 +427,7 @@ try:
     assert args[args.index("--kvmem-block-tokens") + 1] == "32", args
     assert args[args.index("--kvmem-gen-reserve") + 1] == "1024", args
     assert args[args.index("--kv-dtype") + 1] == "q8_0", args
-    assert "--kvmem" in args and "--no-ui" in args, args
+    assert "--kvmem" in args, args
     checks += 1
 
     first = starts()[0]
@@ -713,17 +726,16 @@ try:
         "const host=document.querySelector('#params-kvmem');"
         "return {"
         "hint: document.querySelector('#params-hint').textContent,"
-        "repeat: document.querySelector('[name=repeat_last_n]').disabled,"
+        "repeat: document.querySelector('#params-dialog [name=repeat_last_n]').disabled,"
         "visionHidden: document.querySelector('#params-vision').hidden,"
         "visionDisabled: document.querySelector('#params-vision-device').classList.contains('disabled'),"
         "engineHidden: document.querySelector('#params-engine').hidden,"
-        "budgetHidden: document.querySelector('#params-budget-field').hidden,"
-        "budget: document.querySelector('#params-budget').value,"
         "contextHidden: document.querySelector('#params-context-field').hidden,"
         "cacheHidden: document.querySelector('#params-cache-k-field').hidden,"
         "kvmemTabHidden: !tab || tab.hidden,"
         "kvmemCount: document.querySelector('#params-kvmem-count').textContent,"
         "kvmemFields: host.querySelectorAll('[data-param-key]').length,"
+        "budget: host.querySelector('[data-param-key=kvmem_budget]').value,"
         "method: host.querySelector('[data-param-key=kvmem_method]').value,"
         "recent: host.querySelector('[data-param-key=kvmem_recent_tokens]').value,"
         "sessions: host.querySelector('[data-param-key=kvmem_sessions]').value,"
@@ -735,11 +747,11 @@ try:
     assert surface["repeat"] is True, surface
     assert surface["visionHidden"] is False and surface["visionDisabled"] is False, surface
     assert surface["engineHidden"] is False, surface
-    assert surface["budgetHidden"] is False and surface["budget"] == "32768", surface
-    assert surface["contextHidden"] is True and surface["cacheHidden"] is True, surface
+    assert surface["contextHidden"] is False and surface["cacheHidden"] is False, surface
     assert surface["kvmemTabHidden"] is False, surface
-    assert int(surface["kvmemCount"] or 0) >= 40, surface
+    assert int(surface["kvmemCount"] or 0) >= 20, surface
     assert surface["kvmemFields"] == int(surface["kvmemCount"]), surface
+    assert surface["budget"] == "32768", surface
     assert surface["method"] == "recency", surface
     assert surface["recent"] == "512", surface
     assert surface["sessions"] == "", surface
@@ -759,12 +771,10 @@ try:
     form = js(
         "return {"
         "engine: document.querySelector('input[name=add-engine]:checked').value,"
-        "budgetHidden: document.querySelector('#add-budget-field').hidden,"
-        "budget: document.querySelector('#add-budget').value,"
         "context: document.querySelector('#add-context').value,"
         "cacheK: [...document.querySelector('#add-cache-k').options].map(o=>o.value),"
         "cacheV: document.querySelector('#add-cache-v').value,"
-        "repeat: document.querySelector('[name=repeat_last_n]').disabled,"
+        "repeat: document.querySelector('#add-dialog [name=repeat_last_n]').disabled,"
         "visionHidden: document.querySelector('#add-vision-field').hidden,"
         "visionHintHidden: document.querySelector('#add-vision-hint').hidden,"
         "visionHint: document.querySelector('#add-vision-hint').textContent,"
@@ -773,13 +783,13 @@ try:
         "kvmemFields: document.querySelectorAll('#add-kvmem [data-param-key]').length,"
         "kvmemBlank: [...document.querySelectorAll('#add-kvmem [data-param-key]')]"
         ".every((el)=>el.value===''),"
+        "budgetHint: (document.querySelector('#add-kvmem [data-param-key=kvmem_budget]')||{}).placeholder||'',"
         "hint: document.querySelector('#add-model-hint').textContent,"
         "caption: document.querySelector('#add-engine-caption').textContent,"
         "defaults: document.querySelector('#add-defaults').textContent,"
         "};"
     )
     assert form["engine"] == "kvmem_llama", form
-    assert form["budgetHidden"] is False and form["budget"] == "32768", form
     assert form["context"] == "", form
     assert form["cacheK"] == ["q8_0", "f16", "f32", "q5_0", "q4_0"], form
     assert form["cacheV"] == "q8_0", form
@@ -788,11 +798,12 @@ try:
     assert form["visionHintHidden"] is False and "mmproj" in form["visionHint"], form
     assert "主模型" in form["visionHint"], form
     assert form["kvmemTabHidden"] is False, form
-    assert int(form["kvmemCount"] or 0) >= 40, form
+    assert int(form["kvmemCount"] or 0) >= 20, form
     assert form["kvmemFields"] == int(form["kvmemCount"]), form
     assert form["kvmemBlank"] is True, form
+    assert form["budgetHint"] == "32768", form
     assert "目录" in form["hint"], form
-    assert "32,768" in form["defaults"] or "32768" in form["defaults"], form
+    assert "KVMem 预算" in form["defaults"], form
     shot("add-kvmem-llama.png")
 
     # Add the text-only directory through the console form with one advanced

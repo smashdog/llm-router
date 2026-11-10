@@ -4088,6 +4088,10 @@ class Model:
     engine: str
     engine_model: str
     config_path: str | None = None
+    engine_slot: str = ""
+    model_path: str | None = None
+    vision_path: str | None = None
+    draft_path: str | None = None
     display_name: str = ""
     display_name_default: str = ""
     display_name_custom: bool = False
@@ -4165,6 +4169,10 @@ class Model:
             "quantization": self.quantization,
             "source": self.source,
             "config_path": self.config_path,
+            "engine_slot": self.engine_slot,
+            "model_path": self.model_path,
+            "vision_path": self.vision_path,
+            "draft_path": self.draft_path,
             "deletable": self.source in ("preset", "strata", "ninfer", "kvmem_llama"),
             "loaded": loaded,
             "available": self.available,
@@ -4507,9 +4515,19 @@ _PRESET_KEY_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
-def update_llama_preset(path: Path, name: str, values: dict[str, str]) -> None:
-    """Update keys inside an existing preset section, keeping everything else intact."""
-    wanted = {str(key): str(value) for key, value in values.items()}
+def update_llama_preset(
+    path: Path,
+    name: str,
+    values: dict[str, str] | None = None,
+    remove_keys: tuple[str, ...] = (),
+) -> None:
+    """Update keys inside an existing preset section, keeping everything else intact.
+
+    ``remove_keys`` drops keys (e.g. ``mmproj`` after vision was cleared) while
+    keys present in ``values`` always win over a removal.
+    """
+    wanted = {str(key): str(value) for key, value in (values or {}).items()}
+    removals = {str(key).strip().lower().replace("_", "-") for key in remove_keys}
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     except OSError:
@@ -4548,6 +4566,8 @@ def update_llama_preset(path: Path, name: str, values: dict[str, str]) -> None:
                 if matched in missing:
                     indent = raw[: len(raw) - len(raw.lstrip())]
                     section.append(f"{indent}{stripped.split('=', 1)[0].strip()} = {missing.pop(matched)}\n")
+                continue
+            if current in removals:
                 continue
         section.append(raw)
     trailing: list[str] = []
@@ -5005,6 +5025,21 @@ def discover_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
             mmproj_path = candidate
         if mmproj_path is None and mmproj_files:
             mmproj_path = mmproj_files[0]
+        # The file llama.cpp's router would use for this entry: the preset's
+        # `model` when present, else the largest non-mmproj GGUF in the dir.
+        resolved_model = model_file if model_file is not None else None
+        if resolved_model is None and has_dir:
+            candidates = [
+                path for path in model_dir.glob("*.gguf")
+                if "mmproj" not in path.name.lower()
+            ]
+            if candidates:
+                def _size(path: Path) -> int:
+                    try:
+                        return path.stat().st_size
+                    except OSError:
+                        return 0
+                resolved_model = max(candidates, key=_size)
         clip_flags = (
             gguf_bool_metadata(
                 mmproj_path,
@@ -5034,6 +5069,8 @@ def discover_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 engine="llama",
                 engine_model=name,
                 config_path=str(preset_path) if section else None,
+                model_path=str(resolved_model) if resolved_model is not None else None,
+                vision_path=str(mmproj_path) if mmproj_path is not None else None,
                 display_name=name,
                 aliases=aliases,
                 context_length=ctx,
@@ -5136,12 +5173,22 @@ def discover_kvmem_models(engine_cfg: dict[str, Any]) -> list[Model]:
         )
         vision_cfg = cfg.get("vision")
         video = bool(vision_cfg.get("video")) if isinstance(vision_cfg, dict) else False
+        vision_path = None
+        if isinstance(vision_cfg, dict):
+            mmproj_raw = str(vision_cfg.get("mmproj") or "").strip()
+            if mmproj_raw:
+                mmproj = Path(mmproj_raw)
+                if not mmproj.is_absolute():
+                    mmproj = cwd / mmproj
+                vision_path = str(mmproj)
         models.append(
             Model(
                 id=model_id,
                 engine="kvmem",
                 engine_model=model_id,
                 config_path=str(path),
+                model_path=str(model_file) if model_path else None,
+                vision_path=vision_path,
                 display_name=str(display_name),
                 aliases=aliases,
                 context_length=ctx,
@@ -5244,6 +5291,7 @@ def discover_ninfer_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 engine="ninfer",
                 engine_model=engine_model,
                 config_path=str(path),
+                model_path=str(model_file),
                 display_name=display_name,
                 aliases=aliases,
                 context_length=ctx,
@@ -5381,6 +5429,8 @@ def discover_kvmem_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 engine="kvmem_llama",
                 engine_model=str(cfg.get("model_id") or model_id),
                 config_path=str(path),
+                model_path=str(model_file),
+                vision_path=str(mmproj) if mmproj is not None else None,
                 display_name=str(cfg.get("display_name") or model_id),
                 aliases=aliases,
                 context_length=ctx,
@@ -5482,6 +5532,10 @@ def discover_strata_models(engine_cfg: dict[str, Any]) -> list[Model]:
         mmproj = Path(mmproj_raw) if mmproj_raw else None
         if mmproj is not None and not mmproj.is_absolute():
             mmproj = cwd / mmproj
+        draft_raw = _config_arg_value(args, "--mtp")
+        draft = Path(draft_raw) if draft_raw else None
+        if draft is not None and not draft.is_absolute():
+            draft = cwd / draft
         problem = None
         if not exe.is_file() or not os.access(exe, os.X_OK):
             problem = f"引擎可执行文件不存在或不可执行（{exe}）"
@@ -5500,6 +5554,9 @@ def discover_strata_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 engine="strata",
                 engine_model=model_id,
                 config_path=str(path),
+                model_path=str(native),
+                vision_path=str(mmproj) if mmproj is not None else None,
+                draft_path=str(draft) if draft is not None else None,
                 display_name=str(cfg.get("display_name") or model_id),
                 aliases=aliases,
                 context_length=ctx,
@@ -5555,19 +5612,23 @@ class Registry:
         all_models: list[Model] = []
         for engine_id, engine_cfg in self.config.get("engines", {}).items():
             kind = engine_cfg.get("models", {}).get("kind")
+            found: list[Model] = []
             try:
                 if kind == "llama_dir":
-                    all_models.extend(discover_llama_models(engine_cfg))
+                    found = discover_llama_models(engine_cfg)
                 elif kind == "kvmem_dir":
-                    all_models.extend(discover_kvmem_models(engine_cfg))
+                    found = discover_kvmem_models(engine_cfg)
                 elif kind == "ninfer_dir":
-                    all_models.extend(discover_ninfer_models(engine_cfg))
+                    found = discover_ninfer_models(engine_cfg)
                 elif kind == "kvmem_llama_dir":
-                    all_models.extend(discover_kvmem_llama_models(engine_cfg))
+                    found = discover_kvmem_llama_models(engine_cfg)
                 elif kind == "strata_dir":
-                    all_models.extend(discover_strata_models(engine_cfg))
+                    found = discover_strata_models(engine_cfg)
             except Exception:
                 self.log.exception("cannot scan models for engine %s", engine_id)
+            for model in found:
+                model.engine_slot = engine_id
+            all_models.extend(found)
         counts: dict[str, int] = {}
         for model in all_models:
             counts[model.id] = counts.get(model.id, 0) + 1
@@ -10197,9 +10258,19 @@ class Gateway:
                 entry["name"] = str(spec.get("name") or entry.get("label") or engine_id)
         return out
 
+    @staticmethod
+    def _job_public(job: dict[str, Any]) -> dict[str, Any]:
+        """Copy a job for HTTP clients without the edit backup payloads."""
+        data = json.loads(json.dumps(job))
+        edit = data.get("edit")
+        if isinstance(edit, dict):
+            for key in ("backup_text", "old_config", "preset_updates", "remove_keys"):
+                edit.pop(key, None)
+        return data
+
     def model_manage_view(self) -> dict[str, Any]:
         with self.model_jobs_lock:
-            jobs = [json.loads(json.dumps(job)) for job in list(self.model_jobs.values())[-10:]]
+            jobs = [self._job_public(job) for job in list(self.model_jobs.values())[-10:]]
         engines = self.manage_engines()
         try:
             installed = self.engine_setup.installed_products()
@@ -10232,7 +10303,7 @@ class Gateway:
     def get_model_job(self, job_id: str) -> dict[str, Any] | None:
         with self.model_jobs_lock:
             job = self.model_jobs.get(job_id)
-            return json.loads(json.dumps(job)) if job is not None else None
+            return self._job_public(job) if job is not None else None
 
     def _job_step(self, job: dict[str, Any], key: str, status: str, detail: str | None = None) -> None:
         with self.model_jobs_lock:
@@ -10248,6 +10319,20 @@ class Gateway:
             job["status"] = status
             job["error"] = error
             job["finished_at"] = iso_now()
+
+    def _job_finish_ok(self, job: dict[str, Any]) -> None:
+        """Finish a job successfully, after edit cleanup.
+
+        Clients stop polling as soon as the status is set, so the old
+        config removal and parameter migration must run before that.
+        """
+        if job.get("edit"):
+            try:
+                self._edit_finish_success(job)
+            except Exception:
+                self.log.exception("model edit %s cannot clean up the old config", job["id"])
+                self._job_step(job, "cleanup", "warn", "新配置已生效，但旧配置清理失败")
+        self._job_finish(job, "ok")
 
     def _model_meta_path(self) -> Path:
         return resolve_path(
@@ -10307,6 +10392,172 @@ class Gateway:
             self.log.exception("cannot save display name of model %s", name)
 
     def start_model_add(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._start_model_job(payload, None)
+
+    @staticmethod
+    def _path_key(value: Any) -> str:
+        """Canonical path for edit comparisons; empty for a missing path."""
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        path = Path(raw).expanduser()
+        try:
+            return os.path.normcase(os.path.realpath(path))
+        except OSError:
+            return os.path.normcase(os.path.abspath(path))
+
+    def _unique_edit_name(self, base: str, suffix: str) -> str:
+        """A free model id for a kept-path engine change of a scanned model."""
+        if self.registry.resolve(base) is None:
+            return base
+        stem = f"{base}-{suffix}"
+        candidate = stem
+        index = 2
+        while self.registry.resolve(candidate) is not None:
+            candidate = f"{stem}-{index}"
+            index += 1
+        return candidate
+
+    def start_model_edit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Edit an existing model, re-validating when engine or files change."""
+        old_name = payload.get("edit_model")
+        if not isinstance(old_name, str) or not old_name.strip():
+            raise BadRequest('send {"edit_model": "...", "engine": "...", "model": "/path"}')
+        entry = self.registry.resolve(old_name.strip())
+        if entry is None:
+            raise ModelNotFound(f"model {old_name!r} is not in the registry")
+        engine_id = str(payload.get("engine") or "").strip()
+        if not engine_id or engine_id not in self.config.get("engines", {}):
+            raise BadRequest("engine must name a configured engine")
+        kind = self._engine_kind(engine_id)
+        if kind not in ("llama_dir", "kvmem_dir", "ninfer_dir", "kvmem_llama_dir", "strata_dir"):
+            raise BadRequest(f"engine {engine_id!r} cannot add models")
+        raw_model = payload.get("model")
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            raise BadRequest('send {"engine": "...", "model": "/path/model.gguf|.ninfer"}')
+
+        target = Path(raw_model.strip()).expanduser()
+        compare_model = target
+        auto_vision: Path | None = None
+        if target.is_dir():
+            picked, auto_vision = self._pick_gguf_files(target)
+            if picked is not None:
+                compare_model = picked
+        vision_raw = payload.get("vision")
+        if vision_raw is not None and not isinstance(vision_raw, str):
+            raise BadRequest("vision must be a path or null")
+        vision_path = (vision_raw or "").strip() or None
+        if vision_path is None and auto_vision is not None:
+            vision_path = str(auto_vision)
+        draft_raw = payload.get("draft")
+        if draft_raw is not None and not isinstance(draft_raw, str):
+            raise BadRequest("draft must be a path or null")
+        draft_path = (draft_raw or "").strip() or None
+
+        model_changed = self._path_key(compare_model) != self._path_key(entry.model_path)
+        vision_changed = self._path_key(vision_path) != self._path_key(entry.vision_path)
+        draft_changed = self._path_key(draft_path) != self._path_key(entry.draft_path)
+        engine_changed = engine_id != (entry.engine_slot or "")
+        if not entry.engine_slot:
+            engine_changed = self._short_kind(kind) != entry.engine
+
+        context_changed = False
+        if "context_length" in payload:
+            requested_context = payload.get("context_length")
+            if requested_context is None:
+                # Clearing the field means "use the GGUF limit"; that is only
+                # a change when the model currently pins a lower context.
+                context_changed = entry.context_length is not None
+            elif isinstance(requested_context, int) and not isinstance(requested_context, bool):
+                context_changed = requested_context != entry.context_length
+        cache_changed = any(
+            isinstance(payload.get(key), str)
+            and str(payload.get(key)).strip()
+            and str(payload.get(key)).strip() != str(getattr(entry, key) or "")
+            for key in ("cache_type_k", "cache_type_v")
+        )
+        vision_device_changed = False
+        raw_device = payload.get("vision_device")
+        if isinstance(raw_device, str) and raw_device.strip().lower() in ("cpu", "gpu"):
+            vision_device_changed = (
+                raw_device.strip().lower() == "gpu"
+            ) != entry.vision_gpu
+
+        if self._short_kind(kind) == "ninfer":
+            # NInfer vision (and its device) is compiled into the launch args.
+            enabled = payload.get("vision_enabled")
+            if isinstance(enabled, bool) and enabled != entry.multimodal:
+                vision_changed = True
+        needs_validation = engine_changed or model_changed or vision_changed or draft_changed
+        if self._short_kind(kind) == "llama" and entry.source != "preset":
+            # A scanned model has no preset section to edit in place.
+            needs_validation = (
+                needs_validation or context_changed or cache_changed or vision_device_changed
+            )
+        if self._short_kind(kind) == "kvmem_llama":
+            # Context and K/V precision are fixed per config for this engine;
+            # changing them means rewriting and re-validating the model.
+            needs_validation = needs_validation or context_changed or cache_changed
+
+        if needs_validation and not isinstance(payload.get("params"), dict):
+            # Re-validation must not silently reset the model's sampling.
+            old_params = self.params.get(entry.id)
+            if old_params:
+                payload = dict(payload)
+                payload["params"] = old_params
+
+        if not needs_validation:
+            values = payload.get("params")
+            if values is None:
+                values = {}
+            if not isinstance(values, dict):
+                raise BadRequest("params must be an object")
+            engine_params = payload.get("engine_params")
+            if self._short_kind(kind) == "llama":
+                merged = dict(engine_params) if isinstance(engine_params, dict) else {}
+                for key in ("context_length", "cache_type_k", "cache_type_v"):
+                    if key in payload:
+                        merged[key] = payload[key]
+                engine_params = merged or None
+            result = self.save_model_params(
+                entry,
+                values,
+                engine_params,
+                payload.get("vision_device"),
+                payload.get("display_name"),
+            )
+            return {"mode": "save", "model": entry.id, "engine": entry.engine, **result}
+
+        job_payload = dict(payload)
+        job_payload["edit_model"] = entry.id
+        if model_changed:
+            force_name = None
+        elif engine_changed and not entry.config_path:
+            # A directory-scanned model keeps living in its old engine, so the
+            # old id stays taken; give the new engine config a distinct id.
+            force_name = self._unique_edit_name(
+                entry.id, self._short_kind(kind) or engine_id
+            )
+        else:
+            force_name = entry.id
+        job_payload["_edit_force_name"] = force_name
+        if self._short_kind(kind) == "ninfer":
+            # The vision tower lives inside the .ninfer file.
+            job_payload["vision"] = None
+        if self._short_kind(kind) != "strata":
+            # An old Strata MTP path must not leak into the new engine.
+            job_payload["draft"] = None
+        job = self._start_model_job(job_payload, entry)
+        return {
+            "mode": "validate",
+            "model": entry.id,
+            "engine": entry.engine,
+            "job": self._job_public(job),
+        }
+
+    def _start_model_job(
+        self, payload: dict[str, Any], edit: Model | None = None
+    ) -> dict[str, Any]:
         engine_id = str(payload.get("engine") or "").strip()
         if not engine_id or engine_id not in self.config.get("engines", {}):
             raise BadRequest("engine must name a configured engine")
@@ -10435,10 +10686,24 @@ class Gateway:
                     "status": "pending",
                     "detail": "",
                 })
+        if edit is not None:
+            steps.insert(0, {
+                "key": "backup",
+                "label": "备份旧配置",
+                "status": "pending",
+                "detail": "",
+            })
+            steps.append({
+                "key": "cleanup",
+                "label": "迁移参数并清理旧配置",
+                "status": "pending",
+                "detail": "",
+            })
         job = {
             "id": uuid.uuid4().hex[:12],
-            "kind": "add",
+            "kind": "edit" if edit is not None else "add",
             "engine": engine_id,
+            "edit_model": edit.id if edit is not None else None,
             "model": model.strip(),
             "vision": vision_path,
             "draft": draft_path,
@@ -10461,6 +10726,29 @@ class Gateway:
             "rollback": False,
             "steps": steps,
         }
+        if edit is not None:
+            job["edit"] = {
+                "old_id": edit.id,
+                "old_engine": edit.engine,
+                "old_engine_slot": edit.engine_slot,
+                "old_engine_model": edit.engine_model,
+                "old_config_path": edit.config_path,
+                "old_source": edit.source,
+                "old_model_path": edit.model_path,
+                "old_vision_path": edit.vision_path,
+                "old_draft_path": edit.draft_path,
+                "old_params": self.params.get(edit.id),
+                "old_display_name": (
+                    edit.display_name if edit.display_name_custom else None
+                ),
+                "same_engine_slot": engine_id == (edit.engine_slot or ""),
+                "force_name": payload.get("_edit_force_name", edit.id),
+                "backup_path": None,
+                # A directory-scanned model has no config to move or delete, so
+                # the old entry survives a path/engine change: the edit adds a
+                # model beside it instead of replacing it.
+                "old_kept": not edit.config_path,
+            }
         with self.model_jobs_lock:
             if any(item.get("status") == "running" for item in self.model_jobs.values()):
                 raise ModelBusy("another model add operation is in progress")
@@ -10602,11 +10890,18 @@ class Gateway:
             self._job_step(job, "paths", "ok", f"{model}；NInfer 单模型模式")
 
             self._job_step(job, "metadata", "running")
-            name = slugify_model_id(job.get("name") or model.stem)
-            if self.registry.resolve(name) is not None:
+            name = self._edit_force_name(job) or slugify_model_id(
+                job.get("name") or model.stem
+            )
+            if self.registry.resolve(name) is not None and not self._edit_allow_name(job, name):
                 raise BadRequest(f"模型 ID {name} 已存在")
             job["name"] = name
-            template_path, template = ninfer_reference_config(engine_cfg)
+            edit_template = self._edit_template_config(job)
+            if edit_template is not None:
+                template = edit_template
+                template_path = Path(str((job.get("edit") or {}).get("old_config_path") or ""))
+            else:
+                template_path, template = ninfer_reference_config(engine_cfg)
             if template is None or template_path is None:
                 raise BadRequest(
                     "找不到 NInfer 模板配置；请在管理页把 NInfer 模板指向一份可用的 ninfer-*.json"
@@ -10631,13 +10926,14 @@ class Gateway:
             models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
             config_dir = Path(str(models_cfg.get("dir") or ""))
             config_file = config_dir / f"ninfer-{slugify_model_id(name).lower()}.json"
-            if config_file.exists():
+            if config_file.exists() and not self._edit_reuses_config(job, config_file):
                 raise BadRequest(f"配置已存在：{config_file}")
             new_cfg = json.loads(json.dumps(template))
             new_cfg["model_name"] = name
             new_cfg["model_id"] = name
-            new_cfg["display_name"] = model.stem
-            new_cfg["aliases"] = []
+            if edit_template is None:
+                new_cfg["display_name"] = model.stem
+                new_cfg["aliases"] = []
             new_cfg["model"] = str(model)
             new_cfg.pop("artifact", None)
             new_cfg["notes"] = f"NInfer 单模型模式；参数复制自 {template_path.name}"
@@ -10686,12 +10982,9 @@ class Gateway:
                 engine_alive = bool(self.engine is not None and self.engine.alive())
             if engine_alive:
                 self.stop_engine()
+            self._edit_detach_old(job)
             self.registry.reload()
-            entry = self.registry.resolve(name)
-            if entry is None:
-                raise EngineFailure("写入配置后注册表仍未发现该模型")
-            if not entry.available:
-                raise EngineFailure(f"引擎配置不可用：{entry.problem}")
+            entry = self._resolve_job_entry(job, name)
             self._job_step(job, "start", "running", "正在启动引擎并加载模型…")
             self.preload(name)
             self._job_step(
@@ -10710,7 +11003,7 @@ class Gateway:
                 )
             else:
                 self._job_step(job, "smoke", "ok", "跳过（未勾选冒烟测试）")
-            self._job_finish(job, "ok")
+            self._job_finish_ok(job)
             self.log.info("NInfer model add %s (%s) finished", job["id"], name)
         except Exception as exc:
             message = exc.message if isinstance(exc, GatewayError) else str(exc)
@@ -10880,11 +11173,11 @@ class Gateway:
             if info is None:
                 raise BadRequest("无法读取 GGUF 头：文件不是有效的 GGUF 模型")
             context, context_note = resolve_add_context(info, job.get("context_length"))
-            base_name = job.get("name") or (
+            base_name = self._edit_force_name(job) or job.get("name") or (
                 model.parent.name if source_is_dir else model.stem
             )
-            name = slugify_model_id(base_name)
-            if self.registry.resolve(name) is not None:
+            name = self._edit_force_name(job) or slugify_model_id(base_name)
+            if self.registry.resolve(name) is not None and not self._edit_allow_name(job, name):
                 raise BadRequest(f"模型 ID {name} 已存在")
             vision_flags = None
             if vision is not None:
@@ -10903,7 +11196,12 @@ class Gateway:
             )
 
             self._job_step(job, "kv", "running")
-            template_path, template = kvmem_llama_reference_config(engine_cfg)
+            edit_template = self._edit_template_config(job)
+            if edit_template is not None:
+                template = edit_template
+                template_path = Path(str((job.get("edit") or {}).get("old_config_path") or ""))
+            else:
+                template_path, template = kvmem_llama_reference_config(engine_cfg)
             if template is None:
                 template = default_kvmem_llama_template()
             template_args = [str(item) for item in (template.get("args") or [])]
@@ -10963,13 +11261,14 @@ class Gateway:
             models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
             config_dir = Path(str(models_cfg.get("dir") or ""))
             config_file = config_dir / f"kvmem-llama-{slugify_model_id(name).lower()}.json"
-            if config_file.exists():
+            if config_file.exists() and not self._edit_reuses_config(job, config_file):
                 raise BadRequest(f"配置已存在：{config_file}")
             new_cfg = json.loads(json.dumps(template))
             new_cfg["model_name"] = name
             new_cfg["model_id"] = name
-            new_cfg["display_name"] = str(info.get("name") or model.stem)
-            new_cfg["aliases"] = []
+            if edit_template is None:
+                new_cfg["display_name"] = str(info.get("name") or model.stem)
+                new_cfg["aliases"] = []
             new_cfg["model"] = str(model)
             new_cfg.pop("artifact", None)
             new_cfg["notes"] = (
@@ -11011,12 +11310,9 @@ class Gateway:
                 engine_alive = bool(self.engine is not None and self.engine.alive())
             if engine_alive:
                 self.stop_engine()
+            self._edit_detach_old(job)
             self.registry.reload()
-            entry = self.registry.resolve(name)
-            if entry is None:
-                raise EngineFailure("写入配置后注册表仍未发现该模型")
-            if not entry.available:
-                raise EngineFailure(f"引擎配置不可用：{entry.problem}")
+            entry = self._resolve_job_entry(job, name)
             self._job_step(job, "start", "running", "正在启动引擎并加载模型…")
             self.preload(name)
             self._job_step(
@@ -11040,7 +11336,7 @@ class Gateway:
                 if vision is not None:
                     self._job_step(job, "vision_smoke", "ok", "跳过（未勾选冒烟测试）")
 
-            self._job_finish(job, "ok")
+            self._job_finish_ok(job)
             self.log.info("KVMem + llama.cpp model add %s (%s) finished", job["id"], name)
         except Exception as exc:
             message = exc.message if isinstance(exc, GatewayError) else str(exc)
@@ -11113,7 +11409,9 @@ class Gateway:
         reads only the GGUF header (tokens, merges, token types, chat
         template), so a multi-GB model is never loaded into memory."""
         command = engine_cfg.get("command")
-        python = str(command[0]) if isinstance(command, list) and command else sys.executable
+        python = sys.executable
+        if isinstance(command, list) and command and "python" in Path(str(command[0])).name.lower():
+            python = str(command[0])
         cwd = Path(str(engine_cfg.get("cwd") or "")).expanduser()
         script = cwd / "tools" / "strata_tokenizer.py"
         if not script.is_file():
@@ -11222,22 +11520,31 @@ class Gateway:
                 raise BadRequest("无法读取 GGUF 头：文件不是有效的 GGUF 模型")
             context, context_note = resolve_add_context(info, job.get("context_length"))
             form_name = job.get("name")
-            base_name = form_name or (
+            forced_name = self._edit_force_name(job)
+            base_name = form_name or forced_name or (
                 model.parent.name if source_is_dir else model.stem
             )
-            # DFlash2 (strata_control/drafting.py) starts only when the config's
-            # model_name is a qwen3.8-flash-next-… name.  Name a Flash-Next GGUF
-            # that way so the params switch works out of the box; keep the
-            # identifier the file would have had as an alias.
-            name, alias, dflash2_name = strata_add_model_name(
-                info,
-                base_name,
-                form_name,
-                model.stem,
-                model.parent.name if source_is_dir else None,
-                taken=lambda value: self.registry.resolve(value) is not None,
-            )
-            if self.registry.resolve(name) is not None:
+            if forced_name:
+                # Engine-only edit: keep the existing id, skip the DFlash2
+                # renaming (the model already runs under this name).
+                name, alias, dflash2_name = forced_name, None, None
+            else:
+                # DFlash2 (strata_control/drafting.py) starts only when the config's
+                # model_name is a qwen3.8-flash-next-… name.  Name a Flash-Next GGUF
+                # that way so the params switch works out of the box; keep the
+                # identifier the file would have had as an alias.
+                name, alias, dflash2_name = strata_add_model_name(
+                    info,
+                    base_name,
+                    form_name,
+                    model.stem,
+                    model.parent.name if source_is_dir else None,
+                    taken=lambda value: (
+                        self.registry.resolve(value) is not None
+                        and not self._edit_allow_name(job, value)
+                    ),
+                )
+            if self.registry.resolve(name) is not None and not self._edit_allow_name(job, name):
                 raise BadRequest(f"模型 ID {name} 已存在")
             vision_flags = None
             if vision is not None:
@@ -11264,7 +11571,12 @@ class Gateway:
             )
 
             self._job_step(job, "kv", "running")
-            template_path, template = strata_reference_config(engine_cfg)
+            edit_template = self._edit_template_config(job)
+            if edit_template is not None:
+                template = edit_template
+                template_path = Path(str((job.get("edit") or {}).get("old_config_path") or ""))
+            else:
+                template_path, template = strata_reference_config(engine_cfg)
             if template is None:
                 raise BadRequest(
                     "Strata 引擎没有可用的模板配置；请先在引擎设置中指定 template"
@@ -11316,16 +11628,30 @@ class Gateway:
                     job, "draft", "ok",
                     f"{'复用' if reused else '已生成'} {draft_rt}",
                 )
+            edit = job.get("edit") if isinstance(job.get("edit"), dict) else {}
+            cleared_draft = bool(
+                draft_rt is None
+                and draft is None
+                and edit.get("same_engine_slot")
+                and edit.get("old_draft_path")
+            )
             if draft_rt is not None:
                 # The form's draft path wins over the template's --mtp; the
                 # launcher then keeps the MTP and drops any DFlash2 flags.
                 args = _config_arg_set(args, "--mtp", str(draft_rt))
                 new_cfg["drafting"] = "mtp"
                 new_cfg["mtp"] = True
+            elif cleared_draft:
+                # The edit form emptied the draft path: do not inherit the old
+                # config's MTP through the template.
+                args = _config_arg_remove(args, "--mtp")
+                if str(new_cfg.get("drafting") or "").strip().lower() == "mtp":
+                    new_cfg["drafting"] = "off"
+                    new_cfg["mtp"] = False
             # The model path, context clamp and --vision edits must win over
             # the template's user_args as well.
             touched = {"--native", "--model", "--ple-gguf", "--max-context", "--ctx", "--vision"}
-            if draft_rt is not None:
+            if draft_rt is not None or cleared_draft:
                 touched.add("--mtp")
             user = new_cfg.get("user_args")
             if isinstance(user, list):
@@ -11354,7 +11680,7 @@ class Gateway:
             config_dir = Path(str(models_cfg.get("dir") or ""))
             slug = slugify_model_id(name).lower()
             config_file = config_dir / f"strata-{slug}.json"
-            if config_file.exists():
+            if config_file.exists() and not self._edit_reuses_config(job, config_file):
                 raise BadRequest(f"配置已存在：{config_file}")
             self._job_step(job, "tokenizer", "running", "从 GGUF 导出 tokenizer…")
             tokenizer_root = config_dir / "tokenizers" / slug
@@ -11367,9 +11693,13 @@ class Gateway:
             self._job_step(job, "config", "running")
             params = job.get("params") or self.default_sampling(engine_id)
             self.params.replace(name, params, "strata")
+            same_identity = bool(edit) and name == edit.get("old_id")
             new_cfg["model_name"] = name
-            new_cfg["display_name"] = str(info.get("name") or model.stem)
-            new_cfg["aliases"] = [alias] if alias else []
+            if not same_identity:
+                new_cfg["display_name"] = str(info.get("name") or model.stem)
+                new_cfg["aliases"] = [alias] if alias else []
+            elif alias:
+                new_cfg["aliases"] = [alias]
             new_cfg["notes"] = (
                 "Strata 单模型；参数"
                 + (f"复制自 {template_path.name}" if template_path else "使用模板")
@@ -11431,12 +11761,9 @@ class Gateway:
                 engine_alive = bool(self.engine is not None and self.engine.alive())
             if engine_alive:
                 self.stop_engine()
+            self._edit_detach_old(job)
             self.registry.reload()
-            entry = self.registry.resolve(name)
-            if entry is None:
-                raise EngineFailure("写入配置后注册表仍未发现该模型")
-            if not entry.available:
-                raise EngineFailure(f"引擎配置不可用：{entry.problem}")
+            entry = self._resolve_job_entry(job, name)
             self._job_step(job, "start", "running", "正在启动引擎并加载模型…")
             self.preload(name)
             self._job_step(
@@ -11460,7 +11787,7 @@ class Gateway:
                 if vision is not None:
                     self._job_step(job, "vision_smoke", "ok", "跳过（未勾选冒烟测试）")
 
-            self._job_finish(job, "ok")
+            self._job_finish_ok(job)
             self.log.info("Strata model add %s (%s) finished", job["id"], name)
         except Exception as exc:
             message = exc.message if isinstance(exc, GatewayError) else str(exc)
@@ -11495,21 +11822,44 @@ class Gateway:
         vision_enabled: bool | None = None,
         draft: Path | None = None,
     ) -> None:
+        if job.get("edit"):
+            try:
+                self._edit_begin(job)
+            except Exception as exc:
+                message = exc.message if isinstance(exc, GatewayError) else str(exc)
+                self.log.exception("model edit %s cannot snapshot the old config", job["id"])
+                self._job_step(job, "backup", "fail", message)
+                self._job_step(job, "cleanup", "warn", "未写入任何配置")
+                self._job_finish(job, "failed", message)
+                return
         if kind == "ninfer_dir":
             self._model_add_ninfer_worker(
                 job, engine_id, model, smoke, vision_gpu, vision_enabled
             )
-            return
-        if kind == "kvmem_llama_dir":
+        elif kind == "kvmem_llama_dir":
             self._model_add_kvmem_llama_worker(
                 job, engine_id, model, vision, smoke, vision_gpu
             )
-            return
-        if kind == "strata_dir":
+        elif kind == "strata_dir":
             self._model_add_strata_worker(
                 job, engine_id, model, vision, smoke, vision_gpu, draft
             )
-            return
+        else:
+            self._model_add_llama_kvmem_worker(
+                job, engine_id, kind, model, vision, smoke, vision_gpu
+            )
+        return
+
+    def _model_add_llama_kvmem_worker(
+        self,
+        job: dict[str, Any],
+        engine_id: str,
+        kind: str,
+        model: Path,
+        vision: Path | None,
+        smoke: bool,
+        vision_gpu: bool = False,
+    ) -> None:
         engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
         short = self._short_kind(kind)
         preset_path: Path | None = None
@@ -11560,11 +11910,11 @@ class Gateway:
             if info is None:
                 raise BadRequest("无法读取 GGUF 头：文件不是有效的 GGUF 模型")
             context, context_note = resolve_add_context(info, job.get("context_length"))
-            base_name = job.get("name") or (
+            base_name = self._edit_force_name(job) or job.get("name") or (
                 model.parent.name if source_is_dir else model.stem
             )
-            name = slugify_model_id(base_name)
-            if self.registry.resolve(name) is not None:
+            name = self._edit_force_name(job) or slugify_model_id(base_name)
+            if self.registry.resolve(name) is not None and not self._edit_allow_name(job, name):
                 raise BadRequest(f"模型 ID {name} 已存在")
             vision_flags = None
             if vision is not None:
@@ -11629,6 +11979,7 @@ class Gateway:
                 self._job_step(job, "kv", "warn", f"{note}，使用引擎默认 KV 精度")
 
             self._job_step(job, "config", "running")
+            edit = job.get("edit") if isinstance(job.get("edit"), dict) else {}
             params = job.get("params") or self.default_sampling(engine_id)
             try:
                 cleaned = self.params.replace(name, params, short)
@@ -11643,7 +11994,17 @@ class Gateway:
                 if not preset_raw:
                     raise BadRequest("llama engine has no models.preset in config")
                 preset_path = Path(str(preset_raw))
+                edit = job.get("edit") if isinstance(job.get("edit"), dict) else {}
+                update_section = bool(edit) and name == str(edit.get("old_engine_model") or "")
                 values = {"c": str(context), "model": str(model)}
+                remove_keys: tuple[str, ...] = ()
+                if edit:
+                    # The edit form is authoritative: a cleared vision path must
+                    # drop mmproj, and a GPU switch must drop mmproj-offload.
+                    remove_keys = (
+                        ("mmproj", "mmproj-offload")
+                        if vision is None else ("mmproj-offload",)
+                    )
                 if vision is not None:
                     values["mmproj"] = str(vision)
                     if not vision_gpu:
@@ -11651,7 +12012,12 @@ class Gateway:
                 if cache_override:
                     values["cache-type-k"] = cache_k
                     values["cache-type-v"] = cache_v
-                append_llama_preset(preset_path, name, values)
+                if update_section:
+                    update_llama_preset(preset_path, name, values, remove_keys)
+                else:
+                    append_llama_preset(preset_path, name, values)
+                edit["remove_keys"] = list(remove_keys)
+                edit["preset_updates"] = dict(values)
                 config_file = preset_path
                 job["config_path"] = str(preset_path)
                 self._job_step(
@@ -11668,7 +12034,14 @@ class Gateway:
                 if not raw_dir:
                     raise BadRequest("KVMem 引擎缺少 models.dir，请先在管理页配置引擎")
                 config_dir = Path(raw_dir)
-                template_path, template = kvmem_reference_config(engine_cfg, self.base_dir)
+                edit_template = self._edit_template_config(job)
+                if edit_template is not None:
+                    template = edit_template
+                    template_path = Path(
+                        str((job.get("edit") or {}).get("old_config_path") or "")
+                    )
+                else:
+                    template_path, template = kvmem_reference_config(engine_cfg, self.base_dir)
                 if template is None:
                     raise BadRequest(
                         "找不到 PolyStrata 可执行文件：请先在管理页安装/编译 kvmem 引擎，"
@@ -11680,12 +12053,14 @@ class Gateway:
                 tokenizer = self._export_kvmem_tokenizer(engine_cfg, tool, model, job)
                 config_dir.mkdir(parents=True, exist_ok=True)
                 config_file = config_dir / f"strata-{slugify_model_id(name).lower()}.json"
-                if config_file.exists():
+                if config_file.exists() and not self._edit_reuses_config(job, config_file):
                     raise BadRequest(f"配置已存在：{config_file}")
                 kv_cfg = json.loads(json.dumps(template))
+                same_identity = bool(edit) and name == edit.get("old_id")
                 kv_cfg["model_name"] = name
-                kv_cfg["display_name"] = str(info.get("name") or name)
-                kv_cfg["aliases"] = []
+                if not same_identity:
+                    kv_cfg["display_name"] = str(info.get("name") or name)
+                    kv_cfg["aliases"] = []
                 args = [str(item) for item in (kv_cfg.get("args") or [])]
                 args = _config_arg_replace(args, "--model", str(model))
                 args = _config_arg_replace(args, "--max-context", context)
@@ -11785,12 +12160,9 @@ class Gateway:
                 engine_alive = bool(self.engine is not None and self.engine.alive())
             if engine_alive:
                 self.stop_engine()
+            self._edit_detach_old(job)
             self.registry.reload()
-            entry = self.registry.resolve(name)
-            if entry is None:
-                raise EngineFailure("写入配置后注册表仍未发现该模型")
-            if not entry.available:
-                raise EngineFailure(f"引擎配置不可用：{entry.problem}")
+            entry = self._resolve_job_entry(job, name)
             self._job_step(job, "start", "running", "正在启动引擎并加载模型…")
 
             try:
@@ -11805,13 +12177,25 @@ class Gateway:
                     raise
                 self._job_step(job, "kv", "warn", "k8v8 启动失败，回退引擎默认精度后重试")
                 if short == "llama" and preset_path is not None:
-                    remove_llama_preset(preset_path, name)
                     values = {"c": str(context), "model": str(model)}
+                    retry_remove: tuple[str, ...] = ()
+                    if edit:
+                        retry_remove = (
+                            ("mmproj", "mmproj-offload")
+                            if vision is None else ("mmproj-offload",)
+                        )
                     if vision is not None:
                         values["mmproj"] = str(vision)
                         if not vision_gpu:
                             values["mmproj-offload"] = "off"
-                    append_llama_preset(preset_path, name, values)
+                    if update_section:
+                        update_llama_preset(
+                            preset_path, name, values,
+                            (*retry_remove, "cache-type-k", "cache-type-v"),
+                        )
+                    else:
+                        remove_llama_preset(preset_path, name)
+                        append_llama_preset(preset_path, name, values)
                 elif config_file is not None and config_file.is_file():
                     kv_cfg = read_json(config_file, {})
                     if isinstance(kv_cfg, dict):
@@ -11888,7 +12272,7 @@ class Gateway:
                 if vision is not None:
                     self._job_step(job, "vision_smoke", "ok", "跳过（未勾选冒烟测试）")
 
-            self._job_finish(job, "ok")
+            self._job_finish_ok(job)
             self.log.info("model add %s (%s/%s) finished", job["id"], engine_id, name)
         except Exception as exc:
             message = exc.message if isinstance(exc, GatewayError) else str(exc)
@@ -11911,6 +12295,330 @@ class Gateway:
                 job["status"] = job.get("status") if job.get("status") != "running" else "failed"
                 job["finished_at"] = job.get("finished_at") or iso_now()
 
+    # -- edit lifecycle ----------------------------------------------------
+
+    @staticmethod
+    def _edit_force_name(job: dict[str, Any]) -> str | None:
+        """Model id an edit must keep (engine-only change), else None."""
+        edit = job.get("edit")
+        if not isinstance(edit, dict):
+            return None
+        value = str(edit.get("force_name") or "").strip()
+        return value or None
+
+    def _edit_allow_name(self, job: dict[str, Any], name: str) -> bool:
+        """An edit may reuse its own model id without looking like a collision."""
+        edit = job.get("edit")
+        return bool(edit) and name == edit.get("old_id")
+
+    def _edit_template_config(self, job: dict[str, Any]) -> dict[str, Any] | None:
+        """The old model's JSON config, reused when only its files changed.
+
+        Keeping the old config as the template preserves engine options that
+        the add form does not cover (extra args, aliases, vision extras...).
+        """
+        edit = job.get("edit")
+        if not isinstance(edit, dict) or not edit.get("same_engine_slot"):
+            return None
+        old = edit.get("old_config")
+        return json.loads(json.dumps(old)) if isinstance(old, dict) else None
+
+    def _edit_reuses_config(self, job: dict[str, Any], config_file: Path) -> bool:
+        """True when ``config_file`` is the file the edited model already used."""
+        edit = job.get("edit")
+        if not isinstance(edit, dict):
+            return False
+        old_raw = str(edit.get("old_config_path") or "").strip()
+        if not old_raw:
+            return False
+        return self._path_key(config_file) == self._path_key(old_raw)
+
+    def _resolve_job_entry(self, job: dict[str, Any], name: str) -> Model:
+        """The registry entry the job just wrote, not a same-id lookalike."""
+        entry = self.registry.resolve(name)
+        if entry is None:
+            raise EngineFailure("写入配置后注册表仍未发现该模型")
+        expected = str(job.get("config_path") or "").strip()
+        if expected and (
+            not entry.config_path
+            or self._path_key(expected) != self._path_key(entry.config_path)
+        ):
+            raise EngineFailure(
+                f"模型 ID {name} 已被另一份配置占用（{entry.config_path or '目录扫描模型'}）；"
+                "请先把那个模型移出扫描目录，或改用不同的模型文件"
+            )
+        if not entry.available:
+            raise EngineFailure(f"引擎配置不可用：{entry.problem}")
+        return entry
+
+    def _edit_detach_old(self, job: dict[str, Any]) -> None:
+        """Remove the old config before reloading a same-id engine edit.
+
+        Without this the old entry and the freshly written one share an id;
+        registry.reload() would suffix one of them and resolve() could return
+        the old model for validation.  _edit_begin snapshotted the bytes, so
+        a failed validation restores the file.
+        """
+        edit = job.get("edit")
+        if not isinstance(edit, dict) or edit.get("old_detached"):
+            return
+        if not str(edit.get("force_name") or "").strip():
+            return
+        if not isinstance(edit.get("backup_text"), str) or not edit.get("backup_text"):
+            return
+        old_raw = str(edit.get("old_config_path") or "").strip()
+        if not old_raw:
+            return
+        new_raw = str(job.get("config_path") or "").strip()
+        if new_raw and self._path_key(new_raw) == self._path_key(old_raw):
+            return
+        old_path = Path(old_raw)
+        try:
+            if edit.get("old_source") == "preset":
+                model_id = str(edit.get("old_engine_model") or edit.get("old_id") or "")
+                if old_path.is_file() and remove_llama_preset(old_path, model_id):
+                    edit["old_detached"] = str(old_path)
+            elif old_path.is_file():
+                old_path.unlink()
+                edit["old_detached"] = str(old_path)
+        except OSError:
+            self.log.exception("cannot detach old config %s for edit %s", old_path, job["id"])
+
+    def _drop_kvmem_meta(self, engine_id: Any, model_id: str) -> str | None:
+        """Drop one model from the KVMem models.json sidecar, if present."""
+        engine_cfg = self.config.get("engines", {}).get(str(engine_id or "")) or {}
+        models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+        if not models_cfg:
+            return None
+        meta_path = Path(
+            str(models_cfg.get("meta") or Path(str(models_cfg.get("dir") or "")) / "models.json")
+        )
+        meta = read_json(meta_path, {})
+        if not isinstance(meta, dict) or model_id not in meta:
+            return None
+        meta.pop(model_id, None)
+        write_json_atomic(meta_path, meta)
+        return str(meta_path)
+
+    def _edit_begin(self, job: dict[str, Any]) -> None:
+        """Snapshot the edited model's config before the worker writes anything."""
+        edit = job.get("edit") or {}
+        self._job_step(job, "backup", "running")
+        old_raw = str(edit.get("old_config_path") or "").strip()
+        text: str | None = None
+        parsed: dict[str, Any] | None = None
+        backup_path: Path | None = None
+        if old_raw:
+            old_path = Path(old_raw)
+            if old_path.is_file():
+                try:
+                    text = old_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    self.log.exception("cannot read old config %s for edit %s", old_path, job["id"])
+                if text is not None and old_path.suffix.lower() == ".json":
+                    try:
+                        value = json.loads(text)
+                        parsed = value if isinstance(value, dict) else None
+                    except ValueError:
+                        parsed = None
+                if text is not None:
+                    try:
+                        backup_dir = self.base_dir / "backups" / f"edit-{job['id']}"
+                        backup_dir.mkdir(parents=True, exist_ok=True)
+                        backup_path = backup_dir / old_path.name
+                        write_text_atomic(backup_path, text)
+                    except OSError:
+                        self.log.exception(
+                            "cannot back up old config %s for edit %s", old_path, job["id"]
+                        )
+                        backup_path = None
+        edit["backup_text"] = text
+        edit["backup_path"] = str(backup_path) if backup_path is not None else None
+        edit["old_config"] = parsed
+        if text is not None:
+            detail = f"已备份 {old_raw}"
+            if backup_path is not None:
+                detail += f" → {backup_path}"
+            self._job_step(job, "backup", "ok", detail)
+        elif old_raw:
+            self._job_step(job, "backup", "warn", f"旧配置不可读：{old_raw}")
+        else:
+            self._job_step(job, "backup", "warn", "旧模型没有配置文件，无需备份")
+
+    def _restore_display_names(
+        self, job: dict[str, Any], new_name: str | None, old_id: str | None
+    ) -> None:
+        edit = job.get("edit") or {}
+        old_display = edit.get("old_display_name")
+        try:
+            if new_name and new_name != old_id and job.get("display_name"):
+                self.set_model_display_name(new_name, None)
+            # A kept id may have received the failed edit's custom name.
+            same_id_write = job.get("display_name") and new_name in (None, old_id)
+            if old_id and (old_display or same_id_write):
+                self.set_model_display_name(old_id, str(old_display) if old_display else None)
+        except Exception:
+            self.log.exception("cannot restore display names for edit %s", job["id"])
+
+    def _edit_rollback(self, job: dict[str, Any]) -> None:
+        """Restore the edited model after a failed validation."""
+        edit = job.get("edit") or {}
+        old_id = str(edit.get("old_id") or "").strip() or None
+        old_engine = str(edit.get("old_engine") or "").strip() or "llama"
+        old_config_raw = str(edit.get("old_config_path") or "").strip()
+        new_name = str(job.get("name") or "").strip() or None
+        new_engine = str(job.get("engine") or "").strip()
+        new_short = self._short_kind(self._engine_kind(new_engine) or "") or ""
+        removed: list[str] = []
+        restored: list[str] = []
+        detached_path = str(edit.get("old_detached") or "").strip()
+        if detached_path:
+            text = edit.get("backup_text")
+            try:
+                if isinstance(text, str) and text:
+                    write_text_atomic(Path(detached_path), text)
+                    restored.append(detached_path)
+            except OSError:
+                self.log.exception(
+                    "cannot restore detached config %s for edit %s", detached_path, job["id"]
+                )
+        config_raw = str(job.get("config_path") or "").strip()
+        if config_raw:
+            new_config = Path(config_raw)
+            same_file = bool(old_config_raw) and (
+                self._path_key(new_config) == self._path_key(old_config_raw)
+            )
+            try:
+                if same_file:
+                    text = edit.get("backup_text")
+                    if isinstance(text, str) and text and new_config.is_file():
+                        write_text_atomic(new_config, text)
+                        restored.append(str(new_config))
+                elif new_short == "llama" and new_name:
+                    if remove_llama_preset(new_config, new_name):
+                        removed.append(str(new_config))
+                elif new_config.is_file():
+                    new_config.unlink()
+                    removed.append(str(new_config))
+            except OSError:
+                self.log.exception("cannot restore configuration after failed edit %s", job["id"])
+        if new_name and new_name != old_id:
+            try:
+                self.params.drop(new_name)
+            except Exception:
+                self.log.exception("cannot remove parameters of failed edit %s", new_name)
+            if new_short == "kvmem":
+                try:
+                    meta = self._drop_kvmem_meta(new_engine, new_name)
+                    if meta:
+                        removed.append(meta)
+                except Exception:
+                    self.log.exception("cannot clean KVMem metadata of failed edit %s", new_name)
+        if old_id:
+            old_params = edit.get("old_params")
+            if isinstance(old_params, dict):
+                try:
+                    self.params.replace(old_id, old_params, old_engine)
+                except Exception:
+                    self.log.exception("cannot restore parameters of %s", old_id)
+        self._restore_display_names(job, new_name, old_id)
+        job["rollback"] = bool(restored or removed)
+        job["removed"] = removed
+        job["restored"] = restored
+        note = "验证失败，已恢复旧配置" if restored else (
+            "验证失败，已清理新配置" if removed else "验证失败，旧配置未改动"
+        )
+        self._job_step(job, "cleanup", "warn", note)
+        try:
+            self.registry.reload()
+        except Exception:
+            self.log.exception("cannot reload the registry after a failed edit")
+        with self.cond:
+            active = self.active
+            target = self.target
+        if (
+            new_name
+            and new_name != old_id
+            and (
+                (active is not None and active.id == new_name)
+                or (target is not None and target.id == new_name)
+            )
+        ):
+            try:
+                self.stop_engine()
+            except Exception:
+                self.log.exception("cannot stop the engine of a failed edit %s", new_name)
+
+    def _edit_finish_success(self, job: dict[str, Any]) -> None:
+        """After a validated edit: migrate names/params and drop the old config."""
+        edit = job.get("edit") or {}
+        old_id = str(edit.get("old_id") or "").strip() or None
+        new_name = str(job.get("name") or "").strip() or None
+        renamed = bool(new_name and old_id and new_name != old_id)
+        old_config_raw = str(edit.get("old_config_path") or "").strip()
+        new_config_raw = str(job.get("config_path") or "").strip()
+        same_config_file = bool(old_config_raw and new_config_raw) and (
+            self._path_key(new_config_raw) == self._path_key(old_config_raw)
+        )
+        detached_path = str(edit.get("old_detached") or "").strip()
+        old_kept = bool(edit.get("old_kept"))
+        # An engine-only change keeps the id but writes a new engine config;
+        # the old file must still go away or the registry sees the id twice.
+        drop_old_config = (
+            bool(old_config_raw) and (renamed or not same_config_file)
+            and not detached_path
+        )
+        removed: list[str] = []
+        if detached_path:
+            removed.append(detached_path)
+        self._job_step(job, "cleanup", "running")
+        if drop_old_config:
+            old_config = Path(old_config_raw)
+            try:
+                if edit.get("old_source") == "preset":
+                    engine_model = str(edit.get("old_engine_model") or old_id)
+                    if old_config.is_file() and remove_llama_preset(old_config, engine_model):
+                        removed.append(str(old_config))
+                elif not same_config_file and old_config.is_file():
+                    old_config.unlink()
+                    removed.append(str(old_config))
+            except OSError:
+                self.log.exception("cannot remove old config %s after edit", old_config)
+        if str(edit.get("old_engine") or "") == "kvmem" and old_id and (
+            (renamed and not old_kept) or drop_old_config or detached_path
+        ):
+            try:
+                meta = self._drop_kvmem_meta(edit.get("old_engine_slot"), old_id)
+                if meta:
+                    removed.append(meta)
+            except Exception:
+                self.log.exception("cannot clean old KVMem metadata %s", old_id)
+        if renamed and old_id and not old_kept:
+            try:
+                self.params.drop(old_id)
+            except Exception:
+                self.log.exception("cannot drop old parameters of %s", old_id)
+            old_display = edit.get("old_display_name")
+            try:
+                self.set_model_display_name(old_id, None)
+                if old_display and not job.get("display_name"):
+                    self.set_model_display_name(new_name, str(old_display))
+            except Exception:
+                self.log.exception("cannot migrate display name of %s", old_id)
+            job["previous_model"] = old_id
+        try:
+            self.registry.reload()
+        except Exception:
+            self.log.exception("cannot reload the registry after a successful edit")
+        job["removed"] = removed
+        detail = f"已应用 {new_name or old_id}"
+        if removed:
+            detail += f"；删除旧配置 {', '.join(removed)}"
+        elif renamed and old_kept and old_id:
+            detail += f"；旧模型 {old_id} 仍由目录扫描提供，保持原样"
+        self._job_step(job, "cleanup", "ok", detail)
+        self.log.info("model edit %s applied: %s → %s", job["id"], old_id, new_name)
+
     def _rollback_model_add(
         self,
         job: dict[str, Any],
@@ -11919,6 +12627,9 @@ class Gateway:
         preset_path: Path | None,
         config_file: Path | None,
     ) -> None:
+        if job.get("edit"):
+            self._edit_rollback(job)
+            return
         removed: list[str] = []
         if name:
             try:
@@ -13123,6 +13834,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._json_body(required=True) or {}
             job = self.gateway.start_model_add(payload)
             self._json(202, job)
+            return
+        if normalized == "/router/models/edit":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            result = self.gateway.start_model_edit(payload)
+            self._json(202 if result.get("mode") == "validate" else 200, result)
             return
         if normalized == "/router/models/job":
             if method not in ("GET", "HEAD"):

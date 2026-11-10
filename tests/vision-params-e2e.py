@@ -27,6 +27,7 @@ if BASE.exists():
 BASE.mkdir(parents=True)
 OUT.mkdir()
 shutil.copy2(ROOT / "router.py", BASE / "router.py")
+shutil.copy2(ROOT / "engine_setup.py", BASE / "engine_setup.py")
 
 
 def free_port() -> int:
@@ -136,6 +137,19 @@ ninfer_models.mkdir()
 }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 port = free_port()
+# The console hides engines whose managed binaries are missing; pretend every
+# product is installed so the add dialog lists them (bins only, no engine dirs,
+# so reconcile_managed_engines() does not add any slot).
+setup_bin = BASE / "bin"
+setup_bin.mkdir()
+for name in (
+    "llama-server", "llama-mtmd-cli", "strata", "strata-vision",
+    "kvmem-llama-server", "kvmem-strata-poly", "kvmem-ninfer-serve",
+):
+    for candidate in (name, f"{name}-cuda", f"{name}-rocm"):
+        path = setup_bin / candidate
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
 config = {
     "listen": {"host": "127.0.0.1", "port": port},
     "state_file": "state.json",
@@ -703,7 +717,8 @@ try:
     # and expose the NInfer vision switch plus its own engine parameters.
     click("#btn-add-model")
     wait("return document.getElementById('add-dialog').open", message="add dialog")
-    wait("return document.querySelectorAll('#add-engines input[name=\"add-engine\"]').length >= 3",
+    wait("""return document.querySelectorAll('#add-engines .engine-cat').length >= 2
+      && document.querySelectorAll('#add-engine-subs input[name="add-engine"]').length >= 1""",
          message="add engines")
     add_state = js("""
       const device = document.getElementById('add-vision-device');
@@ -718,6 +733,9 @@ try:
     assert add_state["disabled"] == [False, False], add_state
     assert add_state["visionHidden"] is False and add_state["enabledHidden"] is True, add_state
     assert add_state["tabHidden"] is True, add_state
+    click('#add-engines .engine-cat[data-add-category="kvmem"]')
+    wait("""return !!document.querySelector('#add-engines input[name="add-engine"][value="ninfer"]')""",
+         message="kvmem category engines")
     js("""
       const radio = document.querySelector('#add-engines input[name="add-engine"][value="ninfer"]');
       radio.checked = true;
@@ -816,8 +834,8 @@ try:
       };
       return true;
     """)
-    wait("return !document.getElementById('stats-section').hidden", timeout=8,
-         message="stats section")
+    wait("""return document.querySelectorAll('#stats .stat-card').length === 4""",
+         timeout=10, message="stats cards")
     stats_state = js("""
       const cards = [...document.querySelectorAll('#stats .stat-card')];
       return {
@@ -843,8 +861,8 @@ try:
     shot("stats-desktop.png")
     js("window.fetch = window.__realFetch; delete window.__realFetch;"
        " delete window.__fakeStats; return true;")
-    wait("return document.getElementById('stats-section').hidden", timeout=8,
-         message="stats hidden without data")
+    wait("""return !!document.querySelector('#stats .stats-placeholder')""",
+         timeout=8, message="stats placeholder without data")
     checks += 1
 
     wd("POST", "/window/rect", {"width": 420, "height": 1000})

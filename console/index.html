@@ -572,6 +572,7 @@
   .params-grid.engine-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .params-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
   .params-grid label .name { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--faint); font-size: 10.5px; }
+  .params-grid .span-all { grid-column: 1 / -1; }
   .params-grid input, .params-grid select, .params-grid textarea {
     width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 8px;
     border: 1px solid var(--line); background: #0c121a; color: var(--text);
@@ -967,6 +968,24 @@
         <button type="button" class="param-tab" data-param-tab="kvmem" role="tab" aria-selected="false" id="params-kvmem-tab" hidden>kvmem参数<span class="tab-count" id="params-kvmem-count"></span></button>
       </div>
       <div class="params-panel" data-param-panel="basic">
+        <div id="params-edit">
+          <p class="params-group-title">引擎与文件 <span>改动引擎或路径会重新验证；失败自动恢复旧配置</span></p>
+          <div class="params-grid">
+            <label class="span-all">引擎 <span class="name">engine</span>
+              <select id="params-engine-slot"></select></label>
+            <label class="span-all">模型路径 <span class="name">model</span>
+              <textarea id="params-model-path" rows="2" spellcheck="false" placeholder="/path/to/model.gguf 或模型目录"></textarea></label>
+            <label class="span-all" id="params-vision-path-field">视觉路径 <span class="name">mmproj · 选填</span>
+              <textarea id="params-vision-path" rows="2" spellcheck="false" placeholder="留空表示无视觉"></textarea></label>
+            <label class="span-all" id="params-draft-path-field" hidden>draft 路径 <span class="name">MTP · 选填</span>
+              <textarea id="params-draft-path" rows="2" spellcheck="false" placeholder="留空表示不使用 MTP"></textarea></label>
+          </div>
+          <div class="device-row" id="params-vision-enabled-field" hidden>
+            <span class="device-label">视觉编码器</span>
+            <label class="check"><input id="params-vision-enabled" type="checkbox" /> 启用视觉（.ninfer 内嵌视觉塔）</label>
+          </div>
+          <p class="params-hint" id="params-edit-hint"></p>
+        </div>
         <div id="params-name">
           <p class="params-group-title">模型名称 <span>只用于控制台显示，不改变模型 ID</span></p>
           <div class="params-grid">
@@ -1025,6 +1044,7 @@
         <p class="params-hint" id="params-kvmem-hint"></p>
       </div>
       <p class="params-hint" id="params-hint"></p>
+      <div class="progress" id="params-progress" hidden></div>
       <p class="params-error" id="params-error" hidden></p>
     </div>
     <div class="dialog-actions">
@@ -1174,6 +1194,11 @@
     ["temperature", "温度"], ["top_p", "top_p"], ["top_k", "top_k"], ["repetition_penalty", "重复"],
   ];
   let paramsModel = null;
+  let paramsOriginal = null;
+  let paramsRenderedKind = null;
+  let paramsEngineMap = {};
+  let paramsEditJob = null;
+  let paramsEditTimer = null;
 
   function samplingSummary(params) {
     if (!params || !Object.keys(params).length) return "采样参数：引擎默认";
@@ -3117,9 +3142,299 @@
     if (ok) await mutate("/models/unload", { model: id }, `已请求卸载 ${id}`);
   }
 
-  function llamaManageEngine() {
+  const EDIT_ENGINE_KINDS = ["llama", "kvmem", "ninfer", "kvmem_llama", "strata"];
+
+  function paramsEngineInfo() {
+    const slot = $("params-engine-slot").value;
+    return paramsEngineMap[slot] || null;
+  }
+
+  function paramsOriginalEngine(model) {
     const engines = (state.manage && state.manage.engines) || {};
-    return Object.values(engines).find((engine) => engine.kind === "llama") || null;
+    if (model.engine_slot && engines[model.engine_slot]) return engines[model.engine_slot];
+    return Object.values(engines).find((engine) => engine.kind === model.engine) || null;
+  }
+
+  function paramsModelPathText(value) {
+    return String(value || "").trim().replace(/[\r\n]+/g, "");
+  }
+
+  function paramsVisionText(kind) {
+    return kind === "ninfer" ? "" : String($("params-vision-path").value || "").trim();
+  }
+
+  function paramsDraftText(kind) {
+    return kind === "strata" ? String($("params-draft-path").value || "").trim() : "";
+  }
+
+  function paramsContextText(kind) {
+    return kind === "llama" || kind === "kvmem_llama" ? $("params-context").value.trim() : "";
+  }
+
+  function paramsNeedsValidation(kind, engineSlot) {
+    const original = paramsOriginal;
+    if (!original || !kind) return false;
+    if (engineSlot !== original.engineSlot) return true;
+    if (paramsModelPathText($("params-model-path").value) !== original.modelPath) return true;
+    if (kind === "strata" && paramsDraftText(kind) !== original.draftPath) return true;
+    if (kind === "ninfer") {
+      if ($("params-vision-enabled").checked !== original.visionEnabled) return true;
+    } else if (paramsVisionText(kind) !== original.visionPath) {
+      return true;
+    }
+    if (kind === "llama" || kind === "kvmem_llama") {
+      const contextChanged = paramsContextText(kind) !== original.contextText;
+      const cacheChanged = $("params-cache-k").value !== original.cacheK
+        || $("params-cache-v").value !== original.cacheV;
+      if (kind === "kvmem_llama") return contextChanged || cacheChanged;
+      if (!original.preset) {
+        if (contextChanged || cacheChanged) return true;
+        const picked = (document.querySelector('input[name="params-vision-device"]:checked') || {}).value;
+        if (picked && picked !== (original.visionGpu ? "gpu" : "cpu")) return true;
+      }
+    }
+    return false;
+  }
+
+  function updateParamsSaveState() {
+    const engine = paramsEngineInfo();
+    const kind = engine ? engine.kind : "";
+    const validate = paramsNeedsValidation(kind, $("params-engine-slot").value);
+    const button = $("params-save");
+    if (!button.dataset.busy) {
+      button.textContent = validate ? "保存并重新验证" : "保存";
+    }
+    $("params-edit-hint").textContent = validate
+      ? "改动引擎或文件：保存后会重新验证（写配置、启动引擎、冒烟测试），失败自动恢复旧配置。"
+      : "未改动引擎与文件：只保存参数，需要重启时由引擎自动处理。";
+  }
+
+  function fillParamsSampling(values) {
+    const form = $("params-form");
+    for (const key of PARAM_FIELDS) {
+      const input = form.elements[key];
+      if (!input) continue;
+      const value = values ? values[key] : null;
+      input.value = value == null ? "" : value;
+    }
+  }
+
+  function readParamsSamplingValues(kind) {
+    const form = $("params-form");
+    const values = {};
+    for (const key of PARAM_FIELDS) {
+      const raw = form.elements[key].value.trim();
+      values[key] = raw === "" ? null : Number(raw);
+    }
+    try {
+      Object.assign(values, readMoreParams($("params-more"), kind));
+    } catch (_) {
+      /* a half-typed value must not block the engine switch */
+    }
+    return values;
+  }
+
+  function setParamsVisionText(kind) {
+    const ninfer = kind === "ninfer";
+    const strata = kind === "strata";
+    const kv = kind === "kvmem";
+    const kvllama = kind === "kvmem_llama";
+    $("params-vision-caption").textContent = ninfer
+      ? "内嵌视觉塔 · 修改后重新验证"
+      : strata || kvllama
+        ? "mmproj · 修改后重新验证"
+        : "mmproj · 修改后自动重启引擎生效";
+    $("params-vision-hint").textContent = ninfer
+      ? "写入 ninfer-*.json 的 args：GPU 使用 --vision --vision-residency，CPU 使用 --vision-cpu；视觉塔内嵌在 .ninfer 中，主模型仍按引擎参数加载。"
+      : strata
+        ? "写入模型配置的 vision.gpu；Strata 用独立进程运行视觉编码器，CPU 与 GPU 共用同一份 mmproj。"
+        : kv
+          ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
+          : kvllama
+            ? "写入模型配置的 vision.gpu；llama-kvmem-server 按 --mmproj-offload / --no-mmproj-offload 切换，CPU 与 GPU 共用同一份 mmproj；主模型仍按 --device 与 GPU 层数加载。"
+            : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off，主模型仍按 n-gpu-layers 加载。";
+  }
+
+  function snapshotParamInputs(host) {
+    const values = {};
+    if (!host) return values;
+    host.querySelectorAll("[data-param-key]").forEach((input) => {
+      values[input.dataset.paramKey] = input.value;
+    });
+    return values;
+  }
+
+  function restoreParamInputs(host, values) {
+    if (!host) return;
+    host.querySelectorAll("[data-param-key]").forEach((input) => {
+      const raw = values[input.dataset.paramKey];
+      if (raw !== undefined) input.value = raw;
+    });
+  }
+
+  function refreshParamsVisionState() {
+    const engine = paramsEngineInfo();
+    if (!engine) return;
+    const kind = engine.kind;
+    const hasVision = kind === "ninfer"
+      ? $("params-vision-enabled").checked
+      : !!String($("params-vision-path").value || "").trim();
+    const previous = $("params-more").dataset.hasVision === "true";
+    $("params-vision").hidden = !hasVision;
+    if (hasVision) setParamsVisionText(kind);
+    if (previous !== hasVision && paramsRenderedKind === kind) {
+      // Vision-only engine specs must appear/disappear with the vision path;
+      // keep whatever is already typed in the other fields.
+      const kept = snapshotParamInputs($("params-more"));
+      renderEngineMore(
+        $("params-more"), $("params-more-count"), $("params-more-hint"),
+        kind, null, null, hasVision,
+      );
+      restoreParamInputs($("params-more"), kept);
+      $("params-more").dataset.hasVision = hasVision ? "true" : "false";
+    }
+    updateParamsSaveState();
+  }
+
+  function setParamsKindHint(kind, preset) {
+    $("params-hint").textContent = kind === "ninfer"
+      ? "NInfer：repetition_penalty 只能为 1（提交时清空），不支持 repeat_last_n；模型路径必须是 .ninfer，视觉塔内嵌在模型里；改引擎或路径会重新验证，失败自动恢复旧配置。"
+      : kind === "kvmem_llama"
+        ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；改动上下文或 K/V 精度会重新验证；改引擎或路径同样重新验证，失败自动恢复旧配置。"
+        : kind === "strata"
+          ? "Strata：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n（≥ 1）；引擎与视觉参数在“更多参数”，draft 路径在上方可改；改引擎或路径会重新验证，失败自动恢复旧配置。"
+          : kind === "kvmem"
+            ? "KVMem：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n（≥ 1）；strata-poly 进程参数在“更多参数”，KVMem 扩展在“kvmem参数”；改引擎或路径会重新验证，失败自动恢复旧配置。"
+            : preset
+              ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）；改动上下文或 KV 精度会重启引擎；改引擎或路径会重新验证，失败自动恢复旧配置。"
+              : "llama.cpp：该模型由目录扫描发现；修改上下文、KV 精度或视觉运行位置会补建 models.ini 预设并重新验证；改引擎或路径同样重新验证，失败自动恢复旧配置。";
+  }
+
+  function renderParamsKind(engine, options) {
+    const opts = options || {};
+    const kind = engine ? engine.kind : "llama";
+    const form = $("params-form");
+    const kv = kind === "kvmem";
+    const strata = kind === "strata";
+    const ninfer = kind === "ninfer";
+    const kvllama = kind === "kvmem_llama";
+    const llama = kind === "llama";
+    const kvlike = kv || strata;
+    form.elements.top_k.min = kvlike ? 1 : 0;
+    form.elements.top_k.max = kvlike ? 64 : 1000;
+    form.elements.repeat_last_n.min = kvlike ? 1 : -1;
+    form.elements.repetition_penalty.disabled = ninfer;
+    form.elements.repeat_last_n.disabled = ninfer || kvllama;
+    if (ninfer) form.elements.repetition_penalty.value = "";
+    if (ninfer || kvllama) form.elements.repeat_last_n.value = "";
+    for (const input of [form.elements.top_k, form.elements.repeat_last_n]) {
+      if (input.value === "") continue;
+      const value = Number(input.value);
+      if (!Number.isFinite(value)) continue;
+      if (Number.isFinite(Number(input.min)) && value < Number(input.min)) input.value = input.min;
+      if (Number.isFinite(Number(input.max)) && value > Number(input.max)) input.value = input.max;
+    }
+    const showContext = llama || kvllama;
+    $("params-engine").hidden = !showContext;
+    if (showContext) {
+      $("params-context").value = opts.contextText || "";
+      $("params-context").placeholder = "留空使用 GGUF 上限";
+      fillCacheSelect($("params-cache-k"), engine && engine.cache_types, opts.cacheK || "q8_0");
+      fillCacheSelect($("params-cache-v"), engine && engine.cache_types, opts.cacheV || "q8_0");
+      $("params-engine-caption").textContent = kvllama
+        ? "llama-kvmem-server · 上下文留空读取 GGUF；改动需重新验证"
+        : opts.preset === false
+          ? "llama.cpp · 目录扫描模型，首次修改会补建 models.ini 预设"
+          : "llama.cpp · 保存后自动重启引擎生效";
+    }
+    $("params-vision-path-field").hidden = ninfer;
+    $("params-vision-enabled-field").hidden = !ninfer;
+    $("params-vision-enabled").checked = opts.visionEnabled === true;
+    $("params-draft-path-field").hidden = !strata;
+    $("params-vision").hidden = opts.hasVision !== true;
+    if (opts.hasVision === true) {
+      const gpu = opts.visionGpu === true;
+      const radio = document.querySelector(`input[name="params-vision-device"][value="${gpu ? "gpu" : "cpu"}"]`);
+      if (radio) radio.checked = true;
+      const deviceRow = $("params-vision-device");
+      deviceRow.classList.remove("disabled");
+      deviceRow.querySelectorAll("input").forEach((el) => { el.disabled = false; });
+      setParamsVisionText(kind);
+    }
+    renderEngineMore(
+      $("params-more"), $("params-more-count"), $("params-more-hint"),
+      kind, opts.samplingValues || null, opts.engineValues || null,
+      opts.hasVision === true,
+    );
+    $("params-more").dataset.hasVision = opts.hasVision === true ? "true" : "false";
+    renderKvmemEngine(
+      $("params-kvmem"), $("params-kvmem-count"), $("params-kvmem-hint"),
+      opts.engineValues || null, kind,
+    );
+    setKvmemTabVisible($("params-dialog"), kvllama || kv || ninfer);
+    $("params-more-caption").textContent = kvllama
+      ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
+      : strata
+        ? "Strata 原生进程 / 视觉参数 · 留空沿用模板"
+        : kv
+          ? "strata-poly 原生进程 / 视觉参数 · 留空沿用模板"
+          : ninfer
+            ? "ninfer-serve 原生进程参数 · 留空沿用模板"
+            : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
+    setParamsKindHint(kind, opts.preset !== false);
+    paramsRenderedKind = kind;
+    updateParamsSaveState();
+  }
+
+  function paramsSwitchEngine() {
+    if (!paramsOriginal) return;
+    const engine = paramsEngineInfo();
+    if (!engine) return;
+    const model = state.models.find((m) => m.id === paramsModel);
+    if (!model) return;
+    const kind = engine.kind;
+    const backToOriginal = engine.engine === paramsOriginal.engineSlot;
+    const previousHasContext = paramsRenderedKind === "llama" || paramsRenderedKind === "kvmem_llama";
+    const contextText = backToOriginal
+      ? paramsOriginal.contextText
+      : (kind === "llama" || kind === "kvmem_llama")
+        ? $("params-context").value.trim()
+        : "";
+    const cacheK = backToOriginal
+      ? paramsOriginal.cacheK
+      : previousHasContext ? $("params-cache-k").value : "q8_0";
+    const cacheV = backToOriginal
+      ? paramsOriginal.cacheV
+      : previousHasContext ? $("params-cache-v").value : "q8_0";
+    const visionPath = String($("params-vision-path").value || "").trim();
+    const engineVision = !!(engine.defaults && engine.defaults.vision);
+    const visionEnabled = backToOriginal
+      ? paramsOriginal.visionEnabled
+      : kind === "ninfer" ? (!!visionPath || engineVision) : false;
+    const hasVision = backToOriginal
+      ? (kind === "ninfer" ? paramsOriginal.visionEnabled : !!paramsOriginal.visionPath)
+      : kind === "ninfer" ? visionEnabled : !!visionPath;
+    const visionGpu = backToOriginal
+      ? paramsOriginal.visionGpu
+      : !!(engine.defaults && engine.defaults.vision_gpu);
+    if (backToOriginal) fillParamsSampling(model.params || {});
+    renderParamsKind(engine, {
+      contextText,
+      cacheK,
+      cacheV,
+      preset: backToOriginal ? paramsOriginal.preset : false,
+      visionEnabled,
+      hasVision,
+      visionGpu,
+      samplingValues: backToOriginal ? (model.params || null) : readParamsSamplingValues(paramsRenderedKind),
+      engineValues: backToOriginal ? (model.engine_params || null) : (engine.engine_params || null),
+    });
+    $("params-model-path").placeholder = kind === "ninfer"
+      ? "/path/to/model.ninfer" : "/path/to/model.gguf 或模型目录";
+    $("params-error").hidden = true;
+    $("params-error").textContent = "";
+    $("params-progress").hidden = true;
+    $("params-progress").innerHTML = "";
   }
 
   async function openParams(id) {
@@ -3133,267 +3448,367 @@
       }
     }
     paramsModel = model.id;
+    paramsOriginal = null;
+    paramsRenderedKind = null;
+    paramsEditJob = null;
+    clearTimeout(paramsEditTimer);
     const dialog = $("params-dialog");
     const form = $("params-form");
     form.reset();
+    delete $("params-context").dataset.autoCleared;
+    $("params-progress").hidden = true;
+    $("params-progress").innerHTML = "";
+    $("params-error").textContent = "";
+    $("params-error").hidden = true;
+    const button = $("params-save");
+    button.disabled = false;
+    delete button.dataset.busy;
+    button.textContent = "保存";
     const nameInput = $("params-name-input");
     const defaultName = model.display_name_default || model.name || model.id;
     nameInput.value = model.display_name_custom ? (model.display_name || "") : "";
     nameInput.placeholder = defaultName;
     $("params-name-hint").textContent = `留空使用默认名称：${defaultName}`;
     const params = model.params || {};
-    const engineParams = model.engine_params || {};
-    for (const key of PARAM_FIELDS) {
-      const input = form.elements[key];
-      if (input && params[key] != null) input.value = params[key];
+    fillParamsSampling(params);
+    const originalEngine = paramsOriginalEngine(model);
+    const originalKind = originalEngine ? originalEngine.kind : model.engine;
+    const slot = (originalEngine && originalEngine.engine) || model.engine_slot || model.engine;
+    paramsEngineMap = {};
+    for (const info of Object.values((state.manage && state.manage.engines) || {})) {
+      if (info && EDIT_ENGINE_KINDS.includes(info.kind)) paramsEngineMap[info.engine] = info;
     }
-    const kv = model.engine === "kvmem";
-    const strata = model.engine === "strata";
-    const ninfer = model.engine === "ninfer";
-    const kvllama = model.engine === "kvmem_llama";
-    const kvlike = kv || strata;
-    renderEngineMore(
-      $("params-more"), $("params-more-count"), $("params-more-hint"),
-      model.engine, params, engineParams, model.multimodal === true,
-    );
-    renderKvmemEngine(
-      $("params-kvmem"), $("params-kvmem-count"), $("params-kvmem-hint"),
-      engineParams, kv ? "kvmem" : strata ? "strata" : ninfer ? "ninfer" : "kvmem_llama",
-    );
-    showParamTab(dialog, "basic");
-    setKvmemTabVisible(dialog, kvllama || kv || ninfer);
-    const editable = model.engine === "llama" && model.source === "preset";
-    const visionEditable = editable
-      || (kv && model.source === "strata")
-      || (strata && model.source === "strata")
-      || (kvllama && model.source === "kvmem_llama")
-      || (ninfer && model.source === "ninfer");
-    form.elements.top_k.min = kvlike ? 1 : 0;
-    form.elements.top_k.max = kvlike ? 64 : 1000;
-    form.elements.repeat_last_n.min = kvlike ? 1 : -1;
-    form.elements.repetition_penalty.disabled = ninfer;
-    form.elements.repeat_last_n.disabled = ninfer || kvllama;
-    if (ninfer) {
-      form.elements.repetition_penalty.value = "";
+    if (!paramsEngineMap[slot]) {
+      paramsEngineMap[slot] = {
+        engine: slot,
+        kind: model.engine,
+        name: ENGINE_LABELS[model.engine] || model.engine,
+        label: ENGINE_LABELS[model.engine] || model.engine,
+        installed: true,
+      };
     }
-    if (ninfer || kvllama) {
-      form.elements.repeat_last_n.value = "";
-    }
-    $("params-engine").hidden = !editable;
-    $("params-engine-caption").textContent = "llama.cpp · 保存后自动重启引擎生效";
-    $("params-more-caption").textContent = kvllama
-      ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
-      : strata
-        ? "Strata 原生进程 / 视觉参数 · 留空沿用模板"
-        : kv
-          ? "strata-poly 原生进程 / 视觉参数 · 留空沿用模板"
-          : ninfer
-            ? "ninfer-serve 原生进程参数 · 留空沿用模板"
-            : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
-    if (editable) {
-      const manageEngine = llamaManageEngine();
-      $("params-context").value = model.context_length == null ? "" : model.context_length;
-      fillCacheSelect($("params-cache-k"), manageEngine && manageEngine.cache_types, model.cache_type_k || "q8_0");
-      fillCacheSelect($("params-cache-v"), manageEngine && manageEngine.cache_types, model.cache_type_v || "q8_0");
-    }
-    const visionRow = $("params-vision");
-    visionRow.hidden = !model.multimodal;
-    if (!visionRow.hidden) {
-      const deviceRow = $("params-vision-device");
-      const gpu = model.vision_gpu === true;
-      const radio = document.querySelector(`input[name="params-vision-device"][value="${gpu ? "gpu" : "cpu"}"]`);
-      if (radio) radio.checked = true;
-      deviceRow.classList.toggle("disabled", !visionEditable);
-      deviceRow.querySelectorAll("input").forEach((el) => { el.disabled = !visionEditable; });
-      $("params-vision-caption").textContent = visionEditable
-        ? (ninfer ? "内嵌视觉塔 · 修改后自动重启引擎生效" : "mmproj · 修改后自动重启引擎生效")
-        : "mmproj · 当前配置只读";
-      $("params-vision-hint").textContent = visionEditable
-        ? (ninfer
-            ? "写入 ninfer-*.json 的 args：GPU 使用 --vision --vision-residency，CPU 使用 --vision-cpu；视觉塔内嵌在 .ninfer 中，主模型仍按引擎参数加载。"
-            : strata
-              ? "写入模型配置的 vision.gpu；Strata 用独立进程运行视觉编码器，CPU 与 GPU 共用同一份 mmproj。"
-              : kv
-                ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
-                : kvllama
-                ? "写入模型配置的 vision.gpu；llama-kvmem-server 按 --mmproj-offload / --no-mmproj-offload 切换，CPU 与 GPU 共用同一份 mmproj；主模型仍按 --device 与 GPU 层数加载。"
-                : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off，主模型仍按 n-gpu-layers 加载。")
-        : "当前模型没有可编辑的引擎配置，无法修改视觉运行位置。";
-    }
-    $("params-title").textContent = `模型参数 · ${model.name || model.display_name || model.id}`;
+    const select = $("params-engine-slot");
+    select.innerHTML = Object.values(paramsEngineMap).map((engine) => {
+      const disabled = engine.installed === false && engine.engine !== slot;
+      return `<option value="${esc(engine.engine)}"${disabled ? " disabled" : ""}>` +
+        `${esc(engine.name || engine.label || engine.engine)} · ${esc(engine.engine)}` +
+        `${engine.installed === false ? "（未安装）" : ""}</option>`;
+    }).join("");
+    select.value = slot;
+    if (!select.value && select.options.length) select.selectedIndex = 0;
+    $("params-model-path").value = model.model_path || "";
+    $("params-model-path").placeholder = originalKind === "ninfer"
+      ? "/path/to/model.ninfer" : "/path/to/model.gguf 或模型目录";
+    $("params-vision-path").value = model.vision_path || "";
+    $("params-draft-path").value = model.draft_path || "";
+    const initialContextText = originalKind === "llama"
+      ? (model.source === "preset" && model.context_length != null ? String(model.context_length) : "")
+      : originalKind === "kvmem_llama"
+        ? (model.context_length == null ? "" : String(model.context_length))
+        : "";
+    const initialVisionEnabled = model.multimodal === true;
+    const initialHasVision = originalKind === "ninfer"
+      ? initialVisionEnabled
+      : !!String(model.vision_path || "").trim();
+    renderParamsKind(paramsEngineMap[select.value] || paramsEngineMap[slot], {
+      contextText: initialContextText,
+      cacheK: model.cache_type_k || "q8_0",
+      cacheV: model.cache_type_v || "q8_0",
+      preset: model.engine === "llama" && model.source === "preset",
+      visionEnabled: initialVisionEnabled,
+      hasVision: initialHasVision,
+      visionGpu: model.vision_gpu === true,
+      samplingValues: params,
+      engineValues: model.engine_params || null,
+    });
+    paramsOriginal = {
+      engineSlot: select.value || slot,
+      kind: originalKind,
+      preset: model.engine === "llama" && model.source === "preset",
+      modelPath: paramsModelPathText($("params-model-path").value),
+      visionPath: paramsVisionText(originalKind),
+      draftPath: paramsDraftText(originalKind),
+      contextText: $("params-context").value.trim(),
+      cacheK: $("params-cache-k").value,
+      cacheV: $("params-cache-v").value,
+      visionGpu: model.vision_gpu === true,
+      visionEnabled: model.multimodal === true,
+      engineValues: { ...(model.engine_params || {}) },
+    };
+    $("params-title").textContent = `编辑模型 · ${model.name || model.display_name || model.id}`;
     $("params-sub").textContent =
-      `模型 ${model.id}（${ENGINE_LABELS[model.engine] || model.engine}）。留空的字段不注入，使用引擎默认值；请求中显式给出的参数优先。`;
-    $("params-hint").textContent = ninfer
-      ? "NInfer 限制：repetition_penalty 只能为 1（已禁用），不支持 repeat_last_n；ninfer-serve 自身的进程参数在“更多参数”，KVMem 扩展在“kvmem参数”，视觉运行位置在“视觉编码器”，保存后自动重启引擎。"
-      : kvllama
-        ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；上下文与 K/V 精度在新增模型时固定；llama-kvmem-server 自身的进程参数在“更多参数”，KVMem 扩展（预算等）在“kvmem参数”，保存后自动重启引擎。"
-        : strata
-          ? "Strata 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；上下文、KV 精度、MTP/查表、专家缓存等引擎参数在“更多参数”（写入模型自己的 strata-*.json），保存后自动重启引擎。"
-          : kv
-            ? "KVMem 限制：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n，取值 ≥ 1；strata-poly 自身的进程参数（上下文、MTP、KV 格式等）在“更多参数”，KVMem 扩展（预算、检索、SSD 等）在“kvmem参数”，保存后自动重启引擎。"
-            : editable
-              ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。修改上下文或 KV 精度会自动重启引擎。"
-              : "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）。该模型由目录扫描发现，无法修改上下文与 KV 精度。";
-    $("params-error").textContent = "";
-    $("params-error").hidden = true;
-    $("params-save").disabled = false;
+      `模型 ${model.id}（${ENGINE_LABELS[model.engine] || model.engine}）。改动引擎、模型路径、视觉路径或 draft 会重新验证；其余参数直接保存。`;
+    showParamTab(dialog, "basic");
+    updateParamsSaveState();
     if (typeof dialog.showModal === "function") dialog.showModal();
+  }
+
+  function showParamsError(message) {
+    const box = $("params-error");
+    box.textContent = message || "";
+    box.hidden = !message;
+  }
+
+  function renderEditJob(job) {
+    const box = $("params-progress");
+    box.hidden = false;
+    box.innerHTML = (job.steps || []).map((step) => `
+      <div class="progress-step ${esc(step.status)}">
+        <span class="sdot"></span>
+        <span>${esc(step.label)}${step.detail ? `<span class="detail">${esc(step.detail)}</span>` : ""}</span>
+      </div>`).join("");
+    if (job.status === "failed" && job.error) showParamsError(job.error);
+    else if (job.status === "ok") showParamsError("");
+    if (job.rollback) {
+      box.insertAdjacentHTML("beforeend", `
+        <div class="progress-step warn">
+          <span class="sdot"></span>
+          <span>旧模型已恢复<span class="detail">${esc((job.restored || []).join("，") || "旧配置未改动，可继续使用")}</span></span>
+        </div>`);
+    }
+    if (job.previous_model) {
+      box.insertAdjacentHTML("beforeend", `
+        <div class="progress-step ok">
+          <span class="sdot"></span>
+          <span>旧模型 ID 已清理<span class="detail">${esc(job.previous_model)}</span></span>
+        </div>`);
+    }
+  }
+
+  function pollEditJob(id) {
+    clearTimeout(paramsEditTimer);
+    paramsEditTimer = setTimeout(async () => {
+      const button = $("params-save");
+      try {
+        const job = await api("/router/models/job?id=" + encodeURIComponent(id));
+        paramsEditJob = job;
+        renderEditJob(job);
+        if (job.status === "running") {
+          pollEditJob(id);
+          return;
+        }
+        delete button.dataset.busy;
+        button.disabled = false;
+        if (job.status === "ok") {
+          const name = job.name || "";
+          $("params-dialog").close();
+          toast(
+            `模型 ${name} 已更新${job.previous_model ? `（原 ${job.previous_model}）` : ""}`,
+            "ok",
+          );
+          await refresh();
+        } else {
+          button.textContent = "重试保存";
+          toast(`保存失败：${job.error || "未知错误"}`, "bad");
+          await refresh();
+        }
+      } catch (error) {
+        delete button.dataset.busy;
+        button.disabled = false;
+        button.textContent = "重试保存";
+        showParamsError(error.message);
+      }
+    }, 1200);
   }
 
   async function saveParams(event) {
     event.preventDefault();
     if (!paramsModel) return;
+    const button = $("params-save");
+    if (button.dataset.busy === "1") return;
     const form = $("params-form");
-    const model = state.models.find((m) => m.id === paramsModel);
+    const engine = paramsEngineInfo();
+    if (!engine) {
+      showParamsError("无法确定目标引擎，请关闭弹窗后重试。");
+      return;
+    }
+    const kind = engine.kind;
+    const engineSlot = $("params-engine-slot").value;
+    const modelPath = paramsModelPathText($("params-model-path").value);
+    if (!modelPath) {
+      showParamsError("请填写模型路径。");
+      $("params-model-path").focus();
+      return;
+    }
+    if (kind === "ninfer" && !/\.ninfer$/i.test(modelPath)) {
+      showParamsError("NInfer 模型路径必须是 .ninfer 文件。");
+      return;
+    }
     const values = {};
     for (const key of PARAM_FIELDS) {
       const raw = form.elements[key].value.trim();
       values[key] = raw === "" ? null : Number(raw);
       if (values[key] !== null && !Number.isFinite(values[key])) {
-        $("params-error").textContent = `${key} 不是有效数字`;
-        $("params-error").hidden = false;
+        showParamsError(`${key} 不是有效数字`);
         return;
       }
     }
+    if (kind === "ninfer") {
+      values.repetition_penalty = null;
+      values.repeat_last_n = null;
+    }
+    if (kind === "kvmem_llama") {
+      values.repeat_last_n = null;
+    }
     try {
-      Object.assign(values, readMoreParams($("params-more"), model ? model.engine : ""));
+      Object.assign(values, readMoreParams($("params-more"), kind));
     } catch (error) {
-      $("params-error").textContent = error.message;
-      $("params-error").hidden = false;
+      showParamsError(error.message);
       return;
     }
-    const body = { model: paramsModel, params: values };
-    const displayName = $("params-name-input").value.trim();
-    body.display_name = displayName;
-    if (model && model.engine === "llama" && model.source === "preset") {
+    const needsValidation = paramsNeedsValidation(kind, engineSlot);
+    const body = {
+      edit_model: paramsModel,
+      engine: engineSlot,
+      model: modelPath,
+      params: values,
+      display_name: $("params-name-input").value.trim(),
+    };
+    const visionDevice = (document.querySelector('input[name="params-vision-device"]:checked') || {}).value || "cpu";
+    if (kind === "ninfer") {
+      body.vision = null;
+      body.vision_enabled = $("params-vision-enabled").checked;
+    } else {
+      body.vision = paramsVisionText(kind) || null;
+    }
+    const originalDevice = paramsOriginal && paramsOriginal.visionGpu ? "gpu" : "cpu";
+    if (needsValidation || visionDevice !== originalDevice) {
+      body.vision_device = visionDevice;
+    }
+    if (kind === "strata") {
+      body.draft = String($("params-draft-path").value || "").trim() || null;
+    }
+    if (kind === "llama" || kind === "kvmem_llama") {
       const contextRaw = $("params-context").value.trim();
-      const engineParams = {};
-      if (contextRaw === "") {
-        engineParams.context_length = null;
-      } else {
-        const context = Number(contextRaw);
+      let context = null;
+      if (contextRaw !== "") {
+        context = Number(contextRaw);
         if (!Number.isInteger(context) || context < 256) {
-          $("params-error").textContent = "上下文长度必须是 ≥256 的整数（留空表示 GGUF 上限）";
-          $("params-error").hidden = false;
+          showParamsError("上下文长度必须是 ≥256 的整数（留空表示 GGUF 上限）");
           return;
         }
-        engineParams.context_length = context;
       }
-      engineParams.cache_type_k = $("params-cache-k").value;
-      engineParams.cache_type_v = $("params-cache-v").value;
-      body.engine_params = engineParams;
+      const cacheK = $("params-cache-k").value || "q8_0";
+      const cacheV = $("params-cache-v").value || "q8_0";
+      const preset = !!paramsOriginal && paramsOriginal.preset
+        && paramsOriginal.engineSlot === engineSlot && kind === "llama";
+      const changed = !paramsOriginal || engineSlot !== paramsOriginal.engineSlot
+        || contextRaw !== paramsOriginal.contextText
+        || cacheK !== paramsOriginal.cacheK || cacheV !== paramsOriginal.cacheV;
+      if (kind === "kvmem_llama" || preset || changed) {
+        body.context_length = context;
+        body.cache_type_k = cacheK;
+        body.cache_type_v = cacheV;
+      }
     }
-    if (model && model.engine === "ninfer") {
-      let ninferParams;
+    if (kind === "ninfer") {
+      let advanced;
       try {
-        ninferParams = Object.assign(
+        advanced = Object.assign(
           {},
           readKvmemEngine($("params-more"), "ninfer", "engine"),
           readKvmemEngine($("params-kvmem"), "ninfer"),
         );
       } catch (error) {
-        $("params-error").textContent = error.message;
-        $("params-error").hidden = false;
+        showParamsError(error.message);
         return;
       }
-      body.engine_params = ninferParams;
+      if (Object.keys(advanced).length) body.engine_params = advanced;
     }
-    if (model && model.engine === "kvmem_llama") {
-      let kvParams;
+    if (kind === "kvmem_llama") {
+      let advanced;
       try {
-        kvParams = Object.assign(
+        advanced = Object.assign(
           {},
           readKvmemEngine($("params-more"), "kvmem_llama", "engine"),
           readKvmemEngine($("params-kvmem"), "kvmem_llama"),
         );
       } catch (error) {
-        $("params-error").textContent = error.message;
-        $("params-error").hidden = false;
+        showParamsError(error.message);
         return;
       }
-      const diskMib = Number(kvParams.kvmem_disk_mib || 0);
-      const diskPath = String(kvParams.kvmem_disk_path || "").trim();
+      const reserve = advanced.kvmem_gen_reserve == null
+        ? 1024 : Number(advanced.kvmem_gen_reserve);
+      if (body.context_length && advanced.kvmem_budget
+          && reserve + Number(advanced.kvmem_budget) > body.context_length) {
+        showParamsError(`KVMem 预算 + 生成预留（${reserve}）不能超过上下文长度。`);
+        return;
+      }
+      if (paramsOriginal && (engineSlot !== paramsOriginal.engineSlot || modelPath !== paramsOriginal.modelPath)) {
+        // Budget and reserve were derived from the old file's context; do not
+        // resend them as explicit choices when the new file may be smaller,
+        // or they would block the automatic fit.
+        for (const key of ["kvmem_budget", "kvmem_gen_reserve"]) {
+          if (advanced[key] != null && advanced[key] === paramsOriginal.engineValues[key]) {
+            delete advanced[key];
+          }
+        }
+      }
+      const diskMib = Number(advanced.kvmem_disk_mib || 0);
+      const diskPath = String(advanced.kvmem_disk_path || "").trim();
       if (diskMib > 0 && !diskPath) {
-        $("params-error").textContent = "SSD 额度大于 0 时必须填写 SSD 目录。";
-        $("params-error").hidden = false;
+        showParamsError("SSD 额度大于 0 时必须填写 SSD 目录。");
         return;
       }
       if (diskPath && !(diskMib > 0)) {
-        $("params-error").textContent = "填写 SSD 目录时必须同时把 SSD 额度设为大于 0。";
-        $("params-error").hidden = false;
+        showParamsError("填写 SSD 目录时必须同时把 SSD 额度设为大于 0。");
         return;
       }
-      body.engine_params = kvParams;
+      if (Object.keys(advanced).length) body.engine_params = advanced;
     }
-    if (model && model.engine === "kvmem") {
-      let kvParams;
+    if (kind === "kvmem") {
+      let advanced;
       try {
-        kvParams = Object.assign(
+        advanced = Object.assign(
           {},
           readKvmemEngine($("params-more"), "kvmem", "engine"),
           readKvmemEngine($("params-kvmem"), "kvmem"),
         );
       } catch (error) {
-        $("params-error").textContent = error.message;
-        $("params-error").hidden = false;
+        showParamsError(error.message);
         return;
       }
-      const diskMib = Number(kvParams.kvmem_disk_mib || 0);
-      const diskPath = String(kvParams.kvmem_disk_path || "").trim();
+      const diskMib = Number(advanced.kvmem_disk_mib || 0);
+      const diskPath = String(advanced.kvmem_disk_path || "").trim();
       if (diskMib > 0 && !diskPath) {
-        $("params-error").textContent = "SSD 额度大于 0 时必须填写 SSD 目录。";
-        $("params-error").hidden = false;
+        showParamsError("SSD 额度大于 0 时必须填写 SSD 目录。");
         return;
       }
       if (diskPath && !(diskMib > 0)) {
-        $("params-error").textContent = "填写 SSD 目录时必须同时把 SSD 额度设为大于 0。";
-        $("params-error").hidden = false;
+        showParamsError("填写 SSD 目录时必须同时把 SSD 额度设为大于 0。");
         return;
       }
-      body.engine_params = kvParams;
+      if (Object.keys(advanced).length) body.engine_params = advanced;
     }
-    if (model && model.engine === "strata") {
-      let engineParams;
+    if (kind === "strata") {
+      let advanced;
       try {
-        engineParams = readKvmemEngine($("params-more"), "strata", "engine");
+        advanced = readKvmemEngine($("params-more"), "strata", "engine");
       } catch (error) {
-        $("params-error").textContent = error.message;
-        $("params-error").hidden = false;
+        showParamsError(error.message);
         return;
       }
-      body.engine_params = engineParams;
+      if (Object.keys(advanced).length) body.engine_params = advanced;
     }
-    const visionRow = $("params-vision");
-    if (model && !visionRow.hidden && !$("params-vision-device").classList.contains("disabled")) {
-      const picked = (document.querySelector('input[name="params-vision-device"]:checked') || {}).value;
-      if (picked && picked !== (model.vision_gpu === true ? "gpu" : "cpu")) {
-        body.vision_device = picked;
-      }
-    }
-    const button = $("params-save");
     button.disabled = true;
+    button.dataset.busy = "1";
+    button.textContent = needsValidation ? "正在提交验证…" : "正在保存…";
+    showParamsError("");
     try {
-      const payload = await api("/router/params", {
+      const payload = await api("/router/models/edit", {
         method: "POST",
         body: JSON.stringify(body),
       });
-      if (model) {
-        model.params = payload.params || {};
-        if (payload.engine_params && model.engine === "llama") {
-          model.context_length = payload.engine_params.context_length;
-          model.cache_type_k = payload.engine_params.cache_type_k;
-          model.cache_type_v = payload.engine_params.cache_type_v;
-        }
-        if ((model.engine === "kvmem_llama" || model.engine === "kvmem" || model.engine === "ninfer" || model.engine === "strata") && payload.engine_params) {
-          model.engine_params = payload.engine_params;
-        }
-        if (payload.vision_gpu != null) model.vision_gpu = payload.vision_gpu;
-        if (payload.display_name) {
-          model.display_name = payload.display_name;
-          model.name = payload.display_name;
-          model.display_name_custom = payload.display_name_custom === true;
-        }
+      if (payload.mode === "validate") {
+        paramsEditJob = payload.job;
+        $("params-progress").hidden = false;
+        renderEditJob(payload.job);
+        button.textContent = "正在验证…";
+        pollEditJob(payload.job.id);
+        return;
       }
+      delete button.dataset.busy;
+      button.disabled = false;
       $("params-dialog").close();
       if (payload.restarting) {
         toast(`已保存 ${paramsModel} 的参数，正在重启引擎以应用新参数`, "ok");
@@ -3404,10 +3819,10 @@
       }
       await refresh();
     } catch (error) {
-      $("params-error").textContent = error.message;
-      $("params-error").hidden = false;
-    } finally {
+      delete button.dataset.busy;
       button.disabled = false;
+      updateParamsSaveState();
+      showParamsError(error.message);
     }
   }
 
@@ -3978,6 +4393,42 @@
   });
   $("params-form").addEventListener("submit", saveParams);
   $("params-cancel").addEventListener("click", () => $("params-dialog").close());
+  $("params-engine-slot").addEventListener("change", paramsSwitchEngine);
+  for (const target of [$("params-vision-path"), $("params-draft-path"),
+    $("params-context"), $("params-cache-k"), $("params-cache-v")]) {
+    target.addEventListener("input", updateParamsSaveState);
+  }
+  $("params-model-path").addEventListener("input", () => {
+    // A different file may have a different context cap: keeping the old
+    // explicit value would fail validation, so fall back to the GGUF value
+    // unless the user already typed a new one.  Restore it when the original
+    // file comes back, so a round trip stays a no-op save.
+    if (!paramsOriginal) return updateParamsSaveState();
+    const context = $("params-context");
+    const differs = paramsModelPathText($("params-model-path").value) !== paramsOriginal.modelPath;
+    if (differs && context.value.trim() === paramsOriginal.contextText) {
+      context.value = "";
+      context.dataset.autoCleared = "1";
+    } else if (!differs && context.dataset.autoCleared === "1") {
+      context.value = paramsOriginal.contextText;
+      delete context.dataset.autoCleared;
+    }
+    if (differs) {
+      // The KVMem budget is derived from the old context; a blank field lets
+      // the worker recompute it against the new file instead of failing.
+      const budget = $("params-dialog").querySelector('[data-param-key="kvmem_budget"]');
+      if (budget) budget.value = "";
+    }
+    updateParamsSaveState();
+  });
+  $("params-context").addEventListener("input", () => {
+    delete $("params-context").dataset.autoCleared;
+  });
+  $("params-vision-enabled").addEventListener("change", refreshParamsVisionState);
+  $("params-vision-path").addEventListener("change", refreshParamsVisionState);
+  document.querySelectorAll('input[name="params-vision-device"]').forEach((el) => {
+    el.addEventListener("change", updateParamsSaveState);
+  });
   bindParamTabs($("params-dialog"));
   bindParamTabs($("add-dialog"));
   $("auth-form").addEventListener("submit", saveAuth);
