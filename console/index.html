@@ -670,6 +670,36 @@
   .progress-step.warn .sdot { background: var(--amber); }
   .progress-step.fail .sdot { background: var(--red); }
   .progress-step .detail { display: block; color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
+  .tune-summary { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+  .tune-chip {
+    padding: 6px 9px; border-radius: 8px; border: 1px solid var(--line-soft);
+    background: #0c121a; font-size: 11.5px; color: var(--muted);
+  }
+  .tune-chip b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tune-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .tune-item {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    border: 1px solid var(--line-soft); border-radius: 8px;
+    background: #0c121a; font-size: 12px; color: var(--muted);
+  }
+  .tune-item.ok { border-color: rgba(74, 222, 128, .20); }
+  .tune-item.fail { border-color: rgba(251, 113, 133, .20); }
+  .tune-item .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .tune-item .metrics {
+    color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .tune-diff { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
+  .tune-diff-row {
+    display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px;
+    font-size: 12px; color: var(--muted);
+  }
+  .tune-diff-row .name { color: var(--faint); }
+  .tune-diff-row .val { overflow-wrap: anywhere; }
+  .tune-diff-row .after { color: #b9f6cb; }
+  .tune-notes { margin: 8px 0 0; padding-left: 18px; color: var(--faint); font-size: 11.5px; }
+  .tune-notes li { margin: 3px 0; }
+  dialog.tune-wide { width: min(780px, calc(100vw - 32px)); }
   @media (max-width: 520px) {
     .add-fields { grid-template-columns: 1fr; }
     .engine-picker { grid-template-columns: 1fr; }
@@ -1127,6 +1157,7 @@
         <p class="params-hint" id="add-kvmem-hint"></p>
       </div>
       <label class="check"><input id="add-smoke" type="checkbox" checked /> 添加后运行冒烟测试（文本必测，有视觉时加测图片）</label>
+      <label class="check" id="add-tune-field" hidden><input id="add-tune" type="checkbox" /> 性能调优（冒烟测试后停止引擎，按本机硬件实测并给出建议参数）</label>
       <p class="params-error" id="add-error" hidden></p>
       <div class="progress" id="add-progress" hidden></div>
     </div>
@@ -1135,6 +1166,28 @@
       <button class="btn primary" type="submit" id="add-submit">添加并验证</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="tune-dialog" class="wide tune-wide">
+  <div class="dialog-body">
+    <h3>性能调优 <span class="name" id="tune-model"></span></h3>
+    <p class="params-hint" id="tune-intro">调优会先停止引擎，再按当前机器的显存、内存与物理核心数逐组实测；每组候选都会重新加载模型，请耐心等待。调优期间模型服务不可用。</p>
+    <div class="tune-summary" id="tune-hardware"></div>
+    <div class="progress" id="tune-progress" hidden></div>
+    <p class="params-error" id="tune-error" hidden></p>
+    <div class="tune-list" id="tune-candidates"></div>
+    <div id="tune-suggestions" hidden>
+      <p class="params-group-title" style="margin-top:16px">建议参数 <span class="name" id="tune-best"></span></p>
+      <div class="tune-diff" id="tune-diff"></div>
+      <p class="params-hint" id="tune-summary"></p>
+      <ul class="tune-notes" id="tune-notes"></ul>
+      <p class="params-hint">应用后会写入该模型的配置并重启引擎；选择“不修改”则保持现有参数。</p>
+    </div>
+  </div>
+  <div class="dialog-actions">
+    <button class="btn" type="button" id="tune-decline" disabled>不修改</button>
+    <button class="btn primary" type="button" id="tune-apply" disabled>应用建议并重启</button>
+  </div>
 </dialog>
 
 <script>
@@ -1159,6 +1212,8 @@
     setupProxy: {},
     addJob: null,
     addTimer: null,
+    tuneJob: null,
+    tuneTimer: null,
     proxy: null,
     proxyBusy: false,
     downloads: null,
@@ -3872,6 +3927,9 @@
     const ninfer = kind === "ninfer";
     const kvllama = kind === "kvmem_llama";
     const kvlike = kv || strata;
+    const tuneEligible = kv || ninfer || kvllama;
+    $("add-tune-field").hidden = !tuneEligible;
+    if (!tuneEligible) $("add-tune").checked = false;
     form.elements.top_k.min = kvlike ? 1 : 0;
     form.elements.top_k.max = kvlike ? 64 : 1000;
     form.elements.repeat_last_n.min = kvlike ? 1 : -1;
@@ -4066,6 +4124,10 @@
         if (job.status === "ok") submit.dataset.done = "1";
         else delete submit.dataset.done;
         await refresh();
+        if (job.status === "ok" && job.tune && job.name) {
+          $("add-dialog").close();
+          openTuneDialog(job.name).catch((error) => toast(error.message, "bad"));
+        }
         toast(
           job.status === "ok"
             ? `模型 ${job.name || ""} 已添加并通过验证`
@@ -4119,6 +4181,9 @@
       vision_device: (document.querySelector('input[name="add-vision-device"]:checked') || {}).value || "cpu",
       smoke: $("add-smoke").checked,
     };
+    if (engineInfo.kind === "kvmem" || engineInfo.kind === "ninfer" || engineInfo.kind === "kvmem_llama") {
+      body.tune = $("add-tune").checked;
+    }
     if (engineInfo.kind === "strata") {
       body.draft = $("add-draft").value.trim() || null;
     }
@@ -4253,8 +4318,215 @@
     }
   }
 
-  async function deleteModel(id) {
-    if (state.busy) return;
+  function fmtTuneMib(value) {
+    const mib = Number(value);
+    if (!Number.isFinite(mib) || mib <= 0) return "—";
+    return `${(mib / 1024).toFixed(1)} GiB`;
+  }
+
+  function fmtTuneRate(value) {
+    const rate = Number(value);
+    return Number.isFinite(rate) && rate > 0 ? `${rate.toFixed(1)} tok/s` : "—";
+  }
+
+  function renderTuneHardware(job) {
+    const hardware = job.hardware || {};
+    const chips = [];
+    const gpus = Array.isArray(hardware.gpus) ? hardware.gpus : [];
+    if (gpus.length) {
+      const gpu = gpus[0];
+      chips.push(`显存 <b>${fmtTuneMib(hardware.vram_total_mib || gpu.vram_total_mib)}</b>（可用 ${fmtTuneMib(hardware.vram_free_mib || gpu.vram_free_mib)}）`);
+      if (gpu.name) chips.push(`GPU <b>${esc(gpu.name)}</b>`);
+    }
+    if (hardware.ram_total_mib) {
+      chips.push(`内存 <b>${fmtTuneMib(hardware.ram_total_mib)}</b>（可用 ${fmtTuneMib(hardware.ram_available_mib)}）`);
+    }
+    if (hardware.cpu_physical_cores) {
+      chips.push(`CPU <b>${hardware.cpu_physical_cores} 物理核心</b> / ${hardware.cpu_logical_cores || "?"} 逻辑`);
+    }
+    if (hardware.cpu_model) chips.push(esc(hardware.cpu_model));
+    const context = (job.plan && job.plan.context)
+      || (job.suggestions && job.suggestions.context_length)
+      || (job.model_info && job.model_info.context_length);
+    if (context) chips.push(`上下文 <b>${Number(context).toLocaleString()}</b>`);
+    $("tune-hardware").innerHTML = chips
+      .map((text) => `<span class="tune-chip">${text}</span>`)
+      .join("");
+  }
+
+  function renderTuneCandidates(job) {
+    const host = $("tune-candidates");
+    const list = Array.isArray(job.candidates) ? job.candidates : [];
+    if (!list.length) {
+      host.innerHTML = "";
+      return;
+    }
+    host.innerHTML = list.map((item) => {
+      const ok = item.ok === true;
+      const metrics = ok
+        ? `decode ${fmtTuneRate(item.decode_tps)} · prefill ${fmtTuneRate(item.prefill_tps)}`
+          + (item.context_used ? ` · ctx ${Number(item.context_used).toLocaleString()}` : "")
+        : esc(String(item.error || "未完成").slice(0, 180));
+      return `<div class="tune-item ${ok ? "ok" : "fail"}">
+        <span class="grow">${esc(item.label || item.id || "")}</span>
+        <span class="metrics">${metrics}</span>
+        <span class="tag ${ok ? "green" : "red"}">${ok ? "完成" : "失败"}</span>
+      </div>`;
+    }).join("");
+  }
+
+  function renderTuneJob(job) {
+    state.tuneJob = job;
+    const running = job.status === "running";
+    $("tune-model").textContent = job.model || "";
+    renderTuneHardware(job);
+    renderTuneCandidates(job);
+    const progress = Array.isArray(job.progress) ? job.progress : [];
+    const box = $("tune-progress");
+    if (progress.length) {
+      const tail = progress.slice(-8);
+      box.hidden = false;
+      box.innerHTML = tail.map((item, index) => `
+        <div class="progress-step ${index === tail.length - 1 && running ? "running" : "ok"}">
+          <span class="sdot"></span>
+          <span>${esc(item.message || "")}</span>
+        </div>`).join("");
+    } else if (running) {
+      box.hidden = false;
+      box.innerHTML = `<div class="progress-step running"><span class="sdot"></span><span>${esc(job.message || "正在准备…")}</span></div>`;
+    } else {
+      box.hidden = true;
+    }
+    const errorBox = $("tune-error");
+    const messages = [];
+    if (job.error) messages.push(job.error);
+    if (job.restore_error) messages.push(`引擎恢复失败：${job.restore_error}`);
+    errorBox.hidden = messages.length === 0;
+    errorBox.textContent = messages.join("；");
+    const suggestions = job.suggestions;
+    const done = job.status === "ok" && suggestions && Array.isArray(suggestions.params);
+    $("tune-suggestions").hidden = !done;
+    if (done) {
+      const params = suggestions.params || [];
+      $("tune-diff").innerHTML = params.length
+        ? params.map((item) => `<div class="tune-diff-row">
+            <span class="name">${esc(item.label || item.key || "")}</span>
+            <span class="val">${esc(item.before == null ? "未设置" : String(item.before))} → <b class="after">${esc(item.after == null ? "未设置" : String(item.after))}</b></span>
+          </div>`).join("")
+        : `<div class="tune-diff-row"><span class="name">参数</span><span class="val">当前配置已与实测最佳一致，无需修改。</span></div>`;
+      const best = (job.candidates || []).find((item) => item.id === suggestions.best_candidate);
+      $("tune-best").textContent = best ? best.label : "";
+      $("tune-summary").textContent = suggestions.summary || "";
+      $("tune-notes").innerHTML = (job.notes || [])
+        .map((note) => `<li>${esc(note)}</li>`)
+        .join("");
+    }
+    const apply = $("tune-apply");
+    apply.disabled = !done || !!job.applied;
+    apply.textContent = job.applied ? "已应用" : "应用建议并重启";
+    const decline = $("tune-decline");
+    decline.disabled = running;
+    decline.textContent = running ? "调优进行中…" : job.status === "ok" ? "不修改" : "关闭";
+  }
+
+  function pollTuneJob(id) {
+    clearTimeout(state.tuneTimer);
+    state.tuneTimer = setTimeout(async () => {
+      try {
+        const job = await api("/router/models/job?id=" + encodeURIComponent(id));
+        state.tunePollErrors = 0;
+        renderTuneJob(job);
+        if (job.status === "running") {
+          pollTuneJob(id);
+          return;
+        }
+        await refresh();
+        const dialog = $("tune-dialog");
+        if (dialog.open) {
+          toast(
+            job.status === "ok" ? "性能调优完成，请选择是否应用建议参数" : `性能调优失败：${job.error || "未知错误"}`,
+            job.status === "ok" ? "ok" : "bad",
+          );
+        } else if (job.status === "ok" && job.suggestions) {
+          toast(`性能调优完成：${job.suggestions.summary || ""}`, "ok");
+        }
+      } catch (error) {
+        state.tunePollErrors = (state.tunePollErrors || 0) + 1;
+        if (state.tunePollErrors <= 5) {
+          pollTuneJob(id);
+          return;
+        }
+        $("tune-error").hidden = false;
+        $("tune-error").textContent = error.message;
+        $("tune-decline").disabled = false;
+        $("tune-decline").textContent = "关闭";
+      }
+    }, 1500);
+  }
+
+  async function openTuneDialog(modelName) {
+    const dialog = $("tune-dialog");
+    clearTimeout(state.tuneTimer);
+    state.tuneJob = null;
+    state.tunePollErrors = 0;
+    $("tune-model").textContent = modelName;
+    $("tune-hardware").innerHTML = "";
+    $("tune-candidates").innerHTML = "";
+    $("tune-suggestions").hidden = true;
+    const errorBox = $("tune-error");
+    errorBox.hidden = true;
+    errorBox.textContent = "";
+    $("tune-progress").hidden = false;
+    $("tune-progress").innerHTML = `<div class="progress-step running"><span class="sdot"></span><span>正在创建调优任务…</span></div>`;
+    $("tune-apply").disabled = true;
+    $("tune-apply").textContent = "应用建议并重启";
+    $("tune-decline").disabled = true;
+    $("tune-decline").textContent = "调优进行中…";
+    if (!dialog.open) {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+    try {
+      const job = await api("/router/models/tune", {
+        method: "POST",
+        body: JSON.stringify({ model: modelName }),
+      });
+      state.tuneJob = job;
+      renderTuneJob(job);
+      pollTuneJob(job.id);
+    } catch (error) {
+      $("tune-progress").hidden = true;
+      errorBox.hidden = false;
+      errorBox.textContent = error.message;
+      $("tune-decline").disabled = false;
+      $("tune-decline").textContent = "关闭";
+    }
+  }
+
+  async function applyTuneResult() {
+    const job = state.tuneJob;
+    if (!job || job.status !== "ok" || job.applied) return;
+    const button = $("tune-apply");
+    button.disabled = true;
+    button.textContent = "正在应用…";
+    try {
+      const payload = await api("/router/models/tune/apply", {
+        method: "POST",
+        body: JSON.stringify({ job: job.id }),
+      });
+      $("tune-dialog").close();
+      await refresh();
+      const note = payload.note
+        || (payload.restarting ? "建议参数已写入，引擎正在重启。" : "建议参数已写入。");
+      toast(note, "ok");
+    } catch (error) {
+      toast(error.message, "bad");
+      button.disabled = false;
+      button.textContent = "应用建议并重启";
+    }
+  }
+
+  async function deleteModel(id) {    if (state.busy) return;
     const ok = await askConfirm(
       "删除模型配置",
       `将删除 ${id} 的引擎配置，不会删除模型文件。若该模型正在运行，会先停止引擎。`,
@@ -4372,6 +4644,8 @@
   $("btn-add-model").addEventListener("click", () => openAddDialog().catch((e) => toast(e.message, "bad")));
   $("add-form").addEventListener("submit", submitAdd);
   $("add-cancel").addEventListener("click", () => $("add-dialog").close());
+  $("tune-decline").addEventListener("click", () => $("tune-dialog").close());
+  $("tune-apply").addEventListener("click", applyTuneResult);
   $("add-vision").addEventListener("input", syncVisionDevice);
   $("add-engines").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-add-category]");

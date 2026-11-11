@@ -5888,6 +5888,15 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
 # Display order: the management page groups slots by ``category`` and lists
 # them in this order, so the kvmem group shows llama.cpp → polystrata → ninfer.
 ENGINE_SLOT_ORDER = ("llama", "strata", "kvmem_llama", "kvmem", "ninfer")
+
+# Performance tuning is one independent script per KVMem-family engine.  Each
+# script probes this machine, benchmarks several candidates derived from that
+# engine's own docs against the model file, and prints JSON-line progress.
+TUNE_ENGINE_SCRIPTS: dict[str, str] = {
+    "kvmem": "tools/tune/tune_kvmem_polystrata.py",
+    "ninfer": "tools/tune/tune_kvmem_ninfer.py",
+    "kvmem_llama": "tools/tune/tune_kvmem_llama.py",
+}
 KV_PROBE_CODE = (
     "import serve.server\n"
     "print('LLM_ROUTER_KVPROBE_' + str(6 * 7))\n"
@@ -10334,6 +10343,315 @@ class Gateway:
                 self._job_step(job, "cleanup", "warn", "新配置已生效，但旧配置清理失败")
         self._job_finish(job, "ok")
 
+    # -- performance tuning (KVMem family) -----------------------------------
+
+    def _tune_phase(self, job: dict[str, Any], phase: str, message: str) -> None:
+        with self.model_jobs_lock:
+            job["phase"] = phase
+            job["message"] = message
+            progress = job.setdefault("progress", [])
+            progress.append({"at": iso_now(), "message": message})
+            if len(progress) > 300:
+                del progress[:-300]
+
+    def start_model_tune(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run one engine's independent tuning script while the engine is stopped."""
+        name = payload.get("model")
+        if not isinstance(name, str) or not name.strip():
+            raise BadRequest('send {"model": "..."}')
+        entry = self.registry.resolve(name.strip())
+        if entry is None:
+            raise ModelNotFound(f"model {name!r} is not in the registry")
+        kind = self._short_kind(self._engine_kind(entry.engine))
+        script_rel = TUNE_ENGINE_SCRIPTS.get(kind)
+        if script_rel is None:
+            raise BadRequest(f"引擎 {entry.engine!r} 不支持性能调优")
+        script = (self.base_dir / script_rel).resolve()
+        if not script.is_file():
+            raise BadRequest(f"缺少调优脚本：{script}")
+        config_path = Path(str(entry.config_path or ""))
+        if not config_path.is_file():
+            raise BadRequest("找不到该模型的配置文件")
+        tune_dir = (self.base_dir / "log" / "tune").resolve()
+        tune_dir.mkdir(parents=True, exist_ok=True)
+        job_id = uuid.uuid4().hex[:12]
+        result_path = tune_dir / f"{job_id}.json"
+        workdir = tune_dir / job_id
+        log_path = tune_dir / f"{job_id}.log"
+        job: dict[str, Any] = {
+            "id": job_id,
+            "kind": "tune",
+            "engine": entry.engine,
+            "engine_kind": kind,
+            "model": entry.id,
+            "config_path": str(config_path),
+            "status": "running",
+            "phase": "queued",
+            "message": "",
+            "started_at": iso_now(),
+            "finished_at": None,
+            "error": None,
+            "progress": [],
+            "hardware": None,
+            "plan": None,
+            "model_info": None,
+            "candidates": [],
+            "notes": [],
+            "suggestions": None,
+            "restored": False,
+            "restore_error": None,
+            "applied": False,
+            "applied_at": None,
+            "result_path": str(result_path),
+            "workdir": str(workdir),
+            "log_path": str(log_path),
+        }
+        with self.model_jobs_lock:
+            if any(
+                item.get("status") == "running"
+                for item in self.model_jobs.values()
+            ):
+                raise ModelBusy("another model job is in progress")
+            self.model_jobs[job_id] = job
+        thread = threading.Thread(
+            target=self._model_tune_worker,
+            args=(job, entry.id, script, config_path, result_path, workdir, log_path),
+            name=f"model-tune-{job_id}",
+            daemon=True,
+        )
+        thread.start()
+        return self.get_model_job(job_id) or job
+
+    def _consume_tune_line(self, job: dict[str, Any], line: str) -> None:
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            event = None
+        with self.model_jobs_lock:
+            if not isinstance(event, dict):
+                tail = job.setdefault("log_tail", [])
+                tail.append(line[-600:])
+                if len(tail) > 80:
+                    del tail[:-80]
+                return
+            kind = event.get("event")
+            if kind == "progress":
+                item: dict[str, Any] = {
+                    "at": iso_now(),
+                    "message": str(event.get("message") or ""),
+                }
+                pct = event.get("pct")
+                if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+                    item["pct"] = pct
+                progress = job.setdefault("progress", [])
+                progress.append(item)
+                if len(progress) > 300:
+                    del progress[:-300]
+                job["message"] = item["message"]
+            elif kind == "hardware":
+                job["hardware"] = event.get("hardware")
+            elif kind == "plan":
+                job["plan"] = {
+                    key: value for key, value in event.items() if key != "event"
+                }
+            elif kind == "candidate":
+                fields = (
+                    "id", "label", "ok", "args", "error", "context_used",
+                    "decode_tps", "prefill_tps", "decode_tokens", "prefill_tokens",
+                    "warmup_s", "decode_s", "prefill_s", "elapsed_s",
+                )
+                job.setdefault("candidates", []).append(
+                    {key: event[key] for key in fields if key in event}
+                )
+            elif kind == "result":
+                job["script_result"] = {
+                    "status": event.get("status"),
+                    "error": event.get("error"),
+                    "summary": event.get("summary"),
+                }
+
+    def _merge_tune_result(self, job: dict[str, Any], result: dict[str, Any]) -> None:
+        with self.model_jobs_lock:
+            hardware = result.get("hardware")
+            if isinstance(hardware, dict):
+                job["hardware"] = hardware
+            model_info = result.get("model")
+            if isinstance(model_info, dict):
+                job["model_info"] = model_info
+            candidates = result.get("candidates")
+            if isinstance(candidates, list):
+                job["candidates"] = candidates
+            notes = result.get("notes")
+            if isinstance(notes, list):
+                job["notes"] = [str(item) for item in notes]
+            suggestions = result.get("suggestions")
+            if isinstance(suggestions, dict):
+                job["suggestions"] = suggestions
+
+    def _model_tune_worker(
+        self,
+        job: dict[str, Any],
+        name: str,
+        script: Path,
+        config_path: Path,
+        result_path: Path,
+        workdir: Path,
+        log_path: Path,
+    ) -> None:
+        status = "failed"
+        error: str | None = None
+        try:
+            self._tune_phase(job, "stopping", "停止当前引擎，释放显存…")
+            self.ensure_no_async()
+            with self.cond:
+                engine_alive = bool(self.engine is not None and self.engine.alive())
+            if engine_alive:
+                self.stop_engine()
+            self._tune_phase(job, "benchmarking", "运行候选基准（每组会重新加载模型）…")
+            command = [
+                sys.executable, "-u", str(script),
+                "--config", str(config_path.resolve()),
+                "--out", str(result_path),
+                "--workdir", str(workdir),
+            ]
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            with log_path.open("w", encoding="utf-8") as log_file:
+                proc = subprocess.Popen(
+                    command,
+                    cwd=str(self.base_dir),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    start_new_session=True,
+                )
+                with self.model_jobs_lock:
+                    job["pid"] = proc.pid
+                try:
+                    if proc.stdout is not None:
+                        for raw in proc.stdout:
+                            line = raw.rstrip("\n")
+                            if not line:
+                                continue
+                            log_file.write(line + "\n")
+                            log_file.flush()
+                            self._consume_tune_line(job, line)
+                    code = proc.wait()
+                finally:
+                    if proc.poll() is None:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        except (OSError, ProcessLookupError):
+                            proc.terminate()
+            with self.model_jobs_lock:
+                job["exit_code"] = code
+            result = read_json(result_path, {}) if result_path.is_file() else {}
+            if isinstance(result, dict) and result:
+                self._merge_tune_result(job, result)
+                suggestions = job.get("suggestions")
+                if result.get("status") == "ok" and isinstance(suggestions, dict):
+                    status = "ok"
+                else:
+                    error = str(result.get("error") or f"调优脚本退出码 {code}")
+            else:
+                error = f"调优脚本没有写出结果（退出码 {code}）"
+        except Exception as exc:
+            self.log.exception("model tune %s failed", job["id"])
+            error = exc.message if isinstance(exc, GatewayError) else str(exc)
+        finally:
+            self._tune_phase(job, "restoring", "恢复引擎并重新加载模型…")
+            try:
+                self.registry.reload()
+                self.preload(name)
+                with self.model_jobs_lock:
+                    job["restored"] = True
+            except Exception as exc:
+                self.log.exception("cannot restore engine after tuning %s", job["id"])
+                with self.model_jobs_lock:
+                    job["restore_error"] = exc.message if isinstance(exc, GatewayError) else str(exc)
+            with self.model_jobs_lock:
+                job["phase"] = "done"
+                job["status"] = status
+                job["error"] = error
+                job["finished_at"] = iso_now()
+            self.log.info(
+                "model tune %s (%s) finished: %s", job["id"], name, status
+            )
+
+    def apply_model_tune(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Write a finished tune job's argv into the model config and restart."""
+        job_id = payload.get("job")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise BadRequest('send {"job": "<tune job id>"}')
+        with self.model_jobs_lock:
+            job = self.model_jobs.get(job_id.strip())
+            if job is None:
+                raise NotFound("tune job not found")
+            if job.get("kind") != "tune":
+                raise BadRequest("该任务不是性能调优任务")
+            if job.get("status") != "ok":
+                raise BadRequest("调优任务尚未成功完成")
+            suggestions = json.loads(json.dumps(job.get("suggestions") or {}))
+            model_name = str(job.get("model") or "")
+            engine_kind = str(job.get("engine_kind") or "")
+        entry = self.registry.resolve(model_name)
+        if entry is None:
+            raise ModelNotFound(f"model {model_name!r} is not in the registry")
+        current_kind = self._short_kind(self._engine_kind(entry.engine))
+        if current_kind != engine_kind:
+            raise BadRequest("模型的引擎已变化，请重新调优")
+        args = suggestions.get("args")
+        if not isinstance(args, list) or not args:
+            raise BadRequest("调优结果没有可应用的参数")
+        clean = [str(item) for item in args]
+        config_path = Path(str(entry.config_path or ""))
+        if not config_path.is_file():
+            raise BadRequest("找不到该模型的配置文件")
+        config = read_json(config_path, {})
+        if not isinstance(config, dict):
+            raise BadRequest("模型配置文件无效")
+        if engine_kind == "kvmem":
+            context = (
+                parse_int(suggestions.get("context_length"))
+                or parse_int(_config_arg_value(clean, "--max-context", "--ctx"))
+            )
+            if not context:
+                raise BadRequest("建议参数缺少上下文长度")
+            kvmem_poly_validate_args(clean, int(context))
+            clean = kvmem_poly_strip_expert_save(clean, config)
+            suggested_model = _config_arg_value(clean, "--model")
+            current_args = [str(item) for item in (config.get("args") or [])]
+            current_model = _config_arg_value(current_args, "--model")
+            if suggested_model and current_model and suggested_model != current_model:
+                raise BadRequest("建议参数指向了别的模型文件")
+        elif engine_kind == "kvmem_llama":
+            kvmem_llama_validate_disk(clean)
+        config["args"] = clean
+        write_json_atomic(config_path, config)
+        self.registry.reload()
+        started, pending, note = self._schedule_engine_restart(entry.engine)
+        with self.model_jobs_lock:
+            job["applied"] = True
+            job["applied_at"] = iso_now()
+        result: dict[str, Any] = {
+            "model": entry.id,
+            "engine": entry.engine,
+            "restarting": started,
+            "restart_pending": pending,
+            "note": note,
+        }
+        if engine_kind == "kvmem":
+            result["engine_params"] = kvmem_poly_engine_values(clean, config)
+        elif engine_kind == "kvmem_llama":
+            result["engine_params"] = kvmem_llama_engine_values(clean)
+        elif engine_kind == "ninfer":
+            result["engine_params"] = ninfer_engine_values(clean)
+        return result
+
     def _model_meta_path(self) -> Path:
         return resolve_path(
             self.base_dir, self.config.get("model_meta_file") or "model-meta.json"
@@ -10584,6 +10902,7 @@ class Gateway:
             raise BadRequest("display_name must be a string")
         display_name = " ".join((display_name or "").split()) or None
         smoke = payload.get("smoke", True) is not False
+        tune = payload.get("tune") is True
         vision_path = (vision or "").strip() or None
         vision_device = payload.get("vision_device", "cpu")
         if vision_device is None:
@@ -10718,6 +11037,7 @@ class Gateway:
             "display_name": display_name,
             "params": params,
             "smoke": smoke,
+            "tune": tune,
             "status": "running",
             "started_at": iso_now(),
             "finished_at": None,
@@ -13853,6 +14173,20 @@ class Handler(BaseHTTPRequestHandler):
             if job is None:
                 raise NotFound("model job not found")
             self._json(200, job)
+            return
+        if normalized == "/router/models/tune":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            self._json(202, self.gateway.start_model_tune(payload))
+            return
+        if normalized == "/router/models/tune/apply":
+            if method != "POST":
+                raise MethodNotAllowed("method not allowed")
+            payload = self._json_body(required=True) or {}
+            self._json(
+                200, {"status": "ok", **self.gateway.apply_model_tune(payload)}
+            )
             return
         if normalized == "/router/models/delete":
             if method != "POST":
