@@ -691,6 +691,8 @@
     overflow-wrap: anywhere;
   }
   .tune-item.fail .tune-item-line { color: #fda4af; }
+  .tune-reuse-ok { color: #b9f6cb; }
+  .tune-reuse-miss { color: #fda4af; }
   .tune-diff { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
   .tune-diff-row {
     display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px;
@@ -4368,6 +4370,10 @@
       const metrics = ok
         ? `decode ${fmtTuneRate(item.decode_tps)} · prefill ${fmtTuneRate(item.prefill_tps)}`
           + (item.context_used ? ` · ctx ${Number(item.context_used).toLocaleString()}` : "")
+          + (item.reuse_prompt_tokens
+            ? ` · <span class="${Number(item.reuse_cached_tokens) > 0 ? "tune-reuse-ok" : "tune-reuse-miss"}">`
+              + `KV 复用 ${(Number(item.reuse_ratio || 0) * 100).toFixed(0)}%</span>`
+            : "")
         : esc(String(item.error || "未完成").slice(0, 240));
       return `<div class="tune-item ${ok ? "ok" : "fail"}">
         <div class="tune-item-head">

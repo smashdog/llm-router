@@ -138,6 +138,9 @@ def main() -> int:
     base = common.args_set(base, "--kvmem-budget", budget)
     base = common.args_set(base, "--kvmem-gen-reserve", reserve)
     base = common.args_set(base, "--kvmem-host-mib", host_mib)
+    # The hybrid prefix cache is on by default; an inherited explicit opt-out
+    # would make every turn re-read its prompt, so drop it from candidates.
+    base = common.args_remove(base, "--no-prefix-reuse")
     arch = str(info.get("architecture") or "").lower()
     if any(token in arch for token in ("qwen3_5", "qwen3_6", "qwen3.5", "qwen3.6")):
         base = common.args_set_switch(base, "--gdn-state-fp16", True)
@@ -260,12 +263,15 @@ def main() -> int:
         ("gdn_state_fp16", "GDN 状态 FP16", "--gdn-state-fp16", "switch"),
     ]
     changes = common.diff_params(original_args, best_args, specs)
+    reuse_text = ""
+    if best.get("reuse_prompt_tokens"):
+        reuse_text = f"，KV 复用 {best.get('reuse_ratio', 0) * 100:.1f}%"
     summary = (
         f"在 {hardware.get('vram_total_mib') or '?'} MiB 显存、"
         f"{hardware.get('ram_total_mib') or '?'} MiB 内存、"
         f"{hardware.get('cpu_physical_cores') or '?'} 个物理核心上测得最佳："
         f"decode {best.get('decode_tps', 0)} tok/s，"
-        f"prefill {best.get('prefill_tps', 0)} tok/s（{best['label']}）。"
+        f"prefill {best.get('prefill_tps', 0)} tok/s{reuse_text}（{best['label']}）。"
     )
     result["suggestions"] = {
         "args": best_args,
@@ -281,7 +287,11 @@ def main() -> int:
         "NInfer 没有 q8_0 格式；默认用字面 8-bit 的 int8，同时对照官方全能的 rk8v4。",
         "上下文优先取 .ninfer 内嵌的模型最大值；显存放不下时自动减半重试。",
         "kvmem 预算与生成预留按 64 token 对齐；host 预算按可用内存收敛。",
+        "保留 NInfer 默认的 hybrid prefix cache（显式 --no-prefix-reuse 会被移除）。",
     ])
+    note = common.reuse_note(best)
+    if note:
+        result["notes"].append(note)
     if not has_mtp:
         result["notes"].append("该构件没有 MTP/DFlash 组件，未启用推测解码。")
     return finish("ok")

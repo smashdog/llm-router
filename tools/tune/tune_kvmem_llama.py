@@ -140,6 +140,9 @@ def main() -> int:
     base = common.args_set(base, "-c", context)
     base = common.args_set(base, "--kv-dtype", "q8_0")
     base = common.args_set(base, "-fa", "on")
+    # llama.cpp caches the prompt in its slot by default; an inherited
+    # --no-cache-prompt would re-prefill every conversation turn.
+    base = common.args_remove(base, "--no-cache-prompt")
     base = common.args_set(base, "--kvmem-block-tokens", 32)
     base = common.args_set(base, "--kvmem-host-mib", host_mib)
     base = common.args_set_switch(base, "--kvmem", True, "--no-kvmem")
@@ -247,11 +250,14 @@ def main() -> int:
         ("kvmem_host_mib", "Host KV 预算（MiB）", "--kvmem-host-mib", "value"),
     ]
     changes = common.diff_params(original_args, best_args, specs)
+    reuse_text = ""
+    if best.get("reuse_prompt_tokens"):
+        reuse_text = f"，KV 复用 {best.get('reuse_ratio', 0) * 100:.1f}%"
     summary = (
         f"在 {hardware.get('vram_total_mib') or '?'} MiB 显存、"
         f"{hardware.get('ram_total_mib') or '?'} MiB 内存、{cores} 个物理核心上测得最佳："
         f"decode {best.get('decode_tps', 0)} tok/s，"
-        f"prefill {best.get('prefill_tps', 0)} tok/s（{best['label']}）。"
+        f"prefill {best.get('prefill_tps', 0)} tok/s{reuse_text}（{best['label']}）。"
     )
     result["suggestions"] = {
         "args": best_args,
@@ -266,7 +272,11 @@ def main() -> int:
         "Q8 KV 通过 --kv-dtype q8_0 + Flash Attention 开启，上下文取 GGUF 最大值。",
         "线程数按 llama.cpp 文档取物理核心数，-ngl 由模型层数与可用显存估算。",
         "batch/ubatch 取文档建议的 2048/512，并与 512/512 做了实测对照。",
+        "保留引擎默认的前缀复用；从旧配置继承的 --no-cache-prompt 会被移除，避免每轮对话重新 prefill。",
     ])
+    note = common.reuse_note(best)
+    if note:
+        result["notes"].append(note)
     return finish("ok")
 
 

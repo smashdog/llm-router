@@ -10459,6 +10459,8 @@ class Gateway:
                     "id", "label", "ok", "args", "error", "context_used",
                     "decode_tps", "prefill_tps", "decode_tokens", "prefill_tokens",
                     "warmup_s", "decode_s", "prefill_s", "elapsed_s",
+                    "reuse_prompt_tokens", "reuse_cached_tokens", "reuse_ratio",
+                    "reuse_s", "reuse_prefill_tps",
                 )
                 job.setdefault("candidates", []).append(
                     {key: event[key] for key in fields if key in event}

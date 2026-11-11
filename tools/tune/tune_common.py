@@ -810,6 +810,7 @@ def chat_completion(
     messages: list[dict[str, Any]],
     max_tokens: int,
     timeout: float = 600.0,
+    template_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     body = {
         "model": model_id,
@@ -818,6 +819,8 @@ def chat_completion(
         "temperature": 0,
         "stream": False,
     }
+    if template_kwargs:
+        body["chat_template_kwargs"] = template_kwargs
     started = time.monotonic()
     data = http_json(base_url + "/v1/chat/completions", body, timeout=timeout)
     elapsed = max(0.001, time.monotonic() - started)
@@ -827,10 +830,25 @@ def chat_completion(
     message = (choices[0] or {}).get("message") if choices else {}
     text = message.get("content") if isinstance(message, dict) else ""
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    details = usage.get("prompt_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    timings = data.get("timings")
+    timings = timings if isinstance(timings, dict) else {}
+    # OpenAI's field first (polystrata, ninfer and llama.cpp all report it);
+    # llama.cpp's ``timings.cache_n`` is the same number on older builds.
+    cached = details.get("cached_tokens")
+    if cached is None:
+        cached = timings.get("cache_n")
+    try:
+        cached_tokens = max(0, int(cached or 0))
+    except (TypeError, ValueError):
+        cached_tokens = 0
     return {
         "text": text or "",
         "prompt_tokens": int(usage.get("prompt_tokens") or 0),
         "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "cached_tokens": cached_tokens,
+        "timings": timings,
         "elapsed_s": round(elapsed, 3),
     }
 
@@ -862,7 +880,7 @@ def benchmark(
     prefill_tokens: int = 2048,
     timeout: float = 600.0,
 ) -> dict[str, Any]:
-    """Measure decode and prefill; failures bubble up to the candidate record."""
+    """Measure decode, prefill and KV reuse; failures bubble up to the candidate."""
     warm = chat_completion(
         base_url, model_id,
         [{"role": "user", "content": "Reply with exactly: OK"}],
@@ -883,25 +901,76 @@ def benchmark(
         "decode_tokens": decode["completion_tokens"],
         "decode_s": decode["elapsed_s"],
     }
-    prefill = chat_completion(
-        base_url, model_id,
-        [{"role": "user", "content": long_prompt(prefill_tokens)}],
-        max_tokens=1, timeout=timeout,
-    )
+    long_messages = [{"role": "user", "content": long_prompt(prefill_tokens)}]
+    reuse_kwargs = {"enable_thinking": False, "preserve_thinking": True}
+    try:
+        prefill = chat_completion(
+            base_url, model_id, long_messages, max_tokens=1, timeout=timeout,
+            template_kwargs=reuse_kwargs,
+        )
+    except (EngineError, urllib.error.URLError, urllib.error.HTTPError,
+            TimeoutError, OSError, ValueError):
+        # A frontend that rejects chat_template_kwargs still gets a fair
+        # prefill measurement; the reuse probe below is simply skipped.
+        prefill = chat_completion(
+            base_url, model_id, long_messages, max_tokens=1, timeout=timeout,
+        )
+        reuse_kwargs = None
     prompt_tokens = prefill["prompt_tokens"]
     result.update({
         "prefill_tps": round(prompt_tokens / prefill["elapsed_s"], 2) if prompt_tokens else 0.0,
         "prefill_tokens": prompt_tokens,
         "prefill_s": prefill["elapsed_s"],
     })
+    # KV reuse probe: the next turn of the same conversation, not a repeat of
+    # the same prompt. strata-poly must re-evaluate the Query span of every
+    # request, so an identical repeat legitimately misses; a growing prompt
+    # lets the engine continue its live history (or resume a checkpoint) and
+    # report the tokens it did not read again. Thinking is disabled for the
+    # probe so the answer can be echoed back exactly: a template that strips
+    # past reasoning would otherwise break the token prefix itself.
+    answer = prefill["text"].strip()
+    reuse = None
+    if reuse_kwargs and answer:
+        try:
+            reuse = chat_completion(
+                base_url, model_id,
+                long_messages + [
+                    {"role": "assistant", "content": answer},
+                    {"role": "user", "content": "Summarize the text above in one short sentence."},
+                ],
+                max_tokens=1, timeout=timeout, template_kwargs=reuse_kwargs,
+            )
+        except (EngineError, urllib.error.URLError, urllib.error.HTTPError,
+                TimeoutError, OSError, ValueError):
+            reuse = None  # a probe miss must not discard the measurements above
+    if reuse is not None:
+        reuse_prompt = reuse["prompt_tokens"]
+        reuse_cached = min(reuse["cached_tokens"], reuse_prompt or reuse["cached_tokens"])
+        result.update({
+            "reuse_prompt_tokens": reuse_prompt,
+            "reuse_cached_tokens": reuse_cached,
+            "reuse_ratio": round(reuse_cached / reuse_prompt, 3) if reuse_prompt else 0.0,
+            "reuse_s": reuse["elapsed_s"],
+        })
+        processed = max(0, reuse_prompt - reuse_cached)
+        if processed:
+            result["reuse_prefill_tps"] = round(processed / reuse["elapsed_s"], 2)
     return result
 
 
 def score(candidate: dict[str, Any]) -> float:
-    """Decode first; prefill breaks ties within 2 percent."""
+    """Decode first; prefill breaks ties within 2 percent.
+
+    A candidate that re-prefills the next turn is demoted: the user's
+    conversation turns must reuse KV, not pay for the whole history again.
+    """
     decode = float(candidate.get("decode_tps") or 0.0)
     prefill = float(candidate.get("prefill_tps") or 0.0)
-    return decode + min(prefill, decode * 0.02) * 0.5
+    total = decode + min(prefill, decode * 0.02) * 0.5
+    if candidate.get("reuse_prompt_tokens") and candidate.get("reuse_cached_tokens") == 0:
+        total *= 0.5
+    return total
 
 
 def best_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -909,6 +978,23 @@ def best_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not usable:
         return None
     return max(usable, key=score)
+
+
+def reuse_note(candidate: dict[str, Any]) -> str | None:
+    """One human-readable line about the next-turn reuse probe."""
+    prompt = int(candidate.get("reuse_prompt_tokens") or 0)
+    if prompt <= 0:
+        return None
+    cached = int(candidate.get("reuse_cached_tokens") or 0)
+    if cached > 0:
+        return (
+            f"KV 复用实测：下一轮对话命中 {cached:,}/{prompt:,} token"
+            f"（{cached / prompt:.1%}），不会重新 prefill 整段历史。"
+        )
+    return (
+        "KV 复用实测未命中：下一轮对话仍从头 prefill；"
+        "请检查引擎的历史/前缀复用开关。"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -951,9 +1037,12 @@ def run_candidates(
             candidate.update(metrics)
             candidate["ok"] = True
             candidate.pop("error", None)
+            reuse_text = ""
+            if candidate.get("reuse_prompt_tokens"):
+                reuse_text = f"，KV 复用 {candidate.get('reuse_ratio', 0) * 100:.1f}%"
             progress(
                 f"{label}：decode {candidate['decode_tps']} tok/s，"
-                f"prefill {candidate.get('prefill_tps', 0)} tok/s"
+                f"prefill {candidate.get('prefill_tps', 0)} tok/s{reuse_text}"
             )
         except (EngineError, urllib.error.URLError, urllib.error.HTTPError,
                 TimeoutError, OSError, ValueError) as exc:

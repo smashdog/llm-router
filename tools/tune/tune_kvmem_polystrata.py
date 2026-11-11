@@ -149,6 +149,19 @@ def main() -> int:
     base = common.args_set(base, "--vram-reserve-mib", vram_reserve)
     base = common.args_set(base, "--threads", threads)
     base = common.args_set(base, "--kvmem-host-mib", host_mib)
+    # Without history reuse strata-poly resets the engine between requests and
+    # every chat turn re-reads the whole prompt. Keep it on (the engine also
+    # requires it for more than one retained session); fill the router's
+    # default session count when the config never chose one.
+    base = common.args_set_switch(base, "--kvmem-history-reuse", True)
+    if parse_int(common.args_value(base, "--kvmem-sessions")) is None:
+        base = common.args_set(base, "--kvmem-sessions", 4)
+    # Keep conversation checkpoints beside the live session. 0 leaves only an
+    # exact continuation reusable; a turn whose template drops earlier
+    # reasoning, or an edited history, would read from token 0 again.
+    prompt_cache = parse_int(common.args_value(base, "--prompt-cache"))
+    if prompt_cache is None or prompt_cache <= 0:
+        base = common.args_set(base, "--prompt-cache", 4)
     if common.args_value(base, "--kvmem-sink-tokens") is None:
         base = common.args_set(base, "--kvmem-sink-tokens", 64)
     if common.args_value(base, "--kvmem-recent-tokens") is None:
@@ -262,15 +275,21 @@ def main() -> int:
         ("vram_reserve_mib", "VRAM 预留（MiB）", "--vram-reserve-mib", "value"),
         ("window", "推测窗口", "--window", "value"),
         ("kvmem_mtp", "启用 MTP", "--kvmem-mtp", "switch"),
+        ("kvmem_history_reuse", "历史前缀复用", "--kvmem-history-reuse", "switch"),
+        ("kvmem_sessions", "保留会话数", "--kvmem-sessions", "value"),
+        ("prompt_cache", "对话检查点", "--prompt-cache", "value"),
         ("lookup", "历史查表", "--lookup", "value"),
         ("kvmem_block_tokens", "检索块 block", "--kvmem-block-tokens", "value"),
     ]
     changes = common.diff_params(original_args, best_args, specs)
+    reuse_text = ""
+    if best.get("reuse_prompt_tokens"):
+        reuse_text = f"，KV 复用 {best.get('reuse_ratio', 0) * 100:.1f}%"
     summary = (
         f"在 {hardware.get('vram_total_mib') or '?'} MiB 显存、"
         f"{hardware.get('ram_total_mib') or '?'} MiB 内存、"
         f"{cores} 个物理核心上测得最佳：decode {best.get('decode_tps', 0)} tok/s，"
-        f"prefill {best.get('prefill_tps', 0)} tok/s（{best['label']}）。"
+        f"prefill {best.get('prefill_tps', 0)} tok/s{reuse_text}（{best['label']}）。"
     )
     result["suggestions"] = {
         "args": best_args,
@@ -285,7 +304,12 @@ def main() -> int:
         "Q8 KV（--kv q8_0）按引擎文档减半 KV 显存；上下文取模型 GGUF 的最大值。",
         "B/R/batch/window 取自 recommended-config-performance.md，并结合本机显存与内存收敛。",
         f"CPU 线程使用物理核心数 {cores}（而不是逻辑线程数 {hardware.get('cpu_logical_cores')}）。",
+        "始终开启 --kvmem-history-reuse：否则 strata-poly 每个请求都会重置并从 token 0 重新 prefill。",
+        "保留对话检查点：--prompt-cache 为 0 或缺失时补齐为 4，分支/改写的历史可从检查点续读。",
     ])
+    note = common.reuse_note(best)
+    if note:
+        result["notes"].append(note)
     return finish("ok")
 
 
