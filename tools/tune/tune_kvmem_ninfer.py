@@ -148,7 +148,10 @@ def main() -> int:
             args = common.args_set(args, "--spec", "mtp")
             args = common.args_set(args, "--draft-tokens", 3)
         else:
-            args = common.args_remove(args, "--spec", "--adaptive-mtp")
+            # Dropping --spec lets some artifacts auto-pick MTP/DFlash; an
+            # explicit "none" is the only way to benchmark without drafting.
+            args = common.args_set(args, "--spec", "none")
+            args = common.args_remove(args, "--adaptive-mtp")
             args = common.args_remove(args, "--draft-tokens")
         return args
 

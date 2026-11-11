@@ -46,7 +46,9 @@ def variant(
     args = common.args_set(args, "--kvmem-gen-reserve", reserve)
     args = common.args_set(args, "--prompt-batch", batch)
     if mtp:
-        args = common.args_set_switch(args, "--kvmem-mtp", True)
+        # A config saved without MTP carries --no-draft; strata-poly refuses
+        # --kvmem-mtp while it is present, so the switch replaces both flags.
+        args = common.args_set_switch(args, "--kvmem-mtp", True, "--no-draft")
         args = common.args_set(args, "--window", window)
     else:
         args = common.args_set_switch(args, "--kvmem-mtp", False, "--no-draft")

@@ -678,17 +678,19 @@
   .tune-chip b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
   .tune-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
   .tune-item {
-    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    display: flex; flex-direction: column; gap: 5px; padding: 8px 10px;
     border: 1px solid var(--line-soft); border-radius: 8px;
     background: #0c121a; font-size: 12px; color: var(--muted);
   }
   .tune-item.ok { border-color: rgba(74, 222, 128, .20); }
   .tune-item.fail { border-color: rgba(251, 113, 133, .20); }
-  .tune-item .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-  .tune-item .metrics {
+  .tune-item-head { display: flex; align-items: center; gap: 8px; }
+  .tune-item-head .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .tune-item-line {
     color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
+  .tune-item.fail .tune-item-line { color: #fda4af; }
   .tune-diff { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
   .tune-diff-row {
     display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px;
@@ -4366,11 +4368,13 @@
       const metrics = ok
         ? `decode ${fmtTuneRate(item.decode_tps)} · prefill ${fmtTuneRate(item.prefill_tps)}`
           + (item.context_used ? ` · ctx ${Number(item.context_used).toLocaleString()}` : "")
-        : esc(String(item.error || "未完成").slice(0, 180));
+        : esc(String(item.error || "未完成").slice(0, 240));
       return `<div class="tune-item ${ok ? "ok" : "fail"}">
-        <span class="grow">${esc(item.label || item.id || "")}</span>
-        <span class="metrics">${metrics}</span>
-        <span class="tag ${ok ? "green" : "red"}">${ok ? "完成" : "失败"}</span>
+        <div class="tune-item-head">
+          <span class="grow">${esc(item.label || item.id || "")}</span>
+          <span class="tag ${ok ? "green" : "red"}">${ok ? "完成" : "失败"}</span>
+        </div>
+        <div class="tune-item-line">${metrics}</div>
       </div>`;
     }).join("");
   }
@@ -4386,11 +4390,15 @@
     if (progress.length) {
       const tail = progress.slice(-8);
       box.hidden = false;
-      box.innerHTML = tail.map((item, index) => `
-        <div class="progress-step ${index === tail.length - 1 && running ? "running" : "ok"}">
+      box.innerHTML = tail.map((item, index) => {
+        const failed = /失败/.test(item.message || "");
+        const state = index === tail.length - 1 && running ? "running" : failed ? "fail" : "ok";
+        return `
+        <div class="progress-step ${state}">
           <span class="sdot"></span>
           <span>${esc(item.message || "")}</span>
-        </div>`).join("");
+        </div>`;
+      }).join("");
     } else if (running) {
       box.hidden = false;
       box.innerHTML = `<div class="progress-step running"><span class="sdot"></span><span>${esc(job.message || "正在准备…")}</span></div>`;
