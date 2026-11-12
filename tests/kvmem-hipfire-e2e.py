@@ -154,7 +154,8 @@ record = {
         "HIPFIRE_KVMEM", "HIPFIRE_SERVE_MULTI_SLOT", "HIPFIRE_KV_MODE",
         "HIPFIRE_KVMEM_BUDGET_TOKENS", "HIPFIRE_SERVE_MULTI_SLOT_SLOTS",
         "HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK", "HIPFIRE_DAEMON_BIN",
-        "HIPFIRE_SPILL_DIR", "HIPFIRE_DEVICES",
+        "HIPFIRE_SPILL_DIR", "HIPFIRE_DEVICES", "HIPFIRE_SERVE_MAX_BATCH_TOKENS",
+        "HIPFIRE_FLASH_PARTIALS_BATCH",
     )},
 }
 with open(os.path.join(os.getcwd(), "starts.jsonl"), "a", encoding="utf-8") as fh:
@@ -515,6 +516,9 @@ try:
     assert env["HIPFIRE_KV_MODE"] == "q8", env
     assert env["HIPFIRE_KVMEM_BUDGET_TOKENS"] == "32768", env
     assert env["HIPFIRE_SERVE_MULTI_SLOT_SLOTS"] == "4", env
+    assert env["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "256", env
+    assert env["HIPFIRE_FLASH_PARTIALS_BATCH"] == "4", env
+    assert env["HIPFIRE_SERVE_MAX_BATCH_TOKENS"] is None, env
     assert env["HIPFIRE_DAEMON_BIN"] == str(fake_daemon_binary), env
     assert status()["active_model"] == model_id, status()
     assert daemon_pids(), "fake daemon child was not spawned"
@@ -528,6 +532,8 @@ try:
             "idle_timeout": 300,
             "slots": 2,
             "prefill_chunk": 2048,
+            "max_batch_tokens": 1024,
+            "flash_partials_batch": 4,
             "kvmem_budget": 16384,
             "kvmem_enable": True,
             "sink_blocks": 2,
@@ -550,6 +556,8 @@ try:
     assert updated["max_seq"] == 65536, updated
     assert updated["env"]["HIPFIRE_SERVE_MULTI_SLOT_SLOTS"] == "2", updated
     assert updated["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "2048", updated
+    assert updated["env"]["HIPFIRE_SERVE_MAX_BATCH_TOKENS"] == "1024", updated
+    assert updated["env"]["HIPFIRE_FLASH_PARTIALS_BATCH"] == "4", updated
     assert updated["env"]["HIPFIRE_KVMEM_BUDGET_TOKENS"] == "16384", updated
     assert updated["env"]["HIPFIRE_KVMEM"] == "1", updated
     assert updated["env"]["HIPFIRE_KVMEM_SINK_BLOCKS"] == "2", updated
@@ -561,6 +569,8 @@ try:
     assert last_start["spec"] == "ngram", last_start
     assert last_start["env"]["HIPFIRE_SERVE_MULTI_SLOT_SLOTS"] == "2", last_start
     assert last_start["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "2048", last_start
+    assert last_start["env"]["HIPFIRE_SERVE_MAX_BATCH_TOKENS"] == "1024", last_start
+    assert last_start["env"]["HIPFIRE_FLASH_PARTIALS_BATCH"] == "4", last_start
 
     # Clearing returns to router/engine defaults (ceiling --max-seq again).
     cleared = requests.post(url + "/router/params", json={
@@ -568,6 +578,7 @@ try:
         "engine_params": {
             "spec": None, "idle_timeout": None, "max_seq": None,
             "prefill_chunk": None, "spill_dir": None, "devices": None,
+            "max_batch_tokens": None, "flash_partials_batch": None,
         },
     }, timeout=20)
     assert cleared.status_code == 200, cleared.text
@@ -579,6 +590,8 @@ try:
     assert "--spec" not in cleared_args and "--idle-timeout" not in cleared_args, cleared_args
     assert "max_seq" not in cleared_cfg, cleared_cfg
     assert "HIPFIRE_SPILL_DIR" not in cleared_cfg.get("env", {}), cleared_cfg
+    assert "HIPFIRE_SERVE_MAX_BATCH_TOKENS" not in cleared_cfg.get("env", {}), cleared_cfg
+    assert "HIPFIRE_FLASH_PARTIALS_BATCH" not in cleared_cfg.get("env", {}), cleared_cfg
     assert starts()[-1]["max_seq"] == "262144", starts()[-1]
     for bad, needle in (
         ({"bogus": 1}, "unknown engine parameter"),
@@ -704,7 +717,8 @@ try:
     keys = {spec["key"] for spec in schema}
     assert {"max_seq", "slots", "idle_timeout", "spec", "kvmem_enable",
             "kvmem_budget", "paged_pages", "sink_blocks", "recent_blocks",
-            "spill_dir", "spill_bytes", "prefill_chunk", "devices"} <= keys, keys
+            "spill_dir", "spill_bytes", "prefill_chunk", "devices",
+            "max_batch_tokens", "flash_partials_batch"} <= keys, keys
     groups = {spec["group"] for spec in schema}
     assert groups == {"basic", "spec", "kvmem", "spill", "advanced"}, groups
     assert "kvmem_hipfire" in manage["param_schema"], manage["param_schema"].keys()
@@ -810,7 +824,7 @@ try:
     assert surface["engineHidden"] is True, surface
     assert surface["kvmemTabHidden"] is False, surface
     assert surface["kvmemCount"] == "5" and surface["kvmemFields"] == 5, surface
-    assert surface["moreFields"] == 9, surface
+    assert surface["moreFields"] == 11, surface
     assert surface["budget"] == "16384", surface
     assert surface["enable"] == "true", surface
     assert surface["sink"] == "2" and surface["recent"] == "3", surface
@@ -869,7 +883,7 @@ try:
     assert form["kvmemBlank"] is True, form
     assert form["budgetHint"] == "32768", form
     assert form["spec"] == "auto", form
-    assert form["moreFields"] == 9, form
+    assert form["moreFields"] == 11, form
     assert "HFQM" in form["hint"], form
     assert "hipfire" in form["caption"], form
     assert "KVMem + hipfire" in form["defaults"], form
@@ -933,15 +947,15 @@ try:
     assert tune_job["status"] == "ok", tune_job.get("error")
     assert tune_job["restored"] is True, tune_job
     suggestions = tune_job["suggestions"]
-    assert suggestions["engine_params"] == {"spec": "auto", "prefill_chunk": 1024}, suggestions
-    assert suggestions["best_candidate"] == "spec-auto-chunk-1024", suggestions
+    assert suggestions["engine_params"] == {"spec": "auto", "prefill_chunk": 128}, suggestions
+    assert suggestions["best_candidate"] == "spec-auto-chunk-128", suggestions
     assert suggestions["kv"] == "q8" and suggestions["context_length"] == 262144, suggestions
     assert isinstance(suggestions["params"], list), suggestions
     cands = tune_job["candidates"]
     assert len(cands) == 8 and all(item.get("ok") for item in cands), cands
     expected_ids = {
         f"spec-{spec}-chunk-{chunk}"
-        for spec in ("auto", "mtp", "ngram", "off") for chunk in (1024, 2048)
+        for spec in ("auto", "mtp", "ngram", "off") for chunk in (128, 256)
     }
     assert {item["id"] for item in cands} == expected_ids, cands
     # The worker preloads the model after the script exits, so the newest
@@ -954,22 +968,22 @@ try:
     assert {
         (item["spec"], item["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"])
         for item in tune_starts
-    } == {(spec, str(chunk)) for spec in ("auto", "mtp", "ngram", "off") for chunk in (1024, 2048)}, tune_starts
+    } == {(spec, str(chunk)) for spec in ("auto", "mtp", "ngram", "off") for chunk in (128, 256)}, tune_starts
     apply_resp = requests.post(
         url + "/router/models/tune/apply", json={"job": tune_job["id"]}, timeout=30
     )
     assert apply_resp.status_code == 200, apply_resp.text
     applied = apply_resp.json()
     assert applied["engine_params"]["spec"] == "auto", applied
-    assert applied["engine_params"]["prefill_chunk"] == 1024, applied
+    assert applied["engine_params"]["prefill_chunk"] == 128, applied
     tuned_cfg = read_json(Path(models()[model_id]["config_path"]))
     assert "--spec" in tuned_cfg["args"], tuned_cfg
     assert tuned_cfg["args"][tuned_cfg["args"].index("--spec") + 1] == "auto", tuned_cfg
-    assert tuned_cfg["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "1024", tuned_cfg
+    assert tuned_cfg["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "128", tuned_cfg
     wait_idle()
     relaunched = starts()[-1]
     assert relaunched["spec"] == "auto", relaunched
-    assert relaunched["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "1024", relaunched
+    assert relaunched["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "128", relaunched
     assert status()["engines"]["kvmem_hipfire"]["alive"] is True
     # Stop everything again: nothing may stay resident after the tune test.
     unloaded = requests.post(url + "/models/unload", json={"model": model_id}, timeout=20)

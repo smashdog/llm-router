@@ -1267,8 +1267,20 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
     _hipfire_engine_spec(
         "prefill_chunk", "Prefill 分块行数", "advanced", "integer",
         env="HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK",
-        default=1024, low=1, step=1,
-        note="tune 候选 1024/2048",
+        default=256, low=1, step=1,
+        note="tune 候选 128/256；scratch 显存 = 分块行数 × 槽位，27B+draft 在 20 GiB 卡需 ≤256",
+    ),
+    _hipfire_engine_spec(
+        "max_batch_tokens", "批行预算（tokens）", "advanced", "integer",
+        env="HIPFIRE_SERVE_MAX_BATCH_TOKENS",
+        low=1, step=1,
+        note="每步 prefill/verify 批行节流上限；须 ≤ 分块行数×槽位，留空由引擎自动钳制到 scratch 容量",
+    ),
+    _hipfire_engine_spec(
+        "flash_partials_batch", "Flash 批乘数", "advanced", "integer",
+        env="HIPFIRE_FLASH_PARTIALS_BATCH",
+        default=4, low=1, high=65536, step=1,
+        note="flash-attention partials 显存 ≈ 上下文上限 × 此值；小显存卡用 4（decode 下限），留空引擎默认（gfx1100 为 32）",
     ),
     _hipfire_engine_spec(
         "devices", "GPU 设备", "advanced", "string",
@@ -7887,6 +7899,21 @@ class EngineManager:
             env.setdefault("HIPFIRE_KV_MODE", "q8")
             env.setdefault("HIPFIRE_KVMEM_BUDGET_TOKENS", "32768")
             env.setdefault("HIPFIRE_SERVE_MULTI_SLOT_SLOTS", "4")
+            # Multi-slot prefill scratch (pbs) is sized by
+            # prefill_chunk × n_slots rows, NOT by serve.max_batch_tokens
+            # (that is only a per-step trunk-row throttle). The flash-attention
+            # partials buffer scales with the context ceiling (262144 here),
+            # and the DFlash2 draft allocates a ~0.5 GiB windowed scratch on
+            # the first spec step. On a 20 GiB card a 27B MQ4 model only fits
+            # all three beside the paged KV arenas at 256×4 = 1024 scratch
+            # rows and a flash batch multiplier of 4 (the decode-term floor).
+            env.setdefault("HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK", "256")
+            env.setdefault("HIPFIRE_FLASH_PARTIALS_BATCH", "4")
+            # serve.max_batch_tokens is deliberately left unset: the CLI
+            # auto-clamps its built-in default to the scratch capacity
+            # (prefill_chunk×slots), but strictly refuses an explicit value
+            # larger than that capacity. Setting a fixed default here would
+            # break whenever an operator lowers prefill_chunk or slots.
         extra = self.cfg.get("env")
         if isinstance(extra, dict):
             env.update({str(k): str(v) for k, v in extra.items()})
@@ -16042,6 +16069,10 @@ def main(argv: list[str] | None = None) -> int:
         config_path = base_dir / config_path
     config = load_config(config_path)
     log = setup_logging(base_dir, config)
+    # Rename legacy slots before anything derives from the config: the model
+    # registry scans config["engines"] and the runtime engine map is keyed by
+    # slot id, so migrating inside Gateway alone would leave both on old ids.
+    migrate_legacy_engine_ids(config, config_path, log)
     registry = Registry(config, base_dir, log)
     if args.check:
         params = SamplingStore(

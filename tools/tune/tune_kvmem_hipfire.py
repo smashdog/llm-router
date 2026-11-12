@@ -137,13 +137,18 @@ def main() -> int:
     env.setdefault("HIPFIRE_KV_MODE", "q8")
     env.setdefault("HIPFIRE_KVMEM_BUDGET_TOKENS", "32768")
     env.setdefault("HIPFIRE_SERVE_MULTI_SLOT_SLOTS", "4")
+    env.setdefault("HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK", "256")
+    env.setdefault("HIPFIRE_FLASH_PARTIALS_BATCH", "4")
     env.setdefault("HIPFIRE_DAEMON_BIN", str(daemon))
     budget = parse_int(env.get("HIPFIRE_KVMEM_BUDGET_TOKENS")) or 32768
     slots = parse_int(env.get("HIPFIRE_SERVE_MULTI_SLOT_SLOTS")) or 4
 
     mtp_layers = int(info.get("mtp_layers") or 0)
     spec_modes = ["auto"] + (["mtp"] if mtp_layers > 0 else []) + ["ngram", "off"]
-    chunks = (1024, 2048)
+    # Scratch rows = prefill_chunk × slots; 128/256 keep a 27B MQ4 model
+    # plus its DFlash2 draft scratch within a 20 GiB card beside the paged
+    # KV arenas and the context-ceiling-scaled flash partials.
+    chunks = (128, 256)
 
     common.progress("按 HFQM 元数据与 hipfire 文档生成候选参数…", 10)
     # Router-owned flags never belong to the per-candidate argv; --spec is
@@ -215,7 +220,7 @@ def main() -> int:
             "key": "spec", "label": "投机解码",
             "before": before_spec, "after": after_spec,
         })
-    if (before_chunk if before_chunk is not None else 1024) != after_chunk:
+    if (before_chunk if before_chunk is not None else 256) != after_chunk:
         changes.append({
             "key": "prefill_chunk", "label": "Prefill 分块行数",
             "before": before_chunk, "after": after_chunk,
@@ -242,7 +247,7 @@ def main() -> int:
     result["notes"].extend([
         f"上下文取 {context:,}（配置 max_seq 优先，否则 HFQM 训练上限）；"
         f"K/V 固定 q8，KVMem 预算 {budget:,} tokens、{slots} 槽位沿用模型配置，不参与候选。",
-        "prefill 分块候选 1024/2048（HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK）。",
+        "prefill 分块候选 128/256（HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK）；scratch 行数 = 分块 × 槽位。",
         "评分以 decode 优先，prefill 在 2% 内破平；下一轮 KV 复用未命中的候选会被降权。",
     ])
     note = common.reuse_note(best)
