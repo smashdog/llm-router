@@ -247,15 +247,15 @@ config = {
     "smoke_image": "smoke.png",
     "console": {"enabled": True, "root": str(ROOT / "console"), "file": "index.html"},
     "engines": {
-        "kvmem": {
-            "kind": "kvmem",
+        "kvmem_polystrata": {
+            "kind": "kvmem_polystrata",
             "host": "127.0.0.1",
             "port": free_port(),
             "cwd": str(kv_dir),
             "command": [str(kv_binary), "--config", "{config}", "--host", "{host}", "--port", "{port}"],
             "start_timeout_s": 8,
             "log_path": "logs/kvmem.log",
-            "models": {"kind": "kvmem_dir", "dir": str(kv_models)},
+            "models": {"kind": "kvmem_polystrata_dir", "dir": str(kv_models)},
         },
         "strata": {
             "kind": "strata",

@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 spec = importlib.util.spec_from_file_location("llm_router", ROOT / "router.py")
 router = importlib.util.module_from_spec(spec)
 sys.modules["llm_router"] = router

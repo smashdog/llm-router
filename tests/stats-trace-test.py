@@ -23,7 +23,7 @@ class FakeGateway:
         self.stats = router.RequestStats()
 
 
-entry = SimpleNamespace(id="ornith", engine="kvmem", context_length=262144)
+entry = SimpleNamespace(id="ornith", engine="kvmem_polystrata", context_length=262144)
 checks = 0
 
 
@@ -77,7 +77,7 @@ feed_sse(trace, [
 trace.flush()
 trace.commit()
 last = gateway.stats.view()["last"]
-assert last["model"] == "ornith" and last["engine"] == "kvmem", last
+assert last["model"] == "ornith" and last["engine"] == "kvmem_polystrata", last
 assert last["prompt_tokens"] == 25038, last
 assert last["completion_tokens"] == 1827, last
 assert last["total_tokens"] == 26865, last

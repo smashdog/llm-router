@@ -1384,9 +1384,9 @@
     const manage = state.manage || {};
     const schema = kind === "strata"
       ? manage.strata_engine_schema
-      : kind === "kvmem"
+      : kind === "kvmem_polystrata"
         ? manage.kvmem_poly_engine_schema
-        : kind === "ninfer"
+        : kind === "kvmem_ninfer"
           ? manage.ninfer_engine_schema
           : manage.kvmem_engine_schema;
     return Array.isArray(schema) ? schema : [];
@@ -1401,13 +1401,13 @@
   }
 
   function kvmemFamily(kind) {
-    return kind === "strata" || kind === "kvmem" || kind === "ninfer" || kind === "kvmem_llama";
+    return kind === "strata" || kind === "kvmem_polystrata" || kind === "kvmem_ninfer" || kind === "kvmem_llama";
   }
 
   function kvmemEngineTitle(kind) {
     if (kind === "strata") return "Strata";
-    if (kind === "kvmem") return "strata-poly";
-    if (kind === "ninfer") return "ninfer-serve";
+    if (kind === "kvmem_polystrata") return "strata-poly";
+    if (kind === "kvmem_ninfer") return "ninfer-serve";
     return "llama-kvmem-server";
   }
 
@@ -3191,7 +3191,7 @@
 
   async function unloadModel(id) {
     const model = state.models.find((m) => m.id === id) || {};
-    const single = model.engine === "ninfer" || model.engine === "kvmem_llama" || model.engine === "strata";
+    const single = model.engine === "kvmem_ninfer" || model.engine === "kvmem_llama" || model.engine === "strata";
     const ok = await askConfirm(
       "卸载模型",
       single
@@ -3203,7 +3203,7 @@
     if (ok) await mutate("/models/unload", { model: id }, `已请求卸载 ${id}`);
   }
 
-  const EDIT_ENGINE_KINDS = ["llama", "kvmem", "ninfer", "kvmem_llama", "strata"];
+  const EDIT_ENGINE_KINDS = ["llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata"];
 
   function paramsEngineInfo() {
     const slot = $("params-engine-slot").value;
@@ -3221,7 +3221,7 @@
   }
 
   function paramsVisionText(kind) {
-    return kind === "ninfer" ? "" : String($("params-vision-path").value || "").trim();
+    return kind === "kvmem_ninfer" ? "" : String($("params-vision-path").value || "").trim();
   }
 
   function paramsDraftText(kind) {
@@ -3238,7 +3238,7 @@
     if (engineSlot !== original.engineSlot) return true;
     if (paramsModelPathText($("params-model-path").value) !== original.modelPath) return true;
     if (kind === "strata" && paramsDraftText(kind) !== original.draftPath) return true;
-    if (kind === "ninfer") {
+    if (kind === "kvmem_ninfer") {
       if ($("params-vision-enabled").checked !== original.visionEnabled) return true;
     } else if (paramsVisionText(kind) !== original.visionPath) {
       return true;
@@ -3296,9 +3296,9 @@
   }
 
   function setParamsVisionText(kind) {
-    const ninfer = kind === "ninfer";
+    const ninfer = kind === "kvmem_ninfer";
     const strata = kind === "strata";
-    const kv = kind === "kvmem";
+    const kv = kind === "kvmem_polystrata";
     const kvllama = kind === "kvmem_llama";
     $("params-vision-caption").textContent = ninfer
       ? "内嵌视觉塔 · 修改后重新验证"
@@ -3337,7 +3337,7 @@
     const engine = paramsEngineInfo();
     if (!engine) return;
     const kind = engine.kind;
-    const hasVision = kind === "ninfer"
+    const hasVision = kind === "kvmem_ninfer"
       ? $("params-vision-enabled").checked
       : !!String($("params-vision-path").value || "").trim();
     const previous = $("params-more").dataset.hasVision === "true";
@@ -3358,13 +3358,13 @@
   }
 
   function setParamsKindHint(kind, preset) {
-    $("params-hint").textContent = kind === "ninfer"
+    $("params-hint").textContent = kind === "kvmem_ninfer"
       ? "NInfer：repetition_penalty 只能为 1（提交时清空），不支持 repeat_last_n；模型路径必须是 .ninfer，视觉塔内嵌在模型里；改引擎或路径会重新验证，失败自动恢复旧配置。"
       : kind === "kvmem_llama"
         ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；改动上下文或 K/V 精度会重新验证；改引擎或路径同样重新验证，失败自动恢复旧配置。"
         : kind === "strata"
           ? "Strata：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n（≥ 1）；引擎与视觉参数在“更多参数”，draft 路径在上方可改；改引擎或路径会重新验证，失败自动恢复旧配置。"
-          : kind === "kvmem"
+          : kind === "kvmem_polystrata"
             ? "KVMem：top_k 为 1–64；repeat_last_n 映射为 penalty_last_n（≥ 1）；strata-poly 进程参数在“更多参数”，KVMem 扩展在“kvmem参数”；改引擎或路径会重新验证，失败自动恢复旧配置。"
             : preset
               ? "llama.cpp：top_k 为 0–1000；repeat_last_n 可为 -1（使用上下文长度）；改动上下文或 KV 精度会重启引擎；改引擎或路径会重新验证，失败自动恢复旧配置。"
@@ -3375,9 +3375,9 @@
     const opts = options || {};
     const kind = engine ? engine.kind : "llama";
     const form = $("params-form");
-    const kv = kind === "kvmem";
+    const kv = kind === "kvmem_polystrata";
     const strata = kind === "strata";
-    const ninfer = kind === "ninfer";
+    const ninfer = kind === "kvmem_ninfer";
     const kvllama = kind === "kvmem_llama";
     const llama = kind === "llama";
     const kvlike = kv || strata;
@@ -3471,10 +3471,10 @@
     const engineVision = !!(engine.defaults && engine.defaults.vision);
     const visionEnabled = backToOriginal
       ? paramsOriginal.visionEnabled
-      : kind === "ninfer" ? (!!visionPath || engineVision) : false;
+      : kind === "kvmem_ninfer" ? (!!visionPath || engineVision) : false;
     const hasVision = backToOriginal
-      ? (kind === "ninfer" ? paramsOriginal.visionEnabled : !!paramsOriginal.visionPath)
-      : kind === "ninfer" ? visionEnabled : !!visionPath;
+      ? (kind === "kvmem_ninfer" ? paramsOriginal.visionEnabled : !!paramsOriginal.visionPath)
+      : kind === "kvmem_ninfer" ? visionEnabled : !!visionPath;
     const visionGpu = backToOriginal
       ? paramsOriginal.visionGpu
       : !!(engine.defaults && engine.defaults.vision_gpu);
@@ -3490,7 +3490,7 @@
       samplingValues: backToOriginal ? (model.params || null) : readParamsSamplingValues(paramsRenderedKind),
       engineValues: backToOriginal ? (model.engine_params || null) : (engine.engine_params || null),
     });
-    $("params-model-path").placeholder = kind === "ninfer"
+    $("params-model-path").placeholder = kind === "kvmem_ninfer"
       ? "/path/to/model.ninfer" : "/path/to/model.gguf 或模型目录";
     $("params-error").hidden = true;
     $("params-error").textContent = "";
@@ -3509,7 +3509,7 @@
       }
     }
     paramsModel = model.id;
-    $("params-tune").hidden = !["kvmem", "ninfer", "kvmem_llama"].includes(model.engine);
+    $("params-tune").hidden = !["kvmem_polystrata", "kvmem_ninfer", "kvmem_llama"].includes(model.engine);
     paramsOriginal = null;
     paramsRenderedKind = null;
     paramsEditJob = null;
@@ -3559,7 +3559,7 @@
     select.value = slot;
     if (!select.value && select.options.length) select.selectedIndex = 0;
     $("params-model-path").value = model.model_path || "";
-    $("params-model-path").placeholder = originalKind === "ninfer"
+    $("params-model-path").placeholder = originalKind === "kvmem_ninfer"
       ? "/path/to/model.ninfer" : "/path/to/model.gguf 或模型目录";
     $("params-vision-path").value = model.vision_path || "";
     $("params-draft-path").value = model.draft_path || "";
@@ -3569,7 +3569,7 @@
         ? (model.context_length == null ? "" : String(model.context_length))
         : "";
     const initialVisionEnabled = model.multimodal === true;
-    const initialHasVision = originalKind === "ninfer"
+    const initialHasVision = originalKind === "kvmem_ninfer"
       ? initialVisionEnabled
       : !!String(model.vision_path || "").trim();
     renderParamsKind(paramsEngineMap[select.value] || paramsEngineMap[slot], {
@@ -3692,7 +3692,7 @@
       $("params-model-path").focus();
       return;
     }
-    if (kind === "ninfer" && !/\.ninfer$/i.test(modelPath)) {
+    if (kind === "kvmem_ninfer" && !/\.ninfer$/i.test(modelPath)) {
       showParamsError("NInfer 模型路径必须是 .ninfer 文件。");
       return;
     }
@@ -3705,7 +3705,7 @@
         return;
       }
     }
-    if (kind === "ninfer") {
+    if (kind === "kvmem_ninfer") {
       values.repetition_penalty = null;
       values.repeat_last_n = null;
     }
@@ -3727,7 +3727,7 @@
       display_name: $("params-name-input").value.trim(),
     };
     const visionDevice = (document.querySelector('input[name="params-vision-device"]:checked') || {}).value || "cpu";
-    if (kind === "ninfer") {
+    if (kind === "kvmem_ninfer") {
       body.vision = null;
       body.vision_enabled = $("params-vision-enabled").checked;
     } else {
@@ -3763,13 +3763,13 @@
         body.cache_type_v = cacheV;
       }
     }
-    if (kind === "ninfer") {
+    if (kind === "kvmem_ninfer") {
       let advanced;
       try {
         advanced = Object.assign(
           {},
-          readKvmemEngine($("params-more"), "ninfer", "engine"),
-          readKvmemEngine($("params-kvmem"), "ninfer"),
+          readKvmemEngine($("params-more"), "kvmem_ninfer", "engine"),
+          readKvmemEngine($("params-kvmem"), "kvmem_ninfer"),
         );
       } catch (error) {
         showParamsError(error.message);
@@ -3818,13 +3818,13 @@
       }
       if (Object.keys(advanced).length) body.engine_params = advanced;
     }
-    if (kind === "kvmem") {
+    if (kind === "kvmem_polystrata") {
       let advanced;
       try {
         advanced = Object.assign(
           {},
-          readKvmemEngine($("params-more"), "kvmem", "engine"),
-          readKvmemEngine($("params-kvmem"), "kvmem"),
+          readKvmemEngine($("params-more"), "kvmem_polystrata", "engine"),
+          readKvmemEngine($("params-kvmem"), "kvmem_polystrata"),
         );
       } catch (error) {
         showParamsError(error.message);
@@ -3929,9 +3929,9 @@
       input.value = value == null ? "" : value;
     }
     const kind = engine ? engine.kind : "";
-    const kv = kind === "kvmem";
+    const kv = kind === "kvmem_polystrata";
     const strata = kind === "strata";
-    const ninfer = kind === "ninfer";
+    const ninfer = kind === "kvmem_ninfer";
     const kvllama = kind === "kvmem_llama";
     const kvlike = kv || strata;
     const tuneEligible = kv || ninfer || kvllama;
@@ -3997,7 +3997,7 @@
     renderKvmemEngine(
       $("add-kvmem"), $("add-kvmem-count"), $("add-kvmem-hint"),
       engine ? engine.engine_params || null : null,
-      kv ? "kvmem" : strata ? "strata" : ninfer ? "ninfer" : "kvmem_llama",
+      kv ? "kvmem_polystrata" : strata ? "strata" : ninfer ? "kvmem_ninfer" : "kvmem_llama",
     );
     renderEngineMore(
       $("add-more"), $("add-more-count"), $("add-more-hint"),
@@ -4188,13 +4188,13 @@
       vision_device: (document.querySelector('input[name="add-vision-device"]:checked') || {}).value || "cpu",
       smoke: $("add-smoke").checked,
     };
-    if (engineInfo.kind === "kvmem" || engineInfo.kind === "ninfer" || engineInfo.kind === "kvmem_llama") {
+    if (engineInfo.kind === "kvmem_polystrata" || engineInfo.kind === "kvmem_ninfer" || engineInfo.kind === "kvmem_llama") {
       body.tune = $("add-tune").checked;
     }
     if (engineInfo.kind === "strata") {
       body.draft = $("add-draft").value.trim() || null;
     }
-    if (engineInfo.kind === "ninfer") {
+    if (engineInfo.kind === "kvmem_ninfer") {
       if (!/\.ninfer$/i.test(model)) {
         showAddError("NInfer 模型路径必须是 .ninfer 文件。");
         return;
@@ -4205,8 +4205,8 @@
       try {
         engineParams = Object.assign(
           {},
-          readKvmemEngine($("add-more"), "ninfer", "engine"),
-          readKvmemEngine($("add-kvmem"), "ninfer"),
+          readKvmemEngine($("add-more"), "kvmem_ninfer", "engine"),
+          readKvmemEngine($("add-kvmem"), "kvmem_ninfer"),
         );
       } catch (error) {
         showAddError(error.message);
@@ -4281,13 +4281,13 @@
       }
       if (Object.keys(advanced).length) body.engine_params = advanced;
     }
-    if (engineInfo.kind === "kvmem") {
+    if (engineInfo.kind === "kvmem_polystrata") {
       let engineParams;
       try {
         engineParams = Object.assign(
           {},
-          readKvmemEngine($("add-more"), "kvmem", "engine"),
-          readKvmemEngine($("add-kvmem"), "kvmem"),
+          readKvmemEngine($("add-more"), "kvmem_polystrata", "engine"),
+          readKvmemEngine($("add-kvmem"), "kvmem_polystrata"),
         );
       } catch (error) {
         showAddError(error.message);

@@ -1,107 +1,52 @@
 #!/usr/bin/env python3
-"""Mock gateway for the engine management / add-model UI test."""
+"""Mock gateway for the engine provisioning / add-model UI test.
+
+Serves the current console against a fake /router/setup payload (toolchains,
+install-product engine cards, setup jobs and proxy switches) plus the
+/router/models/manage data used by the two-column add-model picker.  Engine
+slot ids use the renamed kvmem_polystrata / kvmem_ninfer names; install-product
+ids (llama / strata / kvmem) are unchanged.
+"""
 from __future__ import annotations
 
 import json
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 PORT = 18097
-
-FIELDS = {
-    "llama": {
-        "binary": "/mnt/ai/llm/llama.cpp/build/bin/llama-server",
-        "cwd": "/mnt/ai/llm/llama.cpp",
-        "models_dir": "/mnt/ai/llm/llm-router/models",
-        "preset": "/mnt/ai/llm/llm-router/models.ini",
-    },
-    "kvmem_llama": {
-        "binary": "/mnt/ai/llm/kvmem-llamacpp090/build-hip/bin/llama-kvmem-server",
-        "cwd": "/mnt/ai/llm/kvmem-llamacpp090",
-        "models_dir": "/mnt/ai/llm/llm-router/models-kvmem-llama",
-        "template": "/mnt/ai/llm/llm-router/models-kvmem-llama/kvmem-llama.template.json",
-    },
-    "kvmem": {
-        "binary": "/mnt/ai/llm/kvmem/.venv/bin/python",
-        "cwd": "/mnt/ai/llm/kvmem/backends/polystrata",
-        "models_dir": "/mnt/ai/llm/kvmem/local_config",
-        "meta": "/mnt/ai/llm/kvmem/local_config/models.json",
-    },
-    "ninfer": {
-        "binary": "/mnt/ai/llm/build-ninfer/apps/ninfer-serve",
-        "cwd": "/mnt/ai/llm/kvmem",
-        "models_dir": "/mnt/ai/llm/kvmem/local_config",
-        "template": "/mnt/ai/llm/kvmem/local_config/ninfer.template.json",
-    },
-}
-
-DEFAULTS = {
-    "llama": dict(FIELDS["llama"]),
-    "kvmem_llama": dict(FIELDS["kvmem_llama"]),
-    "kvmem": dict(FIELDS["kvmem"]),
-    "ninfer": dict(FIELDS["ninfer"]),
-}
-
-
-def path_items() -> list[dict]:
-    def item(engine, category, name, label, configured, running, restart, models, warning=None):
-        return {
-            "engine": engine,
-            "category": category,
-            "name": name,
-            "label": label,
-            "kind": engine,
-            "configured": configured,
-            "running": running,
-            "needs_restart": restart,
-            "fields": dict(FIELDS[engine]) if configured else {k: "" for k in FIELDS[engine]},
-            "defaults": DEFAULTS[engine],
-            "models": models,
-            "warning": warning,
-            "address": {
-                "llama": "127.0.0.1:18080",
-                "kvmem_llama": "127.0.0.1:18083",
-                "kvmem": "127.0.0.1:18081",
-                "ninfer": "127.0.0.1:18082",
-            }[engine],
-        }
-
-    return [
-        item("llama", "llama.cpp", "llama.cpp", "llama.cpp", True, True, False, 5),
-        item("kvmem_llama", "kvmem", "llama.cpp", "KVMem + llama.cpp", True, True, True, 2),
-        item("kvmem", "kvmem", "polystrata", "KVMem（polystrata）", True, False, False, 3),
-        item("ninfer", "kvmem", "ninfer", "NInfer（KVMem）", False, False, False, 0),
-    ]
-
 
 MANAGE_ENGINES = {
     "llama": {
         "engine": "llama", "kind": "llama", "label": "llama.cpp",
         "category": "llama.cpp", "name": "llama.cpp",
-        "models_dir": FIELDS["llama"]["models_dir"], "preset": FIELDS["llama"]["preset"],
+        "models_dir": "/mnt/ai/llm/llm-router/models",
+        "preset": "/mnt/ai/llm/llm-router/models.ini",
         "cache_types": ["q8_0", "f16", "f32"], "defaults": {},
         "default_params": {"temperature": 0.7},
     },
     "kvmem_llama": {
         "engine": "kvmem_llama", "kind": "kvmem_llama", "label": "KVMem + llama.cpp",
         "category": "kvmem", "name": "llama.cpp",
-        "models_dir": FIELDS["kvmem_llama"]["models_dir"],
-        "template": FIELDS["kvmem_llama"]["template"],
+        "models_dir": "/mnt/ai/llm/llm-router/models-kvmem-llama",
+        "template": "/mnt/ai/llm/llm-router/models-kvmem-llama/kvmem-llama.template.json",
         "cache_types": ["q8_0", "f16"], "defaults": {"vision_gpu": False},
         "default_params": {},
     },
-    "kvmem": {
-        "engine": "kvmem", "kind": "kvmem", "label": "KVMem（polystrata）",
+    "kvmem_polystrata": {
+        "engine": "kvmem_polystrata", "kind": "kvmem_polystrata",
+        "label": "KVMem + polystrata",
         "category": "kvmem", "name": "polystrata",
-        "models_dir": FIELDS["kvmem"]["models_dir"], "template": None,
+        "models_dir": "/mnt/ai/llm/kvmem/local_config", "template": None,
         "defaults": {"vision_gpu": False}, "default_params": {},
     },
-    "ninfer": {
-        "engine": "ninfer", "kind": "ninfer", "label": "NInfer（KVMem）",
+    "kvmem_ninfer": {
+        "engine": "kvmem_ninfer", "kind": "kvmem_ninfer", "label": "KVMem + ninfer",
         "category": "kvmem", "name": "ninfer",
-        "models_dir": FIELDS["ninfer"]["models_dir"], "template": FIELDS["ninfer"]["template"],
+        "models_dir": "/mnt/ai/llm/kvmem/local_config",
+        "template": "/mnt/ai/llm/kvmem/local_config/ninfer.template.json",
         "defaults": {"vision": False, "vision_gpu": False}, "default_params": {},
     },
 }
@@ -112,10 +57,10 @@ STATUS = {
                   "pid": 41001, "model": "Qwen3-8B", "started_at": "2026-11-06T10:00:00+08:00"},
         "kvmem_llama": {"kind": "kvmem_llama", "alive": True, "host": "127.0.0.1", "port": 18083,
                         "pid": 41002, "model": "Gemma-3-27B", "started_at": "2026-11-06T10:02:00+08:00"},
-        "kvmem": {"kind": "kvmem", "alive": False, "host": "127.0.0.1", "port": 18081,
-                  "pid": None, "model": None, "started_at": None},
-        "ninfer": {"kind": "ninfer", "alive": False, "host": "127.0.0.1", "port": 18082,
-                   "pid": None, "model": None, "started_at": None},
+        "kvmem_polystrata": {"kind": "kvmem_polystrata", "alive": False, "host": "127.0.0.1",
+                             "port": 18081, "pid": None, "model": None, "started_at": None},
+        "kvmem_ninfer": {"kind": "kvmem_ninfer", "alive": False, "host": "127.0.0.1",
+                         "port": 18082, "pid": None, "model": None, "started_at": None},
     },
     "active_engine": "llama",
     "active_model": "Qwen3-8B",
@@ -123,63 +68,124 @@ STATUS = {
     "async_operation": None,
 }
 
+SETUP_ENGINES = [
+    {
+        "engine": "llama", "label": "llama.cpp", "state": "built",
+        "source": "github.com/ggml-org/llama.cpp",
+        "dir": "/mnt/ai/llm/llm-router-new/engine/llama.cpp",
+        "repo": {"version": "b7220"},
+        "variants": {"rocm": {"binaries": [{"name": "llama-server", "exists": True}]}},
+        "deps": [], "notes": [],
+    },
+    {
+        "engine": "strata", "label": "Strata", "state": "built",
+        "source": "github.com/ornith-ai/strata",
+        "dir": "/mnt/ai/llm/llm-router-new/engine/Strata",
+        "repo": {"version": "0.1.57"},
+        "variants": {"rocm": {"binaries": [{"name": "strata", "exists": True}]}},
+        "deps": [], "notes": [],
+    },
+    {
+        "engine": "kvmem", "label": "KVMem", "state": "built",
+        "source": "github.com/smashdog/kvmem",
+        "dir": "/mnt/ai/llm/llm-router-new/engine/kvmem",
+        "repo": {"version": "v0.4.6"},
+        "variants": {"rocm": {"binaries": [
+            {"name": "llama-kvmem-server", "exists": True},
+            {"name": "strata-poly", "exists": True},
+            {"name": "ninfer-serve", "exists": True},
+        ]}},
+        "deps": [], "notes": [],
+    },
+]
+
 CONFIG = {"proxy_configured": True, "install_fails": False}
-LAST = {"check": None, "install": None, "check_count": 0, "install_count": 0}
-INSTALLED = {"llama": False}
+SETUP_PROXY: dict[str, bool] = {}
+LAST = {"proxy": None, "install": None, "install_op": None, "toolchain": None}
+JOBS: dict[str, dict] = {}
+LOCK = threading.Lock()
+JOB_SEQ = [0]
 
 
-def update_items() -> list[dict]:
-    llama = {
-        "engine": "llama", "label": "llama.cpp", "name": "llama.cpp",
-        "category": "llama.cpp", "checked": True,
-        "repo": "/mnt/ai/llm/llama.cpp", "branch": "master",
-        "upstream": "origin/master", "remote": "origin", "remote_branch": "master",
-        "head": "4e910a86e", "head_full": "4e910a86e" + "0" * 31,
-        "latest": "240d68fcf", "latest_full": "240d68fcf" + "0" * 31,
-        "latest_subject": "common : restrict HF token to huggingface.co hosts (#31730)",
-        "latest_date": "2026-11-06T07:30:00Z",
-        "ahead": 0, "behind": 12, "dirty": False, "dirty_files": 0,
-        "update_available": True, "diverged": False, "up_to_date": False,
-        "can_install": True, "blockers": [],
-        "build": {"required": True, "ready": True, "dir": "/mnt/ai/llm/llama.cpp/build",
-                  "target": "llama-server", "cmake": "/usr/bin/cmake"},
-        "binary": FIELDS["llama"]["binary"], "binary_exists": True,
-        "message": "落后上游 12 个提交（4e910a86e → 240d68fcf）", "note": None,
+def job_view(job: dict) -> dict:
+    return {key: value for key, value in job.items() if not key.startswith("_")}
+
+
+def setup_payload() -> dict:
+    return {
+        "show_cuda": False,
+        "show_rocm": True,
+        "cuda": {"installed": False, "ok": False, "version": None,
+                 "reason": "未检测到 NVIDIA 显卡"},
+        "rocm": {"installed": True, "ok": False, "version": "6.2.0",
+                 "resolved_path": "/opt/rocm-6.2", "reason": "低于最低要求 6.4"},
+        "cuda_catalog": [],
+        "rocm_catalog": [{"version": "10.1.0"}],
+        "minimum": {"cuda": "12.4", "rocm": "6.4"},
+        "rocm_family": "RDNA3",
+        "engines": SETUP_ENGINES,
+        "dirs": {
+            "engine": "/mnt/ai/llm/llm-router-new/engine",
+            "bin": "/mnt/ai/llm/llm-router-new/bin",
+            "config": "/mnt/ai/llm/llm-router-new/config",
+            "log": "/mnt/ai/llm/llm-router-new/log",
+        },
+        "jobs": [job_view(job) for job in JOBS.values()],
+        "proxy_configured": bool(CONFIG["proxy_configured"]),
+        "setup_proxy": dict(SETUP_PROXY),
     }
-    kvllama = {
-        "engine": "kvmem_llama", "label": "KVMem + llama.cpp", "name": "llama.cpp",
-        "category": "kvmem", "checked": True,
-        "repo": "/mnt/ai/llm/kvmem-llamacpp090", "branch": "llamacpp-v0.9.0",
-        "upstream": "fork/llamacpp-v0.9.0", "remote": "fork",
-        "remote_branch": "llamacpp-v0.9.0",
-        "head": "598555029", "head_full": "598555029" + "0" * 31,
-        "latest": "598555029", "latest_full": "598555029" + "0" * 31,
-        "latest_subject": "docs: update backend notes", "latest_date": "2026-11-05T12:00:00Z",
-        "ahead": 0, "behind": 0, "dirty": False, "dirty_files": 0,
-        "update_available": False, "diverged": False, "up_to_date": True,
-        "can_install": False, "blockers": [],
-        "build": {"required": True, "ready": True,
-                  "dir": "/mnt/ai/llm/kvmem-llamacpp090/build-hip",
-                  "target": "llama-kvmem-server", "cmake": "/usr/bin/cmake"},
-        "binary": FIELDS["kvmem_llama"]["binary"], "binary_exists": True,
-        "message": "已是最新（llamacpp-v0.9.0，598555029）", "note": None,
-    }
-    kvmem = {
-        "engine": "kvmem", "label": "KVMem（polystrata）", "name": "polystrata",
-        "category": "kvmem", "checked": False,
-        "error": "工作目录不是 git 仓库：/mnt/ai/llm/kvmem/backends/polystrata",
-        "update_available": False, "message": "检查失败",
-    }
-    if INSTALLED["llama"]:
-        llama.update({
-            "installed": True, "compiled": True, "previous_head": "4e910a86e",
-            "head": "240d68fcf",
-            "backup": "/mnt/ai/llm/llama.cpp/build/bin/llama-server.bak-20261106-160000",
-            "restart_required": True,
-            "message": "已从 origin/master 快进到 240d68fcf，并完成编译；原二进制备份在 llama-server.bak-20261106-160000",
-            "update_available": False,
-        })
-    return [llama, kvllama, kvmem]
+
+
+def start_job(payload: dict, action: str) -> dict:
+    with LOCK:
+        JOB_SEQ[0] += 1
+        job_id = f"job-{JOB_SEQ[0]}"
+        if action == "toolchain":
+            label = f"安装 {payload.get('kind')} {payload.get('version') or ''}".strip()
+        else:
+            label = f"编译 {payload.get('engine')}"
+        job = {
+            "id": job_id,
+            "action": action,
+            "status": "running",
+            "percent": 10,
+            "detail": label,
+            "steps": [
+                {"status": "ok", "label": "准备源码", "detail": ""},
+                {"status": "running", "label": "编译", "detail": ""},
+            ],
+            "_polls": 0,
+        }
+        if action == "toolchain":
+            job["kind"] = payload.get("kind")
+        else:
+            job["engine"] = payload.get("engine")
+        JOBS[job_id] = job
+        return job_view(job)
+
+
+def poll_job(job_id: str) -> dict | None:
+    with LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return None
+        if job["status"] == "running":
+            job["_polls"] += 1
+            if job["_polls"] >= 2:
+                if CONFIG["install_fails"]:
+                    job["status"] = "error"
+                    job["error"] = ("编译失败（退出码 1）：main.cpp:1: error: broken\n"
+                                    "已恢复原二进制\n已回滚源码到更新前提交")
+                    job["steps"][-1]["status"] = "error"
+                    job["percent"] = 100
+                else:
+                    job["status"] = "ok"
+                    job["percent"] = 100
+                    job["detail"] = "编译完成"
+                    job["steps"][-1]["status"] = "ok"
+            else:
+                job["percent"] = 60
+        return job_view(job)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -207,7 +213,8 @@ class Handler(BaseHTTPRequestHandler):
         return data if isinstance(data, dict) else {}
 
     def do_GET(self):
-        path = urlsplit(self.path).path
+        split = urlsplit(self.path)
+        path = split.path
         if path in ("/", "/index.html"):
             data = (ROOT / "console" / "index.html").read_bytes()
             self.send_response(200)
@@ -221,13 +228,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(STATUS)
         if path == "/models":
             return self.send_json({"object": "list", "data": []})
-        if path == "/router/engines/paths":
-            return self.send_json({
-                "object": "list",
-                "config_file": "config.json",
-                "proxy_configured": bool(CONFIG["proxy_configured"]),
-                "engines": path_items(),
-            })
         if path == "/router/models/manage":
             return self.send_json({
                 "engines": MANAGE_ENGINES,
@@ -242,56 +242,66 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/router/auth":
             return self.send_json({"configured": False, "source": None, "hint": None,
                                    "key_file": "api-key", "protected": ["/v1/*"]})
+        if path == "/router/setup":
+            return self.send_json(setup_payload())
+        if path == "/router/setup/job":
+            job_id = (parse_qs(split.query).get("id") or [""])[0]
+            job = poll_job(job_id)
+            if job is None:
+                return self.send_json({"error": {"message": "setup job not found"}}, 404)
+            return self.send_json(job)
         if path == "/mock/state":
-            return self.send_json({
-                "config": CONFIG,
-                "last": LAST,
-                "installed": INSTALLED,
-            })
+            with LOCK:
+                return self.send_json({
+                    "config": CONFIG,
+                    "last": LAST,
+                    "setup_proxy": SETUP_PROXY,
+                    "jobs": {key: job_view(job) for key, job in JOBS.items()},
+                })
         return self.send_json({"error": {"message": "not found"}}, 404)
 
     def do_POST(self):
         path = urlsplit(self.path).path
         payload = self.read_json()
         if path == "/mock/config":
-            if "proxy_configured" in payload:
-                CONFIG["proxy_configured"] = bool(payload["proxy_configured"])
-            if "install_fails" in payload:
-                CONFIG["install_fails"] = bool(payload["install_fails"])
-            if payload.get("reset_updates"):
-                INSTALLED["llama"] = False
-                LAST["check"] = None
-                LAST["install"] = None
+            with LOCK:
+                if "proxy_configured" in payload:
+                    CONFIG["proxy_configured"] = bool(payload["proxy_configured"])
+                if "install_fails" in payload:
+                    CONFIG["install_fails"] = bool(payload["install_fails"])
+                if payload.get("reset"):
+                    JOBS.clear()
+                    LAST.update({"proxy": None, "install": None,
+                                 "install_op": None, "toolchain": None})
             return self.send_json({"status": "ok", "config": CONFIG})
-        if path == "/router/engines/update/check":
-            LAST["check"] = payload
-            LAST["check_count"] += 1
-            items = update_items()
-            return self.send_json({
-                "object": "list",
-                "use_proxy": payload.get("use_proxy") is True,
-                "proxy_configured": bool(CONFIG["proxy_configured"]),
-                "updates": sum(1 for item in items if item.get("update_available")),
-                "engines": items,
-            })
-        if path == "/router/engines/update/install":
-            LAST["install"] = payload
-            LAST["install_count"] += 1
-            if CONFIG["install_fails"]:
-                return self.send_json(
-                    {"error": {"message": "编译失败（退出码 1）：\nmain.cpp:1: error: broken\n"
-                                          "已恢复原二进制\n已回滚源码到更新前提交"}},
-                    400,
-                )
-            if payload.get("engine") != "llama":
-                return self.send_json({"error": {"message": "未找到更新"}}, 400)
-            INSTALLED["llama"] = True
-            return self.send_json({
-                "status": "ok",
-                "engine": "llama",
-                "proxy_configured": bool(CONFIG["proxy_configured"]),
-                "result": update_items()[0],
-            })
+        if path == "/router/setup/proxy":
+            key = payload.get("key")
+            if not isinstance(key, str) or not (
+                key.startswith("engine:") or key in ("toolchain:cuda", "toolchain:rocm")
+            ):
+                return self.send_json({"error": {"message": "bad key"}}, 400)
+            with LOCK:
+                SETUP_PROXY[key] = payload.get("enabled") is True
+                LAST["proxy"] = {"key": key, "enabled": SETUP_PROXY[key]}
+                return self.send_json({"setup_proxy": dict(SETUP_PROXY)})
+        if path in ("/router/setup/engine/install", "/router/setup/engine/update"):
+            op = "update" if path.endswith("/update") else "install"
+            with LOCK:
+                LAST["install"] = payload
+                LAST["install_op"] = op
+            return self.send_json(start_job(payload, "engine"), 202)
+        if path == "/router/setup/toolchain/install":
+            with LOCK:
+                LAST["toolchain"] = payload
+            return self.send_json(start_job(payload, "toolchain"), 202)
+        if path == "/router/setup/job/cancel":
+            with LOCK:
+                job = JOBS.get(str(payload.get("id")))
+                if job is None:
+                    return self.send_json({"error": {"message": "setup job not found"}}, 404)
+                if job["status"] == "running":
+                    job["status"] = "cancelled"
+                return self.send_json(job_view(job))
         return self.send_json({"error": {"message": "not found"}}, 404)
 
 

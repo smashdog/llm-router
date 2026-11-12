@@ -428,7 +428,7 @@ TEXT_QUERY_PATHS = {"/v1/chat/completions", "/v1/messages"}
 # llama.cpp-derived engines understand these stream options; asking for them
 # lets the console show live prefill progress and per-token generation speed
 # even when the client did not request them.  Clients ignore the extra fields.
-STREAM_TIMING_ENGINES = {"llama", "strata", "kvmem", "kvmem_llama"}
+STREAM_TIMING_ENGINES = {"llama", "strata", "kvmem_polystrata", "kvmem_llama"}
 
 # Sampling defaults for a model added from the console: the values the two
 # reference models run with (llama.cpp: LFM3-Omni-2B, KVMem: Ornith 1.5).
@@ -442,7 +442,7 @@ DEFAULT_SAMPLING = {
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
     },
-    "kvmem": {
+    "kvmem_polystrata": {
         "temperature": 0.6,
         "top_p": 0.95,
         "top_k": 20,
@@ -451,7 +451,7 @@ DEFAULT_SAMPLING = {
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
     },
-    "ninfer": {
+    "kvmem_ninfer": {
         "temperature": 0.6,
         "top_p": 0.95,
         "top_k": 20,
@@ -522,8 +522,8 @@ def _param_spec(
 
 
 def _basic_specs(engine: str) -> list[dict[str, Any]]:
-    kv = engine in ("kvmem", "strata")
-    ninfer = engine == "ninfer"
+    kv = engine in ("kvmem_polystrata", "strata")
+    ninfer = engine == "kvmem_ninfer"
     kvllama = engine == "kvmem_llama"
     return [
         _param_spec("temperature", "温度", "basic", low=0.0, high=2.0, step=0.01),
@@ -598,9 +598,9 @@ def _llama_more_specs() -> list[dict[str, Any]]:
 def sampling_schema(engine: str) -> list[dict[str, Any]]:
     """Editable parameters for one engine kind, split into basic and more."""
     engine = str(engine or "").strip().lower()
-    if engine not in ("llama", "kvmem", "ninfer", "kvmem_llama", "strata"):
+    if engine not in ("llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata"):
         engine = "llama"
-    if engine == "kvmem":
+    if engine == "kvmem_polystrata":
         more = [
             _param_spec("seed", "随机种子", "more", kind="integer", low=1, high=2147483647,
                         step=1, note="正整数"),
@@ -615,7 +615,7 @@ def sampling_schema(engine: str) -> list[dict[str, Any]]:
             _param_spec("seed", "随机种子", "more", kind="integer", low=0,
                         high=4294967295, step=1, note="留空由引擎随机"),
         ]
-    elif engine == "ninfer":
+    elif engine == "kvmem_ninfer":
         more = [
             _param_spec("seed", "随机种子", "more", kind="integer", low=0, high=2147483647, step=1),
         ]
@@ -710,14 +710,14 @@ def normalize_sampling(values: dict[str, Any], engine: str) -> dict[str, Any]:
         spec = specs.get(key)
         if spec is None:
             raise BadRequest(f"unknown sampling parameter {key!r}")
-        if engine == "ninfer" and key == "repeat_last_n":
+        if engine == "kvmem_ninfer" and key == "repeat_last_n":
             raise BadRequest("NInfer 不支持 repeat_last_n（重复窗口）")
         if engine == "kvmem_llama" and key == "repeat_last_n":
             raise BadRequest("KVMem + llama.cpp 不支持 repeat_last_n（重复窗口）")
         value = _coerce_param(spec, raw)
         if value is None:
             continue
-        if engine == "ninfer" and key == "repetition_penalty" and value != 1.0:
+        if engine == "kvmem_ninfer" and key == "repetition_penalty" and value != 1.0:
             raise BadRequest("NInfer 只接受中立值 repetition_penalty=1")
         out[key] = value
     return out
@@ -3972,9 +3972,9 @@ class SamplingStore:
                 continue
             if engine == "llama" and key == "repetition_penalty":
                 target = "repeat_penalty"
-            elif engine in ("kvmem", "strata") and key == "repeat_last_n":
+            elif engine in ("kvmem_polystrata", "strata") and key == "repeat_last_n":
                 target = "penalty_last_n"
-            elif engine == "ninfer" and key in ("repetition_penalty", "repeat_last_n"):
+            elif engine == "kvmem_ninfer" and key in ("repetition_penalty", "repeat_last_n"):
                 # NInfer has no repeat-window sampler and only accepts the
                 # neutral repetition penalty; do not forward either field.
                 continue
@@ -4138,8 +4138,8 @@ class Model:
             "created": self.created,
             "owned_by": {
                 "llama": "llama.cpp",
-                "kvmem": "KVMem",
-                "ninfer": "NInfer",
+                "kvmem_polystrata": "KVMem + polystrata",
+                "kvmem_ninfer": "KVMem + ninfer",
                 "kvmem_llama": "KVMem + llama.cpp",
                 "strata": "Strata",
             }.get(self.engine, self.engine),
@@ -4179,7 +4179,7 @@ class Model:
             "model_path": self.model_path,
             "vision_path": self.vision_path,
             "draft_path": self.draft_path,
-            "deletable": self.source in ("preset", "strata", "ninfer", "kvmem_llama"),
+            "deletable": self.source in ("preset", "strata", "kvmem_ninfer", "kvmem_llama"),
             "loaded": loaded,
             "available": self.available,
             "problem": self.problem,
@@ -5190,7 +5190,7 @@ def discover_kvmem_models(engine_cfg: dict[str, Any]) -> list[Model]:
         models.append(
             Model(
                 id=model_id,
-                engine="kvmem",
+                engine="kvmem_polystrata",
                 engine_model=model_id,
                 config_path=str(path),
                 model_path=str(model_file) if model_path else None,
@@ -5294,7 +5294,7 @@ def discover_ninfer_models(engine_cfg: dict[str, Any]) -> list[Model]:
         models.append(
             Model(
                 id=model_id,
-                engine="ninfer",
+                engine="kvmem_ninfer",
                 engine_model=engine_model,
                 config_path=str(path),
                 model_path=str(model_file),
@@ -5307,7 +5307,7 @@ def discover_ninfer_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 reasoning=bool(cfg.get("reasoning")),
                 notes=cfg.get("notes"),
                 quantization=cfg.get("quantization"),
-                source="ninfer",
+                source="kvmem_ninfer",
                 available=problem is None,
                 problem=problem,
             )
@@ -5375,7 +5375,7 @@ def kvmem_text_query_required(entry: Model, engines_cfg: dict[str, Any]) -> bool
     engines keep receiving the client payload untouched.
     """
     kind = (engines_cfg.get(entry.engine) or {}).get("kind")
-    if kind not in ("kvmem", "strata"):
+    if kind not in ("kvmem_polystrata", "strata"):
         return False
     if entry.config_path:
         try:
@@ -5388,7 +5388,7 @@ def kvmem_text_query_required(entry: Model, engines_cfg: dict[str, Any]) -> bool
             budget = _config_arg_value(cfg.get("args") or [], "--kvmem-budget")
             if budget is not None:
                 return (parse_int(budget) or 0) > 0
-    return kind == "kvmem"
+    return kind == "kvmem_polystrata"
 
 
 def _config_path_value(config: dict[str, Any] | None, path: tuple[str, ...] | list[str]):
@@ -5689,9 +5689,9 @@ class Registry:
             try:
                 if kind == "llama_dir":
                     found = discover_llama_models(engine_cfg)
-                elif kind == "kvmem_dir":
+                elif kind == "kvmem_polystrata_dir":
                     found = discover_kvmem_models(engine_cfg)
-                elif kind == "ninfer_dir":
+                elif kind == "kvmem_ninfer_dir":
                     found = discover_ninfer_models(engine_cfg)
                 elif kind == "kvmem_llama_dir":
                     found = discover_kvmem_llama_models(engine_cfg)
@@ -5915,12 +5915,12 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "probe_timeout_s": 30,
         "log_path": "log/strata-engine.log",
     },
-    "kvmem": {
+    "kvmem_polystrata": {
         "category": "kvmem",
         "name": "polystrata",
-        "label": "KVMem（polystrata）",
-        "kind": "kvmem",
-        "models_kind": "kvmem_dir",
+        "label": "KVMem + polystrata",
+        "kind": "kvmem_polystrata",
+        "models_kind": "kvmem_polystrata_dir",
         "fields": ("binary", "cwd", "models_dir", "meta"),
         "model_key": "meta",
         "host": "127.0.0.1",
@@ -5929,12 +5929,12 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "probe_timeout_s": 30,
         "log_path": "log/kvmem-engine.log",
     },
-    "ninfer": {
+    "kvmem_ninfer": {
         "category": "kvmem",
         "name": "ninfer",
-        "label": "NInfer（KVMem）",
-        "kind": "ninfer",
-        "models_kind": "ninfer_dir",
+        "label": "KVMem + ninfer",
+        "kind": "kvmem_ninfer",
+        "models_kind": "kvmem_ninfer_dir",
         "fields": ("binary", "cwd", "models_dir", "template"),
         "model_key": "template",
         "host": "127.0.0.1",
@@ -5960,14 +5960,14 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
 }
 # Display order: the management page groups slots by ``category`` and lists
 # them in this order, so the kvmem group shows llama.cpp → polystrata → ninfer.
-ENGINE_SLOT_ORDER = ("llama", "strata", "kvmem_llama", "kvmem", "ninfer")
+ENGINE_SLOT_ORDER = ("llama", "strata", "kvmem_llama", "kvmem_polystrata", "kvmem_ninfer")
 
 # Performance tuning is one independent script per KVMem-family engine.  Each
 # script probes this machine, benchmarks several candidates derived from that
 # engine's own docs against the model file, and prints JSON-line progress.
 TUNE_ENGINE_SCRIPTS: dict[str, str] = {
-    "kvmem": "tools/tune/tune_kvmem_polystrata.py",
-    "ninfer": "tools/tune/tune_kvmem_ninfer.py",
+    "kvmem_polystrata": "tools/tune/tune_kvmem_polystrata.py",
+    "kvmem_ninfer": "tools/tune/tune_kvmem_ninfer.py",
     "kvmem_llama": "tools/tune/tune_kvmem_llama.py",
 }
 KV_PROBE_CODE = (
@@ -6011,7 +6011,7 @@ def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
             "models_dir": str(config_dir / "strata"),
             "template": str(config_dir / "strata" / "strata-template.json"),
         }
-    if engine_id == "kvmem":
+    if engine_id == "kvmem_polystrata":
         home = engine_root / "kvmem"
         return {
             "binary": str(home / ".venv" / "bin" / "python"),
@@ -6019,7 +6019,7 @@ def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
             "models_dir": str(config_dir / "polystrata"),
             "meta": str(config_dir / "polystrata" / "models.json"),
         }
-    if engine_id == "ninfer":
+    if engine_id == "kvmem_ninfer":
         return {
             "binary": provisioned("kvmem-ninfer-serve"),
             "cwd": str(engine_root / "kvmem"),
@@ -6062,7 +6062,7 @@ def _slot_command(engine_id: str, fields: dict[str, str]) -> list[str]:
             "--host", "{host}",
             "--port", "{port}",
         ]
-    if engine_id in ("ninfer", "kvmem_llama"):
+    if engine_id in ("kvmem_ninfer", "kvmem_llama"):
         # The model artifact and its serve options come from the per-model
         # JSON; the manager inserts them after the executable.
         return [
@@ -6134,7 +6134,7 @@ def build_engine_cfg(
     cfg.setdefault("log_path", spec["log_path"])
     if existing is None:
         cfg.setdefault("api_key", None)
-    if engine_id in ("ninfer", "kvmem_llama") and not cfg.get("env"):
+    if engine_id in ("kvmem_ninfer", "kvmem_llama") and not cfg.get("env"):
         # Both builds keep their shared libraries beside the executable.
         build_root = Path(fields["binary"]).parent.parent
         lib_dir = build_root / "lib"
@@ -6233,7 +6233,7 @@ def validate_engine_paths(
             raise BadRequest(f"{model_key}：不是文件（{preset}）")
         elif create and engine_id == "llama":
             pending.append(("llama_preset", preset))
-        elif create and engine_id == "kvmem":
+        elif create and engine_id == "kvmem_polystrata":
             pending.append(("kvmem_meta", preset))
         elif create and engine_id == "kvmem_llama":
             pending.append(("kvmem_llama_template", preset))
@@ -6296,7 +6296,7 @@ def materialize_engine_paths(pending: list[tuple[str, Path]]) -> list[str]:
 
 AUTO_ENGINE_DATA_KINDS = {
     "llama": "llama_preset",
-    "kvmem": "kvmem_meta",
+    "kvmem_polystrata": "kvmem_meta",
     "kvmem_llama": "kvmem_llama_template",
 }
 
@@ -6304,8 +6304,62 @@ AUTO_ENGINE_DATA_KINDS = {
 # Activate every sibling whose binary/template the install produced instead of
 # leaving them for the next startup.
 AUTO_ENGINE_SIBLINGS = {
-    "kvmem": ("kvmem", "kvmem_llama", "ninfer"),
+    "kvmem": ("kvmem_polystrata", "kvmem_llama", "kvmem_ninfer"),
 }
+
+# 2026-11-13: the original "kvmem" (PolyStrata) and "ninfer" slots were renamed
+# to kvmem_polystrata / kvmem_ninfer so every KVMem worker shares the family
+# prefix.  Old ids are not kept as aliases; a live config.json is migrated in
+# place once at startup, with a timestamped backup under backups/.
+LEGACY_ENGINE_RENAMES = {"kvmem": "kvmem_polystrata", "ninfer": "kvmem_ninfer"}
+LEGACY_MODELS_KIND_RENAMES = {
+    "kvmem_dir": "kvmem_polystrata_dir",
+    "ninfer_dir": "kvmem_ninfer_dir",
+}
+
+
+def migrate_legacy_engine_ids(
+    config: dict[str, Any], config_path: Path, log: logging.Logger
+) -> bool:
+    """Rename legacy engine slots in a live config; persist once if changed."""
+    engines = config.get("engines")
+    if not isinstance(engines, dict):
+        return False
+    changed = False
+    for old, new in LEGACY_ENGINE_RENAMES.items():
+        legacy = engines.get(old)
+        if not isinstance(legacy, dict):
+            continue
+        if isinstance(engines.get(new), dict):
+            # Already migrated: drop the stale duplicate, keep the new entry.
+            del engines[old]
+            changed = True
+            continue
+        engines[new] = engines.pop(old)
+        if engines[new].get("kind") == old:
+            engines[new]["kind"] = new
+        models = engines[new].get("models")
+        if isinstance(models, dict):
+            models_kind = models.get("kind")
+            if models_kind in LEGACY_MODELS_KIND_RENAMES:
+                models["kind"] = LEGACY_MODELS_KIND_RENAMES[models_kind]
+        changed = True
+    if not changed:
+        return False
+    try:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup_dir = config_path.parent / "backups" / f"engine-rename-{stamp}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        if config_path.is_file():
+            shutil.copy2(config_path, backup_dir / config_path.name)
+        write_json_atomic(config_path, config)
+        log.info(
+            "已迁移旧引擎 id（kvmem/ninfer → kvmem_polystrata/kvmem_ninfer），备份：%s",
+            backup_dir,
+        )
+    except OSError as exc:
+        log.error("无法持久化引擎 id 迁移：%s", exc)
+    return True
 
 
 def managed_engine_config(base_dir: Path, engine_id: str) -> dict[str, Any] | None:
@@ -6404,7 +6458,7 @@ def probe_engine_binary(
     """
     spec = ENGINE_SLOTS[engine_id]
     binary = fields["binary"]
-    if engine_id in ("kvmem", "strata"):
+    if engine_id in ("kvmem_polystrata", "strata"):
         command = [binary, "-c", KV_PROBE_CODE]
     elif engine_id == "kvmem_llama":
         # --version is unsupported; the model-free capability dump identifies
@@ -6442,7 +6496,7 @@ def probe_engine_binary(
     stdout = proc.stdout.decode("utf-8", "replace") if proc.stdout else ""
     stderr = proc.stderr.decode("utf-8", "replace") if proc.stderr else ""
     output = (stdout + "\n" + stderr).strip()
-    if engine_id in ("kvmem", "strata"):
+    if engine_id in ("kvmem_polystrata", "strata"):
         if proc.returncode != 0 or KV_PROBE_MARKER not in stdout:
             detail = _probe_tail(output)
             message = "binary：无法导入 serve.server"
@@ -6452,7 +6506,7 @@ def probe_engine_binary(
                 message += f"：{detail}"
             raise BadRequest(message)
         return
-    if engine_id == "ninfer":
+    if engine_id == "kvmem_ninfer":
         if proc.returncode != 0 or not re.search(r"ninfer-serve\s+\S+", output, re.I):
             detail = _probe_tail(output)
             message = "binary：不是可用的 ninfer-serve"
@@ -6675,7 +6729,7 @@ def find_engine_build(
 ) -> dict[str, Any] | None:
     """Locate the CMake build directory that produced the configured binary."""
     binary = Path(fields.get("binary") or "")
-    if engine_id == "kvmem":
+    if engine_id == "kvmem_polystrata":
         return {
             "required": False,
             "ready": True,
@@ -6993,7 +7047,7 @@ def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
     try:
         if engine_id == "llama":
             return discover_llama_models(cfg)
-        if engine_id == "ninfer":
+        if engine_id == "kvmem_ninfer":
             return discover_ninfer_models(cfg)
         if engine_id == "kvmem_llama":
             return discover_kvmem_llama_models(cfg)
@@ -7207,9 +7261,9 @@ class EngineManager:
         command = self.cfg.get("command")
         if not isinstance(command, list) or not command:
             raise EngineFailure(f"{self.engine_id}: no command in config")
-        if self.kind in ("kvmem", "strata") and not entry.config_path:
+        if self.kind in ("kvmem_polystrata", "strata") and not entry.config_path:
             raise EngineFailure(f"{self.engine_id}: {entry.id} has no config path")
-        if self.kind == "ninfer":
+        if self.kind == "kvmem_ninfer":
             model_cfg, artifact, args = self._single_model_config(entry)
             binary = str(model_cfg.get("exe") or command[0])
             # ninfer-serve takes the artifact path first, then its serve
@@ -7280,7 +7334,7 @@ class EngineManager:
         extra = self.cfg.get("env")
         if isinstance(extra, dict):
             env.update({str(k): str(v) for k, v in extra.items()})
-        if self.kind in ("kvmem", "ninfer", "kvmem_llama", "strata") and entry.config_path:
+        if self.kind in ("kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata") and entry.config_path:
             cfg = read_json(Path(entry.config_path))
             if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict):
                 env.update({str(k): str(v) for k, v in cfg["env"].items()})
@@ -7335,7 +7389,7 @@ class EngineManager:
     def start(self, entry: Model) -> None:
         if self.alive():
             raise EngineFailure(f"{self.engine_id}: engine is already running")
-        if self.kind == "kvmem":
+        if self.kind == "kvmem_polystrata":
             self._strip_kvmem_expert_save(entry)
         if not port_free(self.host, self.port):
             raise EngineFailure(
@@ -7375,14 +7429,14 @@ class EngineManager:
         self.started_at = now()
         self.current_model = (
             entry.engine_model
-            if self.kind in ("kvmem", "ninfer", "kvmem_llama", "strata")
+            if self.kind in ("kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata")
             else None
         )
         self._write_state()
         try:
             if self.kind == "llama_router":
                 self._wait_llama_ready()
-            elif self.kind == "ninfer":
+            elif self.kind == "kvmem_ninfer":
                 self._wait_ninfer_ready(entry)
             elif self.kind == "kvmem_llama":
                 self._wait_kvmem_llama_ready(entry)
@@ -7587,7 +7641,7 @@ class EngineManager:
             # An engine that just started reports itself healthy before its models
             # are loaded; always confirm the router's per-model state.
             self._load_llama_model(entry)
-        elif self.kind in ("ninfer", "kvmem_llama", "strata"):
+        elif self.kind in ("kvmem_ninfer", "kvmem_llama", "strata"):
             # These engines run one artifact per process; switching models
             # means a restart, which the gateway already does when it switches
             # engines.
@@ -7711,7 +7765,7 @@ class EngineManager:
             self.current_entry = None
             self._clear_state()
             return
-        if self.kind in ("ninfer", "kvmem_llama", "strata"):
+        if self.kind in ("kvmem_ninfer", "kvmem_llama", "strata"):
             # Single-model engines have no unload endpoint; stopping the
             # engine is the unload, and the next request starts it again.
             self.stop()
@@ -7763,7 +7817,7 @@ class EngineManager:
         pgid = self.pgid or pid
         self.log.info("stopping engine %s (pid=%s, pgid=%s)", self.engine_id, pid, pgid)
         if proc.poll() is None:
-            if self.kind in ("ninfer", "kvmem_llama", "strata"):
+            if self.kind in ("kvmem_ninfer", "kvmem_llama", "strata"):
                 # The first SIGINT only asks NInfer to confirm ("press Ctrl+C
                 # again"), so a plain SIGINT would burn the full stop timeout.
                 # llama-kvmem-server has no unload path either, and Strata
@@ -8043,6 +8097,10 @@ class ProxyTrace:
         return tokens / span
 
     def _publish_live(self, now: float) -> None:
+        # The live card tracks an in-progress streaming generation; a
+        # non-streaming body only contributes to the finished stats.
+        if not self.stream:
+            return
         if now - self.last_live_at < 0.2:
             return
         self.last_live_at = now
@@ -8113,6 +8171,12 @@ class ProxyTrace:
         usage = self.usage if isinstance(self.usage, dict) else {}
         timings = self.timings if isinstance(self.timings, dict) else {}
         if not usage and not timings:
+            with self.gateway.stats.lock:
+                if (
+                    self.gateway.stats.live is not None
+                    and self.gateway.stats.live.get("id") == self.live_id
+                ):
+                    self.gateway.stats.live = None
             return
         prompt_eval = int(self._number(timings.get("prompt_n")) or 0)
         cache_n = int(self._number(timings.get("cache_n")) or 0)
@@ -8200,6 +8264,7 @@ class Gateway:
         self.base_dir = base_dir
         self.log = log
         self.config_path = config_path or (base_dir / "config.json")
+        migrate_legacy_engine_ids(self.config, self.config_path, log)
         self._config_lock = threading.Lock()
         self._auth_lock = threading.Lock()
         self._model_meta_lock = threading.Lock()
@@ -8860,8 +8925,8 @@ class Gateway:
     def _short_kind(kind: str | None) -> str:
         return {
             "llama_dir": "llama",
-            "kvmem_dir": "kvmem",
-            "ninfer_dir": "ninfer",
+            "kvmem_polystrata_dir": "kvmem_polystrata",
+            "kvmem_ninfer_dir": "kvmem_ninfer",
             "kvmem_llama_dir": "kvmem_llama",
             "strata_dir": "strata",
         }.get(str(kind), "")
@@ -10224,7 +10289,7 @@ class Gateway:
 
     def default_sampling(self, engine_id: str) -> dict[str, Any]:
         kind = self._short_kind(self._engine_kind(engine_id))
-        reference = LLAMA_REFERENCE_MODEL if kind == "llama" else KVMEM_REFERENCE_MODEL if kind == "kvmem" else ""
+        reference = LLAMA_REFERENCE_MODEL if kind == "llama" else KVMEM_REFERENCE_MODEL if kind == "kvmem_polystrata" else ""
         saved = self.params.get(reference) if reference else {}
         return dict(saved or DEFAULT_SAMPLING.get(kind) or {})
 
@@ -10252,7 +10317,7 @@ class Gateway:
                     "cache_types": llama_cache_type_choices(engine_cfg),
                     "default_params": self.default_sampling(engine_id),
                 }
-            elif kind == "kvmem_dir":
+            elif kind == "kvmem_polystrata_dir":
                 template_path, template = kvmem_reference_config(engine_cfg, self.base_dir)
                 template_args = [str(item) for item in (template or {}).get("args") or []]
                 template_params = kvmem_poly_engine_values(template_args)
@@ -10266,8 +10331,8 @@ class Gateway:
                 template_params.pop("kvmem_draft_model", None)
                 out[engine_id] = {
                     "engine": engine_id,
-                    "kind": "kvmem",
-                    "label": "KVMem（polystrata）",
+                    "kind": "kvmem_polystrata",
+                    "label": "KVMem + polystrata",
                     "models_dir": models_cfg.get("dir"),
                     "template": str(template_path) if template_path else None,
                     "engine_params": template_params,
@@ -10277,14 +10342,14 @@ class Gateway:
                     },
                     "default_params": self.default_sampling(engine_id),
                 }
-            elif kind == "ninfer_dir":
+            elif kind == "kvmem_ninfer_dir":
                 template_path, template = ninfer_reference_config(engine_cfg)
                 template_args = [str(item) for item in (template or {}).get("args") or []]
                 template_vision, template_vision_gpu = ninfer_vision_state(template_args)
                 out[engine_id] = {
                     "engine": engine_id,
-                    "kind": "ninfer",
-                    "label": "NInfer（KVMem）",
+                    "kind": "kvmem_ninfer",
+                    "label": "KVMem + ninfer",
                     "models_dir": models_cfg.get("dir"),
                     "template": str(template_path) if template_path else None,
                     "engine_params": ninfer_engine_values(template_args),
@@ -10359,7 +10424,7 @@ class Gateway:
         except Exception:
             self.log.exception("cannot determine installed engine products")
             installed = {}
-        product_for_slot = {"kvmem": "kvmem", "kvmem_llama": "kvmem", "ninfer": "kvmem"}
+        product_for_slot = {"kvmem_polystrata": "kvmem", "kvmem_llama": "kvmem", "kvmem_ninfer": "kvmem"}
         for slot, entry in engines.items():
             product = product_for_slot.get(slot, slot)
             if product in installed:
@@ -10368,7 +10433,7 @@ class Gateway:
             "engines": engines,
             "param_schema": {
                 kind: sampling_schema(kind)
-                for kind in ("llama", "kvmem", "ninfer", "kvmem_llama", "strata")
+                for kind in ("llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata")
             },
             "kvmem_engine_schema": kvmem_llama_engine_schema(),
             "kvmem_poly_engine_schema": kvmem_poly_engine_schema(),
@@ -10726,7 +10791,7 @@ class Gateway:
         config = read_json(config_path, {})
         if not isinstance(config, dict):
             raise BadRequest("模型配置文件无效")
-        if engine_kind == "kvmem":
+        if engine_kind == "kvmem_polystrata":
             context = (
                 parse_int(suggestions.get("context_length"))
                 or parse_int(_config_arg_value(clean, "--max-context", "--ctx"))
@@ -10756,11 +10821,11 @@ class Gateway:
             "restart_pending": pending,
             "note": note,
         }
-        if engine_kind == "kvmem":
+        if engine_kind == "kvmem_polystrata":
             result["engine_params"] = kvmem_poly_engine_values(clean, config)
         elif engine_kind == "kvmem_llama":
             result["engine_params"] = kvmem_llama_engine_values(clean)
-        elif engine_kind == "ninfer":
+        elif engine_kind == "kvmem_ninfer":
             result["engine_params"] = ninfer_engine_values(clean)
         return result
 
@@ -10860,7 +10925,7 @@ class Gateway:
         if not engine_id or engine_id not in self.config.get("engines", {}):
             raise BadRequest("engine must name a configured engine")
         kind = self._engine_kind(engine_id)
-        if kind not in ("llama_dir", "kvmem_dir", "ninfer_dir", "kvmem_llama_dir", "strata_dir"):
+        if kind not in ("llama_dir", "kvmem_polystrata_dir", "kvmem_ninfer_dir", "kvmem_llama_dir", "strata_dir"):
             raise BadRequest(f"engine {engine_id!r} cannot add models")
         raw_model = payload.get("model")
         if not isinstance(raw_model, str) or not raw_model.strip():
@@ -10913,7 +10978,7 @@ class Gateway:
                 raw_device.strip().lower() == "gpu"
             ) != entry.vision_gpu
 
-        if self._short_kind(kind) == "ninfer":
+        if self._short_kind(kind) == "kvmem_ninfer":
             # NInfer vision (and its device) is compiled into the launch args.
             enabled = payload.get("vision_enabled")
             if isinstance(enabled, bool) and enabled != entry.multimodal:
@@ -10971,7 +11036,7 @@ class Gateway:
         else:
             force_name = entry.id
         job_payload["_edit_force_name"] = force_name
-        if self._short_kind(kind) == "ninfer":
+        if self._short_kind(kind) == "kvmem_ninfer":
             # The vision tower lives inside the .ninfer file.
             job_payload["vision"] = None
         if self._short_kind(kind) != "strata":
@@ -10992,7 +11057,7 @@ class Gateway:
         if not engine_id or engine_id not in self.config.get("engines", {}):
             raise BadRequest("engine must name a configured engine")
         kind = self._engine_kind(engine_id)
-        if kind not in ("llama_dir", "kvmem_dir", "ninfer_dir", "kvmem_llama_dir", "strata_dir"):
+        if kind not in ("llama_dir", "kvmem_polystrata_dir", "kvmem_ninfer_dir", "kvmem_llama_dir", "strata_dir"):
             raise BadRequest(f"engine {engine_id!r} cannot add models")
         model = payload.get("model")
         if not isinstance(model, str) or not model.strip():
@@ -11039,11 +11104,11 @@ class Gateway:
         for label, value in (("cache_type_k", cache_type_k), ("cache_type_v", cache_type_v)):
             if value is not None and not isinstance(value, str):
                 raise BadRequest(f"{label} must be a string")
-        if kind == "kvmem_dir" and (cache_type_k is not None or cache_type_v is not None):
+        if kind == "kvmem_polystrata_dir" and (cache_type_k is not None or cache_type_v is not None):
             raise BadRequest("KVMem 引擎 KV 精度固定 q8_0，不能设置 K/V 精度")
         if kind == "strata_dir" and (cache_type_k is not None or cache_type_v is not None):
             raise BadRequest("Strata 的 KV 精度通过引擎参数 --kv 设置")
-        if kind == "ninfer_dir":
+        if kind == "kvmem_ninfer_dir":
             if vision_path:
                 raise BadRequest("NInfer 的视觉塔内嵌在 .ninfer 模型里，不需要 mmproj 路径")
             if context_length is not None or cache_type_k is not None or cache_type_v is not None:
@@ -11066,9 +11131,9 @@ class Gateway:
                 if isinstance(existing, int) and existing != kvmem_budget:
                     raise BadRequest("kvmem_budget 与 engine_params.kvmem_budget 不一致")
                 engine_values["kvmem_budget"] = kvmem_budget
-        elif kind == "kvmem_dir":
+        elif kind == "kvmem_polystrata_dir":
             engine_values = normalize_kvmem_poly_engine(raw_engine_params)
-        elif kind == "ninfer_dir":
+        elif kind == "kvmem_ninfer_dir":
             engine_values = normalize_ninfer_engine(raw_engine_params)
         elif kind == "strata_dir":
             engine_values = normalize_strata_engine(raw_engine_params)
@@ -11091,7 +11156,7 @@ class Gateway:
             {"key": "start", "label": "启动引擎并加载模型", "status": "pending", "detail": ""},
             {"key": "smoke", "label": "冒烟测试", "status": "pending", "detail": ""},
         ]
-        if kind == "ninfer_dir":
+        if kind == "kvmem_ninfer_dir":
             steps[1]["label"] = "检查 .ninfer 模型"
             steps[2]["label"] = "复制模板参数"
         if vision_path:
@@ -11100,7 +11165,7 @@ class Gateway:
             )
         if kind == "kvmem_llama_dir":
             steps[2]["label"] = "选择 KV 精度与 KVMem 参数"
-        if kind == "kvmem_dir":
+        if kind == "kvmem_polystrata_dir":
             steps[2]["label"] = "选择 KV 精度、MTP 与 KVMem 参数"
         if kind == "strata_dir":
             steps[2]["label"] = "复制模板并应用 Strata 参数"
@@ -11351,9 +11416,9 @@ class Gateway:
 
             self._job_step(job, "config", "running")
             params = job.get("params") or self.default_sampling(engine_id)
-            cleaned = self.params.replace(name, params, "ninfer")
+            cleaned = self.params.replace(name, params, "kvmem_ninfer")
             if not cleaned:
-                cleaned = self.params.replace(name, self.default_sampling(engine_id), "ninfer")
+                cleaned = self.params.replace(name, self.default_sampling(engine_id), "kvmem_ninfer")
 
             models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
             config_dir = Path(str(models_cfg.get("dir") or ""))
@@ -11451,7 +11516,7 @@ class Gateway:
                         if step.get("status") == "pending":
                             step["status"] = "fail"
                             break
-            self._rollback_model_add(job, "ninfer", name, None, config_file)
+            self._rollback_model_add(job, "kvmem_ninfer", name, None, config_file)
             self._job_finish(job, "failed", message)
         finally:
             with self.model_jobs_lock:
@@ -12264,7 +12329,7 @@ class Gateway:
                 self._job_step(job, "cleanup", "warn", "未写入任何配置")
                 self._job_finish(job, "failed", message)
                 return
-        if kind == "ninfer_dir":
+        if kind == "kvmem_ninfer_dir":
             self._model_add_ninfer_worker(
                 job, engine_id, model, smoke, vision_gpu, vision_enabled
             )
@@ -12300,7 +12365,7 @@ class Gateway:
         cache_override = False
         try:
             self._job_step(job, "paths", "running")
-            source_is_dir = short in ("llama", "kvmem") and model.is_dir()
+            source_is_dir = short in ("llama", "kvmem_polystrata") and model.is_dir()
             auto_vision = None
             if source_is_dir:
                 picked_model, auto_vision = self._pick_gguf_files(model)
@@ -12939,7 +13004,7 @@ class Gateway:
                 self.params.drop(new_name)
             except Exception:
                 self.log.exception("cannot remove parameters of failed edit %s", new_name)
-            if new_short == "kvmem":
+            if new_short == "kvmem_polystrata":
                 try:
                     meta = self._drop_kvmem_meta(new_engine, new_name)
                     if meta:
@@ -13016,7 +13081,7 @@ class Gateway:
                     removed.append(str(old_config))
             except OSError:
                 self.log.exception("cannot remove old config %s after edit", old_config)
-        if str(edit.get("old_engine") or "") == "kvmem" and old_id and (
+        if str(edit.get("old_engine") or "") == "kvmem_polystrata" and old_id and (
             (renamed and not old_kept) or drop_old_config or detached_path
         ):
             try:
@@ -13100,7 +13165,7 @@ class Gateway:
         entry = self.registry.resolve(name)
         if entry is None:
             raise ModelNotFound(f"model {name!r} is not in the registry")
-        if entry.source not in ("preset", "strata", "ninfer", "kvmem_llama"):
+        if entry.source not in ("preset", "strata", "kvmem_ninfer", "kvmem_llama"):
             raise BadRequest("该模型由目录扫描发现，没有可删除的配置文件")
         removed: list[str] = []
         if entry.source == "preset":
@@ -13114,7 +13179,7 @@ class Gateway:
                 raise BadRequest(f"配置文件不存在：{config_file}")
             config_file.unlink()
             removed.append(str(config_file))
-            if entry.engine == "kvmem":
+            if entry.engine == "kvmem_polystrata":
                 # KVMem keeps a models.json next to the per-model strata-*.json files.
                 engine_cfg = self.config.get("engines", {}).get(entry.engine) or {}
                 models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
@@ -13179,9 +13244,9 @@ class Gateway:
             return None
         if not isinstance(raw, dict) or not raw:
             raise BadRequest("engine_params must be a non-empty object")
-        if entry.engine == "kvmem":
+        if entry.engine == "kvmem_polystrata":
             return normalize_kvmem_poly_engine(raw)
-        if entry.engine == "ninfer":
+        if entry.engine == "kvmem_ninfer":
             return normalize_ninfer_engine(raw)
         if entry.engine == "kvmem_llama":
             return normalize_kvmem_llama_engine(raw)
@@ -13256,7 +13321,7 @@ class Gateway:
             raise BadRequest('vision_device must be "cpu" or "gpu"')
         if not entry.multimodal:
             raise BadRequest("该模型没有视觉编码器，无法设置视觉运行位置")
-        if entry.engine == "ninfer":
+        if entry.engine == "kvmem_ninfer":
             config_path = Path(str(entry.config_path or ""))
             config = read_json(config_path, {})
             if not isinstance(config, dict) or not isinstance(config.get("args"), list):
@@ -13265,7 +13330,7 @@ class Gateway:
             preset_path = Path(str(entry.config_path or ""))
             if entry.source != "preset" or not preset_path.is_file():
                 raise BadRequest("该模型由目录扫描发现，没有可编辑的 models.ini 预设段")
-        elif entry.engine in ("kvmem", "kvmem_llama", "strata"):
+        elif entry.engine in ("kvmem_polystrata", "kvmem_llama", "strata"):
             config_path = Path(str(entry.config_path or ""))
             if not config_path.is_file():
                 raise BadRequest("找不到该模型的配置文件")
@@ -13320,7 +13385,7 @@ class Gateway:
                 engine_values = dict(engine_values or {})
                 engine_values["mmproj-offload"] = "on" if vision_gpu else "off"
             update_llama_preset(preset_path, entry.engine_model, engine_values)
-        elif entry.engine == "ninfer":
+        elif entry.engine == "kvmem_ninfer":
             config_path = Path(str(entry.config_path or ""))
             config = read_json(config_path, {})
             if not isinstance(config, dict):
@@ -13337,7 +13402,7 @@ class Gateway:
             config["args"] = args
             write_json_atomic(config_path, config)
             fresh_values = ninfer_engine_values(args)
-        elif entry.engine in ("kvmem", "kvmem_llama"):
+        elif entry.engine in ("kvmem_polystrata", "kvmem_llama"):
             config_path = Path(str(entry.config_path or ""))
             config = read_json(config_path, {})
             if not isinstance(config, dict):
@@ -13371,7 +13436,7 @@ class Gateway:
                 kvmem_llama_validate_disk(args)
                 config["args"] = args
                 fresh_values = kvmem_llama_engine_values(args)
-            elif entry.engine == "kvmem" and engine_values is not None:
+            elif entry.engine == "kvmem_polystrata" and engine_values is not None:
                 args = config.get("args")
                 if not isinstance(args, list):
                     raise BadRequest("模型配置没有 args 列表")
@@ -13413,7 +13478,7 @@ class Gateway:
                 args = kvmem_poly_strip_expert_save(args, config)
                 config["args"] = args
                 fresh_values = kvmem_poly_engine_values(args, config)
-            elif entry.engine == "kvmem":
+            elif entry.engine == "kvmem_polystrata":
                 args = config.get("args")
                 if isinstance(args, list):
                     stripped = kvmem_poly_strip_expert_save(args, config)
@@ -13467,11 +13532,11 @@ class Gateway:
                 "cache_type_k": fresh.cache_type_k if fresh else None,
                 "cache_type_v": fresh.cache_type_v if fresh else None,
             }
-        elif entry.engine == "kvmem":
+        elif entry.engine == "kvmem_polystrata":
             result["engine_params"] = self._kvmem_poly_engine_values(fresh or entry)
         elif entry.engine == "kvmem_llama":
             result["engine_params"] = self._kvmem_llama_engine_values(fresh or entry)
-        elif entry.engine == "ninfer":
+        elif entry.engine == "kvmem_ninfer":
             result["engine_params"] = self._ninfer_engine_values(fresh or entry)
         elif entry.engine == "strata":
             result["engine_params"] = self._strata_engine_values(fresh or entry)
@@ -13657,7 +13722,7 @@ class Gateway:
 
     def _kvmem_poly_engine_values(self, entry: Model) -> dict[str, Any]:
         """Whitelisted strata-poly options from one strata-*.json."""
-        if entry.engine != "kvmem":
+        if entry.engine != "kvmem_polystrata":
             return {}
         config_path = Path(str(entry.config_path or ""))
         config = read_json(config_path, {})
@@ -13670,7 +13735,7 @@ class Gateway:
 
     def _ninfer_engine_values(self, entry: Model) -> dict[str, Any]:
         """Whitelisted ninfer-serve options from one ninfer-*.json."""
-        if entry.engine != "ninfer":
+        if entry.engine != "kvmem_ninfer":
             return {}
         config_path = Path(str(entry.config_path or ""))
         config = read_json(config_path, {})
@@ -13707,11 +13772,11 @@ class Gateway:
                 model, active, target, switching, phase, pending_load, live
             )
             item = model.openai(status, status == "loaded", self.params.get(model.id))
-            if model.engine == "kvmem":
+            if model.engine == "kvmem_polystrata":
                 item["engine_params"] = self._kvmem_poly_engine_values(model)
             elif model.engine == "kvmem_llama":
                 item["engine_params"] = self._kvmem_llama_engine_values(model)
-            elif model.engine == "ninfer":
+            elif model.engine == "kvmem_ninfer":
                 item["engine_params"] = self._ninfer_engine_values(model)
             elif model.engine == "strata":
                 item["engine_params"] = self._strata_engine_values(model)
@@ -13725,11 +13790,11 @@ class Gateway:
             if item.get("id") == model.id:
                 return item
         item = model.openai("unloaded", False, self.params.get(model.id))
-        if model.engine == "kvmem":
+        if model.engine == "kvmem_polystrata":
             item["engine_params"] = self._kvmem_poly_engine_values(model)
         elif model.engine == "kvmem_llama":
             item["engine_params"] = self._kvmem_llama_engine_values(model)
-        elif model.engine == "ninfer":
+        elif model.engine == "kvmem_ninfer":
             item["engine_params"] = self._ninfer_engine_values(model)
         elif model.engine == "strata":
             item["engine_params"] = self._strata_engine_values(model)
@@ -13743,11 +13808,11 @@ class Gateway:
                 "engine": entry.engine,
                 "params": self.params.get(entry.id),
             }
-            if entry.engine == "kvmem":
+            if entry.engine == "kvmem_polystrata":
                 row["engine_params"] = self._kvmem_poly_engine_values(entry)
             elif entry.engine == "kvmem_llama":
                 row["engine_params"] = self._kvmem_llama_engine_values(entry)
-            elif entry.engine == "ninfer":
+            elif entry.engine == "kvmem_ninfer":
                 row["engine_params"] = self._ninfer_engine_values(entry)
             elif entry.engine == "strata":
                 row["engine_params"] = self._strata_engine_values(entry)

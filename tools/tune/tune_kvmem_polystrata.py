@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tune_common as common  # noqa: E402
 
-KIND = "kvmem"
+KIND = "kvmem_polystrata"
 SCRIPT = "tune_kvmem_polystrata.py"
 
 

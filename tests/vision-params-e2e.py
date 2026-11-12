@@ -181,8 +181,8 @@ config = {
                 "preset": str(preset),
             },
         },
-        "kvmem": {
-            "kind": "kvmem",
+        "kvmem_polystrata": {
+            "kind": "kvmem_polystrata",
             "host": "127.0.0.1",
             "port": free_port(),
             "cwd": str(kv_cwd),
@@ -192,17 +192,17 @@ config = {
             ],
             "start_timeout_s": 30,
             "log_path": "logs/kvmem-engine.log",
-            "models": {"kind": "kvmem_dir", "dir": str(kv_models)},
+            "models": {"kind": "kvmem_polystrata_dir", "dir": str(kv_models)},
         },
-        "ninfer": {
-            "kind": "ninfer",
+        "kvmem_ninfer": {
+            "kind": "kvmem_ninfer",
             "host": "127.0.0.1",
             "port": free_port(),
             "cwd": str(ninfer_cwd),
             "command": [str(ninfer_binary)],
             "start_timeout_s": 30,
             "log_path": "logs/ninfer-engine.log",
-            "models": {"kind": "ninfer_dir", "dir": str(ninfer_models)},
+            "models": {"kind": "kvmem_ninfer_dir", "dir": str(ninfer_models)},
         },
     },
 }
@@ -734,10 +734,10 @@ try:
     assert add_state["visionHidden"] is False and add_state["enabledHidden"] is True, add_state
     assert add_state["tabHidden"] is True, add_state
     click('#add-engines .engine-cat[data-add-category="kvmem"]')
-    wait("""return !!document.querySelector('#add-engines input[name="add-engine"][value="ninfer"]')""",
+    wait("""return !!document.querySelector('#add-engines input[name="add-engine"][value="kvmem_ninfer"]')""",
          message="kvmem category engines")
     js("""
-      const radio = document.querySelector('#add-engines input[name="add-engine"][value="ninfer"]');
+      const radio = document.querySelector('#add-engines input[name="add-engine"][value="kvmem_ninfer"]');
       radio.checked = true;
       radio.dispatchEvent(new Event('change', {bubbles: true}));
       return true;
@@ -761,7 +761,7 @@ try:
         engineParamsHidden: document.getElementById('add-engine-params').hidden,
       };
     """)
-    assert ninfer_add["engine"] == "ninfer", ninfer_add
+    assert ninfer_add["engine"] == "kvmem_ninfer", ninfer_add
     assert ninfer_add["disabled"] == [False, False], ninfer_add
     assert ninfer_add["visionHidden"] is True and ninfer_add["enabledHidden"] is False, ninfer_add
     assert ninfer_add["tabHidden"] is False and ninfer_add["tabLabel"] == "kvmem参数", ninfer_add
@@ -778,7 +778,7 @@ try:
     # the KVMem extension in “kvmem参数”; the context field lives in the
     # native tab (--max-context), so the basic engine block stays hidden.
     js("""
-      const radio = document.querySelector('#add-engines input[name="add-engine"][value="kvmem"]');
+      const radio = document.querySelector('#add-engines input[name="add-engine"][value="kvmem_polystrata"]');
       radio.checked = true;
       radio.dispatchEvent(new Event('change', {bubbles: true}));
       return true;
@@ -797,7 +797,7 @@ try:
         caption: document.getElementById('add-more-caption').textContent,
       };
     """)
-    assert kv_add["engine"] == "kvmem", kv_add
+    assert kv_add["engine"] == "kvmem_polystrata", kv_add
     assert kv_add["tabHidden"] is False and kv_add["tabLabel"] == "kvmem参数", kv_add
     assert kv_add["count"] == "22", kv_add
     assert "max_context" in kv_add["native"] and "no_draft" in kv_add["native"], kv_add
@@ -813,7 +813,7 @@ try:
     js("""
       window.__realFetch = window.fetch;
       window.__fakeStats = {
-        at: '2026-11-06T12:00:00Z', model: 'ninfer-vision', engine: 'ninfer',
+        at: '2026-11-06T12:00:00Z', model: 'ninfer-vision', engine: 'kvmem_ninfer',
         prompt_tokens: 25038, completion_tokens: 1827, total_tokens: 26865,
         cached_tokens: 23387, context_length: 262144,
         gen_per_second: 79.9, prefill_per_second: 1356.4,

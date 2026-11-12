@@ -36,7 +36,7 @@ LOCAL_KV_LLAMA = ROOT / "models-kvmem-llama"
 MODELS_BY_ENGINE = {
     "llama": "Qwen3.8-27B",
     "kvmem_llama": "Qwen3.8-27B-Uncensored-Heretic-MTP-UD-IQ4_XS",
-    "kvmem": "ornith-1.5-35b-a3b-vl-thinking",
+    "kvmem_polystrata": "ornith-1.5-35b-a3b-vl-thinking",
 }
 
 
@@ -66,8 +66,8 @@ def engine_configs(base: Path, preset: Path) -> dict:
             "models": {"kind": "llama_dir", "dir": str(base / "llama-models"), "preset": str(preset)},
             "env": {"HIP_VISIBLE_DEVICES": "0"},
         },
-        "kvmem": {
-            "kind": "kvmem",
+        "kvmem_polystrata": {
+            "kind": "kvmem_polystrata",
             "host": "127.0.0.1",
             "port": 18081,
             "cwd": "/mnt/ai/llm/kvmem/backends/polystrata",
@@ -79,7 +79,7 @@ def engine_configs(base: Path, preset: Path) -> dict:
             "start_timeout_s": 900,
             "log_path": "logs/kvmem-engine.log",
             "env": {"PYTHONUNBUFFERED": "1"},
-            "models": {"kind": "kvmem_dir", "dir": str(LOCAL_KV), "meta": str(LOCAL_KV / "models.json")},
+            "models": {"kind": "kvmem_polystrata_dir", "dir": str(LOCAL_KV), "meta": str(LOCAL_KV / "models.json")},
         },
         "kvmem_llama": {
             "kind": "kvmem_llama",
