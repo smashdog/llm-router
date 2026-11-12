@@ -241,7 +241,7 @@ ENGINE_CATALOG: dict[str, dict[str, Any]] = {
     },
     "strata": {
         "label": "Strata",
-        "repo": "https://github.com/Niko1221/Strata",
+        "repo": "https://github.com/smashdog/Strata",
         # Strata fetches the exact llama.cpp/ggml commit it is verified
         # against; it neither uses nor requires the standalone llama.cpp slot.
         "needs": (),
