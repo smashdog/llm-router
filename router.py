@@ -9773,7 +9773,7 @@ class Gateway:
         self, engine_id: str, paths: Any, create: bool = False
     ) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama、strata、kvmem、ninfer 或 kvmem_llama")
+            raise BadRequest("engine 必须是 llama、strata、kvmem_polystrata、kvmem_ninfer、kvmem_llama 或 kvmem_hipfire")
         engines_cfg = self.config.get("engines")
         if engines_cfg is None:
             engines_cfg = {}
@@ -9871,7 +9871,7 @@ class Gateway:
 
     def restart_engine_paths(self, engine_id: str) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama、strata、kvmem、ninfer 或 kvmem_llama")
+            raise BadRequest("engine 必须是 llama、strata、kvmem_polystrata、kvmem_ninfer、kvmem_llama 或 kvmem_hipfire")
         engines_cfg = self.config.get("engines")
         if not isinstance(engines_cfg, dict) or not isinstance(
             engines_cfg.get(engine_id), dict
@@ -9914,7 +9914,7 @@ class Gateway:
 
     def _engine_update_config(self, engine_id: str) -> dict[str, Any]:
         if engine_id not in ENGINE_SLOTS:
-            raise BadRequest("engine 必须是 llama、strata、kvmem、ninfer 或 kvmem_llama")
+            raise BadRequest("engine 必须是 llama、strata、kvmem_polystrata、kvmem_ninfer、kvmem_llama 或 kvmem_hipfire")
         engines_cfg = self.config.get("engines")
         if not isinstance(engines_cfg, dict) or not isinstance(
             engines_cfg.get(engine_id), dict

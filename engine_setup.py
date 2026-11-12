@@ -268,6 +268,10 @@ ENGINE_CATALOG: dict[str, dict[str, Any]] = {
             "rocm": (
                 ("llama-kvmem-server", "kvmem-llama-server"),
                 ("strata-poly", "kvmem-strata-poly"),
+                # hipfire is HIP-only; its cargo build lives in the external
+                # engine/hipfire checkout prepared by prepare-backends.py.
+                ("hipfire", "kvmem-hipfire-server"),
+                ("daemon", "kvmem-hipfire-daemon"),
             ),
         },
     },
@@ -1042,6 +1046,13 @@ class EngineSetup:
                 "未检测到可用的 CUDA 工具链，NInfer（仅支持 CUDA）不会编译"
                 if has_nvidia
                 else "本机没有 NVIDIA 显卡，NInfer（仅支持 CUDA）不参与编译"
+            )
+        if engine_id == "kvmem" and "rocm" not in variants:
+            has_amd = any(item.get("vendor") == "amd" for item in detect_gpus())
+            notes.append(
+                "未检测到可用的 ROCm 工具链，hipfire（仅支持 ROCm/HIP）不会编译"
+                if has_amd
+                else "本机没有 AMD 显卡，hipfire（仅支持 ROCm/HIP）不参与编译"
             )
         deps = []
         for dep in spec["needs"]:
@@ -1895,10 +1906,60 @@ class EngineSetup:
                  "--jobs", jobs],
                 cwd=root, env=env, step=step,
             )
+        if variant == "rocm":
+            self._build_hipfire(job, root, tool_root, env, step, jobs, python)
         # The KVMem UI is a standalone SvelteKit bundle served from
         # share/kvmem/ui.  Its default lightweight mode needs the KVMem
         # console (/api/chat/*), so install the full upstream UI instead.
         self._build_kvmem_ui(job, root, env, step, python)
+
+    def _build_hipfire(
+        self,
+        job: dict[str, Any],
+        root: Path,
+        tool_root: Path,
+        env: dict[str, str],
+        step: str,
+        jobs: str,
+        python: Path,
+    ) -> None:
+        """Build the hipfire CLI + daemon from the external pinned checkout.
+
+        backends/hipfire/upstream.json pins the base commit and the verified
+        patch series; prepare-backends.py clones it beside the kvmem tree and
+        reproduces the patched source byte-exactly.  The multi-slot serve
+        engine lives in the daemon binary, so both crates must be built with
+        the kvmem feature against this kvmem checkout (KVMEM_ROOT).
+        """
+        if not (root / "backends" / "hipfire" / "upstream.json").is_file():
+            raise SetupError("kvmem 缺少 backends/hipfire/upstream.json，请更新 kvmem 源码")
+        cargo = shutil.which("cargo")
+        if not cargo:
+            raise SetupError("hipfire 构建需要 Rust/cargo，请安装后重试")
+        checkout = root.parent / "hipfire"
+        env = dict(env)
+        env["HIPFIRE_ROCM_PATH"] = str(tool_root)
+        env["KVMEM_ROOT"] = str(root)
+        # A canceled or failed prepare can leave patch-added files behind;
+        # return the checkout to the pinned base before re-preparing.  The
+        # cargo target/ directory is gitignored, so the build cache survives.
+        if (checkout / ".git").exists():
+            self._git(checkout, "reset", "--hard", env=env, timeout=300)
+            self._git(checkout, "clean", "-fd", env=env, timeout=600)
+        prepare = root / "scripts" / "prepare-backends.py"
+        job["detail"] = "准备 hipfire 源码（upstream.json 补丁链）"
+        self._run(
+            job,
+            [str(python), str(prepare), "--backend", "hipfire", "--hipfire-dir", str(checkout)],
+            cwd=root, env=env, step=step,
+        )
+        job["detail"] = "编译 hipfire CLI + daemon（kvmem feature）"
+        self._run(
+            job,
+            [cargo, "build", "-p", "hipfire-cli", "-p", "hipfire-daemon",
+             "--features", "kvmem", "--release", "--jobs", jobs],
+            cwd=checkout, env=env, step=step,
+        )
 
     def _build_kvmem_ui(
         self,
@@ -2187,6 +2248,9 @@ class EngineSetup:
         if artifact == "ninfer-serve":
             build = root / "backends" / "ninfer" / "build-cuda"
             return self._locate(build, ("ninfer-serve", "apps/ninfer-serve", "bin/ninfer-serve"))
+        if artifact in ("hipfire", "daemon"):
+            build = root.parent / "hipfire" / "target" / "release"
+            return self._locate(build, (artifact,))
         build = root / ("build-cuda" if variant == "cuda" else "build-rocm")
         return self._locate(build, ("llama-kvmem-server", "bin/llama-kvmem-server"))
     def _install_artifacts(self, job: dict[str, Any], engine_id: str, root: Path) -> None:
