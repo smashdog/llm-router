@@ -5325,6 +5325,25 @@ def _config_arg_value(args: list[str], *flags: str) -> str | None:
     return None
 
 
+def kvmem_llama_reasoning_enabled(args: list[str]) -> bool:
+    """The kvmem llama server starts with thinking OFF unless the launch
+    args opt in: --enable-thinking flips the chat-template default, and the
+    usual llama.cpp reasoning switches count as well."""
+    if "--enable-thinking" in args:
+        return True
+    settings: dict[str, str] = {}
+    for flag in (
+        "--reasoning-format",
+        "--reasoning-budget",
+        "--reasoning-effort",
+        "--chat-template-kwargs",
+    ):
+        value = _config_arg_value(args, flag)
+        if value is not None:
+            settings[flag[2:]] = value
+    return llama_reasoning_enabled(settings)
+
+
 def image_only_user_turn(payload: dict[str, Any]) -> bool:
     """True when the last user message carries images but no usable text."""
     messages = payload.get("messages")
@@ -5493,6 +5512,7 @@ def discover_kvmem_llama_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 multimodal=vision,
                 vision_gpu=vision_gpu if vision else False,
                 video=vision,
+                reasoning=kvmem_llama_reasoning_enabled(args),
                 notes=cfg.get("notes"),
                 quantization=cfg.get("quantization"),
                 source="kvmem_llama",
