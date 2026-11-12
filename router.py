@@ -422,6 +422,9 @@ SAMPLING_GENERATION_PATHS = {"/v1/chat/completions", "/v1/completions"}
 # Generation endpoints whose usage/timings feed the console statistics card.
 STATS_PATHS = {"/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/messages"}
 
+# Chat endpoints whose last user turn may need a text query for KVMem retrieval.
+TEXT_QUERY_PATHS = {"/v1/chat/completions", "/v1/messages"}
+
 # llama.cpp-derived engines understand these stream options; asking for them
 # lets the console show live prefill progress and per-token generation speed
 # even when the client did not request them.  Clients ignore the extra fields.
@@ -480,6 +483,9 @@ KVMEM_LLAMA_CACHE_TYPES = ("f16", "f32", "q8_0", "q5_0", "q4_0")
 KVMEM_LLAMA_QUANTIZED_CACHE = ("q8_0", "q5_0", "q4_0")
 SMOKE_PROMPT = "Reply with the single word: OK"
 SMOKE_IMAGE_PROMPT = "What shape is in this image? Answer in one word."
+# KVMem retrieval needs a text query span; bare-image user turns get this
+# default instruction so OpenAI clients that send only an image keep working.
+IMAGE_ONLY_QUERY_TEXT = "请描述这张图片。"
 
 
 def _param_spec(
@@ -5317,6 +5323,53 @@ def _config_arg_value(args: list[str], *flags: str) -> str | None:
             if token.startswith(flag + "="):
                 return token.split("=", 1)[1]
     return None
+
+
+def image_only_user_turn(payload: dict[str, Any]) -> bool:
+    """True when the last user message carries images but no usable text."""
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "user":
+        return False
+    content = last.get("content")
+    if not isinstance(content, list):
+        return False
+    has_image = False
+    has_text = False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("image_url", "image"):
+            has_image = True
+        elif str(part.get("text") or "").strip():
+            has_text = True
+    return has_image and not has_text
+
+
+def kvmem_text_query_required(entry: Model, engines_cfg: dict[str, Any]) -> bool:
+    """Mirror serve.kvmem.enabled(): polystrata retrieval needs a text query.
+
+    KVMem and Strata slots run the same serve; only configs with a positive
+    --kvmem-budget (or info.kvmem=1) reject image-only user turns, so other
+    engines keep receiving the client payload untouched.
+    """
+    kind = (engines_cfg.get(entry.engine) or {}).get("kind")
+    if kind not in ("kvmem", "strata"):
+        return False
+    if entry.config_path:
+        try:
+            cfg = json.loads(Path(entry.config_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cfg = {}
+        if isinstance(cfg, dict):
+            if (cfg.get("info") or {}).get("kvmem") in (1, "1"):
+                return True
+            budget = _config_arg_value(cfg.get("args") or [], "--kvmem-budget")
+            if budget is not None:
+                return (parse_int(budget) or 0) > 0
+    return kind == "kvmem"
 
 
 def _config_path_value(config: dict[str, Any] | None, path: tuple[str, ...] | list[str]):
@@ -14467,6 +14520,18 @@ class Handler(BaseHTTPRequestHandler):
                 payload["model"] = model_name
                 payload_changed = True
         entry = self.gateway.acquire(model_name)
+        if (
+            isinstance(payload, dict)
+            and path.rstrip("/") in TEXT_QUERY_PATHS
+            and image_only_user_turn(payload)
+            and kvmem_text_query_required(entry, self.gateway.config.get("engines", {}))
+        ):
+            # KVMem retrieval rejects image-only turns; append a default
+            # instruction so the engine still gets a text query span.
+            payload["messages"][-1]["content"].append(
+                {"type": "text", "text": IMAGE_ONLY_QUERY_TEXT}
+            )
+            payload_changed = True
         if (
             isinstance(payload, dict)
             and path.rstrip("/") in SAMPLING_GENERATION_PATHS
