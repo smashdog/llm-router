@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -68,10 +69,15 @@ def write_json_atomic(path: str | Path, data: Any) -> None:
 # hardware
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list[str], timeout: float = 12.0) -> subprocess.CompletedProcess | None:
+def _run(
+    cmd: list[str],
+    timeout: float = 12.0,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess | None:
     try:
         return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
+            cmd, capture_output=True, text=True, timeout=timeout, check=False,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -84,8 +90,154 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+def _rocm_bin_dirs() -> list[Path]:
+    """ROCm tool directories to search when they are not on PATH.
+
+    The managed TheRock toolchains ship amd-smi/rocminfo under
+    ``toolchains/rocm-*/bin`` and are not registered system-wide, so a plain
+    ``shutil.which`` misses them.
+    """
+    dirs: list[Path] = []
+    rocm_path = str(os.environ.get("ROCM_PATH") or "").strip()
+    if rocm_path:
+        dirs.append(Path(rocm_path) / "bin")
+    dirs.append(Path("/opt/rocm/bin"))
+    toolchains = REPO_ROOT / "toolchains"
+    if toolchains.is_dir():
+        for entry in sorted(toolchains.iterdir(), reverse=True):
+            if entry.is_dir() and entry.name.lower().startswith("rocm"):
+                dirs.append(entry / "bin")
+    return dirs
+
+
+def _find_smi() -> tuple[str, Path] | None:
+    """Locate rocm-smi (legacy) or amd-smi (TheRock), PATH first."""
+    for name in ("rocm-smi", "amd-smi"):
+        found = shutil.which(name)
+        if found:
+            return name, Path(found)
+        for directory in _rocm_bin_dirs():
+            candidate = directory / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return name, candidate
+    return None
+
+
+def _smi_env(tool: Path) -> dict[str, str]:
+    """Toolchain SMI tools need their own runtime libs on LD_LIBRARY_PATH."""
+    env = os.environ.copy()
+    root = tool.resolve().parent.parent
+    libs = [str(root / sub) for sub in ("lib64", "lib") if (root / sub).is_dir()]
+    if libs:
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = ":".join(libs + ([existing] if existing else []))
+    return env
+
+
+def _amd_smi_gpus(tool: Path) -> list[dict[str, Any]]:
+    """Parse ``amd-smi metric/static --json`` (values reported in MiB)."""
+    env = _smi_env(tool)
+    metric = _run([str(tool), "metric", "--json"], timeout=25.0, env=env)
+    if metric is None or metric.returncode != 0:
+        return []
+    try:
+        data = json.loads(metric.stdout)
+    except ValueError:
+        return []
+    entries = data.get("gpu_data") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    names: dict[int, str] = {}
+    static = _run([str(tool), "static", "--json"], timeout=25.0, env=env)
+    if static is not None and static.returncode == 0:
+        try:
+            static_data = json.loads(static.stdout)
+        except ValueError:
+            static_data = {}
+        for item in static_data.get("gpu_data", []) if isinstance(static_data, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            index = _as_int(item.get("gpu"))
+            market = str((item.get("asic") or {}).get("market_name") or "").strip()
+            if index is not None and market and market != "N/A":
+                names[index] = market
+
+    def mib(mem: dict, field: str) -> int | None:
+        item = mem.get(field)
+        if not isinstance(item, dict):
+            return None
+        value = _as_int(item.get("value"))
+        if value is None:
+            return None
+        unit = str(item.get("unit") or "MB").upper()
+        if unit == "GB":
+            return value * 1024
+        if unit == "B":
+            return value // (1024 * 1024)
+        return value  # amd-smi reports "MB" but the numbers are MiB
+
+    gpus: list[dict[str, Any]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        mem = item.get("mem_usage")
+        if not isinstance(mem, dict):
+            continue
+        total = mib(mem, "total_vram")
+        if not total:
+            continue
+        used = mib(mem, "used_vram")
+        free = mib(mem, "free_vram")
+        index = _as_int(item.get("gpu"))
+        gpus.append({
+            "index": index if index is not None else len(gpus),
+            "name": names.get(index, "AMD GPU"),
+            "vram_total_mib": total,
+            "vram_free_mib": free if free is not None else max(0, total - (used or 0)),
+            "vendor": "amd",
+        })
+    return gpus
+
+
+def _sysfs_amd_gpus() -> list[dict[str, Any]]:
+    """Last resort: amdgpu exposes VRAM counters in sysfs, no SMI needed."""
+    gpus: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    drm = Path("/sys/class/drm")
+    if not drm.is_dir():
+        return gpus
+    for card in sorted(drm.glob("card[0-9]*")):
+        device = card / "device"
+        total_path = device / "mem_info_vram_total"
+        if not total_path.is_file():
+            continue
+        try:
+            if (device / "vendor").read_text().strip().lower() != "0x1002":
+                continue
+            real = os.path.realpath(device)
+            total_b = int(total_path.read_text().strip())
+            used_path = device / "mem_info_vram_used"
+            used_b = int(used_path.read_text().strip()) if used_path.is_file() else 0
+        except (OSError, ValueError):
+            continue
+        if real in seen or total_b <= 0:
+            continue
+        seen.add(real)
+        total = total_b // (1024 * 1024)
+        used = used_b // (1024 * 1024)
+        index = _as_int(card.name.replace("card", ""))
+        gpus.append({
+            "index": index if index is not None else len(gpus),
+            "name": "AMD GPU",
+            "vram_total_mib": total,
+            "vram_free_mib": max(0, total - used),
+            "vendor": "amd",
+        })
+    return gpus
+
+
 def probe_gpus() -> list[dict[str, Any]]:
-    """NVIDIA first, ROCm second; an empty list means "unknown"."""
+    """NVIDIA first, ROCm second, sysfs last; an empty list means "unknown"."""
     gpus: list[dict[str, Any]] = []
     report = _run([
         "nvidia-smi",
@@ -112,43 +264,54 @@ def probe_gpus() -> list[dict[str, Any]]:
         if gpus:
             return gpus
 
-    report = _run(["rocm-smi", "--showproductname", "--showmeminfo", "vram", "--json"])
-    if report is not None and report.returncode == 0:
-        try:
-            data = json.loads(report.stdout)
-        except ValueError:
-            data = {}
-        if isinstance(data, dict):
-            for key, device in data.items():
-                if not isinstance(device, dict):
-                    continue
-                total_raw = (
-                    device.get("VRAM Total Memory (B)")
-                    or device.get("vram_total")
-                    or device.get("VRAM Total Memory")
-                )
-                used_raw = (
-                    device.get("VRAM Total Used Memory (B)")
-                    or device.get("vram_used")
-                    or device.get("VRAM Total Used Memory")
-                )
-                total = _as_int(total_raw)
-                used = _as_int(used_raw)
-                if not total:
-                    continue
-                # Values shown by rocm-smi in bytes; newer JSON already uses MiB.
-                if total > 1024 * 1024:
-                    total //= 1024 * 1024
-                    used = (used or 0) // (1024 * 1024)
-                index = _as_int(str(key).replace("card", "").strip())
-                gpus.append({
-                    "index": index if index is not None else len(gpus),
-                    "name": str(device.get("Card series") or device.get("Card SKU") or key),
-                    "vram_total_mib": total,
-                    "vram_free_mib": max(0, total - (used or 0)),
-                    "vendor": "amd",
-                })
-    return gpus
+    smi = _find_smi()
+    if smi is not None:
+        tool_name, tool = smi
+        if tool_name == "amd-smi":
+            gpus = _amd_smi_gpus(tool)
+        else:
+            report = _run(
+                [str(tool), "--showproductname", "--showmeminfo", "vram", "--json"],
+                env=_smi_env(tool),
+            )
+            if report is not None and report.returncode == 0:
+                try:
+                    data = json.loads(report.stdout)
+                except ValueError:
+                    data = {}
+                if isinstance(data, dict):
+                    for key, device in data.items():
+                        if not isinstance(device, dict):
+                            continue
+                        total_raw = (
+                            device.get("VRAM Total Memory (B)")
+                            or device.get("vram_total")
+                            or device.get("VRAM Total Memory")
+                        )
+                        used_raw = (
+                            device.get("VRAM Total Used Memory (B)")
+                            or device.get("vram_used")
+                            or device.get("VRAM Total Used Memory")
+                        )
+                        total = _as_int(total_raw)
+                        used = _as_int(used_raw)
+                        if not total:
+                            continue
+                        # Values shown by rocm-smi in bytes; newer JSON already uses MiB.
+                        if total > 1024 * 1024:
+                            total //= 1024 * 1024
+                            used = (used or 0) // (1024 * 1024)
+                        index = _as_int(str(key).replace("card", "").strip())
+                        gpus.append({
+                            "index": index if index is not None else len(gpus),
+                            "name": str(device.get("Card series") or device.get("Card SKU") or key),
+                            "vram_total_mib": total,
+                            "vram_free_mib": max(0, total - (used or 0)),
+                            "vendor": "amd",
+                        })
+        if gpus:
+            return gpus
+    return _sysfs_amd_gpus()
 
 
 def probe_ram() -> dict[str, int | None]:
