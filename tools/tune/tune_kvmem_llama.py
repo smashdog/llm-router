@@ -104,6 +104,8 @@ def main() -> int:
     hardware = common.probe_hardware()
     result["hardware"] = hardware
     common.emit("hardware", hardware=hardware)
+    if hardware.get("vram_busy_note"):
+        result["notes"].append(hardware["vram_busy_note"])
     if not hardware.get("vram_total_mib"):
         return finish("failed", "未检测到 GPU；KVMem + llama.cpp 调优需要显存信息")
 
