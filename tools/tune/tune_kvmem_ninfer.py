@@ -96,8 +96,6 @@ def main() -> int:
     hardware = common.probe_hardware()
     result["hardware"] = hardware
     common.emit("hardware", hardware=hardware)
-    if hardware.get("vram_busy_note"):
-        result["notes"].append(hardware["vram_busy_note"])
     if not hardware.get("vram_total_mib"):
         result["notes"].append("未检测到 GPU 显存信息；按引擎自动策略继续。")
 

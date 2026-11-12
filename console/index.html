@@ -1082,6 +1082,8 @@
       <p class="params-error" id="params-error" hidden></p>
     </div>
     <div class="dialog-actions">
+      <button class="btn" type="button" id="params-tune" style="margin-right:auto" hidden
+        title="停止引擎，按本机显存/内存/核心实测性能并给出建议参数">调优</button>
       <button class="btn" type="button" id="params-cancel">取消</button>
       <button class="btn primary" type="submit" id="params-save">保存</button>
     </div>
@@ -1175,7 +1177,7 @@
 <dialog id="tune-dialog" class="wide tune-wide">
   <div class="dialog-body">
     <h3>性能调优 <span class="name" id="tune-model"></span></h3>
-    <p class="params-hint" id="tune-intro">调优会先停止引擎，再按当前机器的显存、内存与物理核心数逐组实测；每组候选都会重新加载模型，请耐心等待。调优期间模型服务不可用。</p>
+    <p class="params-hint" id="tune-intro">调优会先停止引擎并等待显存/内存释放，再按当前机器的显存、内存与物理核心数逐组实测；每组候选都会重新加载模型，请耐心等待。若显存/内存被其它进程占用则无法调优。调优期间模型服务不可用。</p>
     <div class="tune-summary" id="tune-hardware"></div>
     <div class="progress" id="tune-progress" hidden></div>
     <p class="params-error" id="tune-error" hidden></p>
@@ -3507,6 +3509,7 @@
       }
     }
     paramsModel = model.id;
+    $("params-tune").hidden = !["kvmem", "ninfer", "kvmem_llama"].includes(model.engine);
     paramsOriginal = null;
     paramsRenderedKind = null;
     paramsEditJob = null;
@@ -4681,6 +4684,17 @@
   });
   $("params-form").addEventListener("submit", saveParams);
   $("params-cancel").addEventListener("click", () => $("params-dialog").close());
+  $("params-tune").addEventListener("click", () => {
+    const engine = paramsEngineInfo();
+    const kind = engine ? engine.kind : "";
+    if (paramsNeedsValidation(kind, $("params-engine-slot").value)) {
+      showParamsError("引擎或文件有未保存的改动，请先保存再调优。");
+      return;
+    }
+    const id = paramsModel;
+    $("params-dialog").close();
+    openTuneDialog(id);
+  });
   $("params-engine-slot").addEventListener("change", paramsSwitchEngine);
   for (const target of [$("params-vision-path"), $("params-draft-path"),
     $("params-context"), $("params-cache-k"), $("params-cache-v")]) {

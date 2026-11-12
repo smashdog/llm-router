@@ -10407,6 +10407,36 @@ class Gateway:
             if len(progress) > 300:
                 del progress[:-300]
 
+    def _tune_resource_gate(self, job: dict[str, Any], engine_pids: set[int]) -> None:
+        """Refuse tuning while other processes hold VRAM/RAM.
+
+        The caller has already stopped the gateway engine; its VRAM/RAM may
+        take a moment to be released, so wait that out (up to 60s).  Anything
+        still held by non-engine processes is a hard conflict: report who
+        holds it instead of silently planning a degraded CPU-heavy offload.
+        """
+        # tools/tune is not a package; import lazily so a bare router.py copy
+        # (e2e harnesses) still starts even without the tune helpers.
+        tune_dir = str(Path(__file__).resolve().parent / "tools" / "tune")
+        if tune_dir not in sys.path:
+            sys.path.insert(0, tune_dir)
+        import tune_common
+
+        deadline = time.monotonic() + 60.0
+        announced = False
+        while True:
+            hardware = tune_common.probe_hardware()
+            conflict = tune_common.resource_conflict(hardware, engine_pids)
+            if conflict is None:
+                return
+            message, engine_only = conflict
+            if not engine_only or time.monotonic() >= deadline:
+                raise BadRequest(message)
+            if not announced:
+                self._tune_phase(job, "stopping", "等待引擎释放显存/内存…")
+                announced = True
+            time.sleep(2.0)
+
     def start_model_tune(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Run one engine's independent tuning script while the engine is stopped."""
         name = payload.get("model")
@@ -10558,10 +10588,17 @@ class Gateway:
         try:
             self._tune_phase(job, "stopping", "停止当前引擎，释放显存…")
             self.ensure_no_async()
+            engine_pids: set[int] = set()
             with self.cond:
                 engine_alive = bool(self.engine is not None and self.engine.alive())
+                if self.engine is not None:
+                    if self.engine.proc is not None:
+                        engine_pids.add(self.engine.proc.pid)
+                    if self.engine.last_pid:
+                        engine_pids.add(int(self.engine.last_pid))
             if engine_alive:
                 self.stop_engine()
+            self._tune_resource_gate(job, engine_pids)
             self._tune_phase(job, "benchmarking", "运行候选基准（每组会重新加载模型）…")
             command = [
                 sys.executable, "-u", str(script),

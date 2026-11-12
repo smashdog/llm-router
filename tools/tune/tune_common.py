@@ -366,12 +366,13 @@ def physical_cores() -> int:
     return max(1, (os.cpu_count() or 2) // 2)
 
 
-def _vram_holder_pids() -> list[str]:
-    """Who actually holds VRAM: amd-smi per-process stats, else KFD openers.
+def vram_holders() -> list[dict[str, Any]]:
+    """Processes that actually hold VRAM: amd-smi stats, else KFD openers.
 
     Desktop compositors open /dev/dri/render* for display but rarely own
     meaningful VRAM; only compute clients open /dev/kfd, so the fallback
-    scan deliberately ignores render nodes to keep the note actionable.
+    scan deliberately ignores render nodes to keep the list actionable.
+    Each entry is ``{"pid": int, "name": str, "mib": int | None}``.
     """
     smi = _find_smi()
     if smi is not None and smi[0] == "amd-smi":
@@ -381,7 +382,7 @@ def _vram_holder_pids() -> list[str]:
                 data = json.loads(report.stdout)
             except ValueError:
                 data = None
-            holders: list[str] = []
+            holders: list[dict[str, Any]] = []
             groups = data if isinstance(data, list) else (data or {}).get("gpu_data", [])
             for group in groups if isinstance(groups, list) else []:
                 if not isinstance(group, dict):
@@ -400,7 +401,7 @@ def _vram_holder_pids() -> list[str]:
                         unit = str(mem.get("unit") or "MB").upper()
                         if value is not None:
                             mib = value * 1024 if unit == "GB" else value
-                    holders.append(f"{pid}({name}, {mib} MiB)" if mib else f"{pid}({name})")
+                    holders.append({"pid": pid, "name": name, "mib": mib})
             if holders:
                 return holders
     holders = []
@@ -416,14 +417,99 @@ def _vram_holder_pids() -> list[str]:
                         comm = (proc / "comm").read_text().strip()
                     except OSError:
                         comm = "?"
-                    holders.append(f"{proc.name}({comm})")
+                    holders.append({"pid": int(proc.name), "name": comm, "mib": None})
                     break
         except OSError:
             continue
     return holders
 
 
-def _probe_hardware_once() -> dict[str, Any]:
+def ram_holders(min_mib: int = 512, limit: int = 6) -> list[dict[str, Any]]:
+    """Top RSS processes (>= min_mib), largest first, same shape as vram_holders."""
+    holders: list[dict[str, Any]] = []
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            status = (proc / "status").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rss_kib = None
+        name = "?"
+        for line in status.splitlines():
+            if line.startswith("VmRSS:"):
+                rss_kib = _as_int(line.split()[1])
+            elif line.startswith("Name:"):
+                name = line.split(":", 1)[1].strip() or "?"
+        if rss_kib is None:
+            continue
+        mib = rss_kib // 1024
+        if mib >= min_mib:
+            holders.append({"pid": int(proc.name), "name": name, "mib": mib})
+    holders.sort(key=lambda item: item["mib"] or 0, reverse=True)
+    return holders[:limit]
+
+
+def format_holders(holders: list[dict[str, Any]]) -> str:
+    parts = []
+    for item in holders:
+        mib = item.get("mib")
+        parts.append(
+            f"{item['pid']}({item['name']}, {mib} MiB)" if mib
+            else f"{item['pid']}({item['name']})"
+        )
+    return ", ".join(parts)
+
+
+def resource_conflict(
+    hardware: dict[str, Any], engine_pids: set[int]
+) -> tuple[str, bool] | None:
+    """Decide whether tuning may proceed on this hardware snapshot.
+
+    Returns ``None`` when VRAM/RAM are free enough.  Otherwise returns
+    ``(message, engine_only)``: ``engine_only`` is True when only the
+    gateway's own engine processes (still releasing after a stop) hold the
+    resources, so waiting may resolve it; False when other processes hold
+    them and tuning must be refused outright.
+    """
+    problems: list[str] = []
+    engine_only = True
+    total = int(hardware.get("vram_total_mib") or 0)
+    free = int(hardware.get("vram_free_mib") or 0)
+    if total and free < total * 0.9:
+        holders = vram_holders()
+        others = [item for item in holders if item["pid"] not in engine_pids]
+        mine = [item for item in holders if item["pid"] in engine_pids]
+        if others:
+            engine_only = False
+            problems.append(
+                f"显存被其它进程占用（{format_holders(others)}），无法调优；"
+                "请先释放这些进程占用的显存后重试"
+            )
+        elif mine:
+            problems.append(
+                f"引擎进程（{format_holders(mine)}）尚未释放显存，无法调优；请稍后重试"
+            )
+        else:
+            problems.append(
+                f"显存仍被占用（可用 {free}/{total} MiB）且无法识别占用进程，无法调优"
+            )
+    ram_total = int(hardware.get("ram_total_mib") or 0)
+    ram_avail = int(hardware.get("ram_available_mib") or 0)
+    if ram_total and ram_avail < ram_total * 0.5:
+        holders = [item for item in ram_holders() if item["pid"] not in engine_pids]
+        if holders:
+            engine_only = False
+            problems.append(
+                f"内存被其它进程占用（{format_holders(holders)}），可用内存不足，无法调优；"
+                "请先释放后重试"
+            )
+        else:
+            problems.append(f"可用内存不足（{ram_avail}/{ram_total} MiB），无法调优")
+    if not problems:
+        return None
+    return "；".join(problems), engine_only
+
+
+def probe_hardware() -> dict[str, Any]:
     gpus = probe_gpus()
     ram = probe_ram()
     cores = physical_cores()
@@ -438,36 +524,6 @@ def _probe_hardware_once() -> dict[str, Any]:
         "cpu_model": _cpu_model(),
         "os": f"{os.uname().sysname} {os.uname().release}",
     }
-
-
-def probe_hardware(settle_vram: bool = True) -> dict[str, Any]:
-    """Probe once, then wait out VRAM still held by a just-stopped engine.
-
-    The router stops the gateway engine right before launching a tune script;
-    a snapshot taken in that window can see the old model's VRAM and plan a
-    needlessly CPU-heavy offload.  Re-probe until the GPU is mostly free, or
-    report who still holds it so a conservative plan is explainable.
-    """
-    hardware = _probe_hardware_once()
-    total = int(hardware.get("vram_total_mib") or 0)
-    if not settle_vram or not total:
-        return hardware
-    if int(hardware.get("vram_free_mib") or 0) >= total * 0.5:
-        return hardware
-    progress("显存占用超过一半，等待引擎释放显存后重新探测…")
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        time.sleep(2.0)
-        hardware = _probe_hardware_once()
-        if int(hardware.get("vram_free_mib") or 0) >= total * 0.9:
-            break
-    if int(hardware.get("vram_free_mib") or 0) < total * 0.5:
-        holders = ", ".join(_vram_holder_pids()) or "未知进程"
-        hardware["vram_busy_note"] = (
-            f"等待 60s 后显存仍被占用（{holders}），按剩余显存保守规划"
-        )
-        progress(hardware["vram_busy_note"])
-    return hardware
 
 
 def _cpu_model() -> str:
