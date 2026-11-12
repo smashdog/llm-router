@@ -1247,9 +1247,10 @@
   const ENGINE_LABELS = {
     llama: "llama.cpp",
     strata: "Strata",
-    kvmem: "KVMem",
-    ninfer: "NInfer",
+    kvmem_polystrata: "KVMem + polystrata",
+    kvmem_ninfer: "KVMem + ninfer",
     kvmem_llama: "KVMem + llama.cpp",
+    kvmem_hipfire: "KVMem + hipfire",
   };
   const PARAM_SUMMARY = [
     ["temperature", "温度"], ["top_p", "top_p"], ["top_k", "top_k"], ["repetition_penalty", "重复"],
@@ -1388,7 +1389,9 @@
         ? manage.kvmem_poly_engine_schema
         : kind === "kvmem_ninfer"
           ? manage.ninfer_engine_schema
-          : manage.kvmem_engine_schema;
+          : kind === "kvmem_hipfire"
+            ? manage.kvmem_hipfire_engine_schema
+            : manage.kvmem_engine_schema;
     return Array.isArray(schema) ? schema : [];
   }
 
@@ -1401,13 +1404,14 @@
   }
 
   function kvmemFamily(kind) {
-    return kind === "strata" || kind === "kvmem_polystrata" || kind === "kvmem_ninfer" || kind === "kvmem_llama";
+    return kind === "strata" || kind === "kvmem_polystrata" || kind === "kvmem_ninfer" || kind === "kvmem_llama" || kind === "kvmem_hipfire";
   }
 
   function kvmemEngineTitle(kind) {
     if (kind === "strata") return "Strata";
     if (kind === "kvmem_polystrata") return "strata-poly";
     if (kind === "kvmem_ninfer") return "ninfer-serve";
+    if (kind === "kvmem_hipfire") return "hipfire";
     return "llama-kvmem-server";
   }
 
@@ -1471,8 +1475,11 @@
       const tabNote = kind === "strata"
         ? "请求级采样参数在“基本参数”页。"
         : "KVMem 扩展参数在“kvmem参数”页，请求级采样参数在“基本参数”页。";
+      const writeNote = kind === "kvmem_hipfire"
+        ? "这些是 hipfire 自身的参数，按字段写入模型配置的 args / env / 顶层（max_seq）；留空表示沿用模板或引擎默认。"
+        : `这些是 ${kvmemEngineTitle(kind)} 自身的参数，写入模型自己的引擎配置（引擎参数写入 args，草稿验证窗口等写入 user_args，模型级字段与视觉组写入配置顶层和 vision 段）；留空表示沿用模板或引擎默认。`;
       hintHost.textContent = total
-        ? `这些是 ${kvmemEngineTitle(kind)} 自身的参数，写入模型自己的引擎配置（引擎参数写入 args，草稿验证窗口等写入 user_args，模型级字段与视觉组写入配置顶层和 vision 段）；留空表示沿用模板或引擎默认。${tabNote}保存后按需重启引擎。`
+        ? `${writeNote}${tabNote}保存后按需重启引擎。`
         : "";
     }
   }
@@ -1487,9 +1494,10 @@
     fillSpecValues(host, specs, values);
     if (countHost) countHost.textContent = specs.length ? String(specs.length) : "";
     if (hintHost) {
-      hintHost.textContent = specs.length
-        ? `这些是 KVMem 叠加在 ${kvmemEngineTitle(kind)} 上的扩展参数（--kvmem-*），写入模型自己的引擎配置；留空表示沿用模板或引擎默认，引擎不支持时会拒绝启动。保存后按需重启引擎。`
-        : "";
+      const detail = kind === "kvmem_hipfire"
+        ? "这些是 KVMem 叠加在 hipfire 上的扩展参数（HIPFIRE_KVMEM* 环境变量），写入模型配置的 env 段；留空表示沿用路由默认（开启、预算 32768）。保存后按需重启引擎。"
+        : `这些是 KVMem 叠加在 ${kvmemEngineTitle(kind)} 上的扩展参数（--kvmem-*），写入模型自己的引擎配置；留空表示沿用模板或引擎默认，引擎不支持时会拒绝启动。保存后按需重启引擎。`;
+      hintHost.textContent = specs.length ? detail : "";
     }
   }
 
@@ -2892,7 +2900,7 @@
       const value = modelState(m);
       const facts = [];
       if (m.context_length) facts.push(`上下文 ${Number(m.context_length).toLocaleString()}`);
-      if ((m.engine === "llama" || m.engine === "kvmem_llama") && (m.cache_type_k || m.cache_type_v)) {
+      if ((m.engine === "llama" || m.engine === "kvmem_llama" || m.engine === "kvmem_hipfire") && (m.cache_type_k || m.cache_type_v)) {
         facts.push(`KV ${m.cache_type_k || "—"}/${m.cache_type_v || "—"}`);
       }
       if (m.engine === "strata" && m.engine_params && m.engine_params.kv) {
@@ -3191,7 +3199,7 @@
 
   async function unloadModel(id) {
     const model = state.models.find((m) => m.id === id) || {};
-    const single = model.engine === "kvmem_ninfer" || model.engine === "kvmem_llama" || model.engine === "strata";
+    const single = model.engine === "kvmem_ninfer" || model.engine === "kvmem_llama" || model.engine === "kvmem_hipfire" || model.engine === "strata";
     const ok = await askConfirm(
       "卸载模型",
       single
@@ -3203,7 +3211,7 @@
     if (ok) await mutate("/models/unload", { model: id }, `已请求卸载 ${id}`);
   }
 
-  const EDIT_ENGINE_KINDS = ["llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata"];
+  const EDIT_ENGINE_KINDS = ["llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "kvmem_hipfire", "strata"];
 
   function paramsEngineInfo() {
     const slot = $("params-engine-slot").value;
@@ -3221,7 +3229,7 @@
   }
 
   function paramsVisionText(kind) {
-    return kind === "kvmem_ninfer" ? "" : String($("params-vision-path").value || "").trim();
+    return kind === "kvmem_ninfer" || kind === "kvmem_hipfire" ? "" : String($("params-vision-path").value || "").trim();
   }
 
   function paramsDraftText(kind) {
@@ -3358,7 +3366,9 @@
   }
 
   function setParamsKindHint(kind, preset) {
-    $("params-hint").textContent = kind === "kvmem_ninfer"
+    $("params-hint").textContent = kind === "kvmem_hipfire"
+      ? "KVMem + hipfire：模型路径必须是 HFQM 文件；K/V 固定 q8，视觉 sidecar 自动识别；max_seq 在“更多参数”设置，留空用模型训练上下文上限；改引擎或路径会重新验证，失败自动恢复旧配置。"
+      : kind === "kvmem_ninfer"
       ? "NInfer：repetition_penalty 只能为 1（提交时清空），不支持 repeat_last_n；模型路径必须是 .ninfer，视觉塔内嵌在模型里；改引擎或路径会重新验证，失败自动恢复旧配置。"
       : kind === "kvmem_llama"
         ? "KVMem + llama.cpp：top_k 为 0–1000；不支持 repeat_last_n；改动上下文或 K/V 精度会重新验证；改引擎或路径同样重新验证，失败自动恢复旧配置。"
@@ -3379,6 +3389,7 @@
     const strata = kind === "strata";
     const ninfer = kind === "kvmem_ninfer";
     const kvllama = kind === "kvmem_llama";
+    const kvhipfire = kind === "kvmem_hipfire";
     const llama = kind === "llama";
     const kvlike = kv || strata;
     form.elements.top_k.min = kvlike ? 1 : 0;
@@ -3408,7 +3419,7 @@
           ? "llama.cpp · 目录扫描模型，首次修改会补建 models.ini 预设"
           : "llama.cpp · 保存后自动重启引擎生效";
     }
-    $("params-vision-path-field").hidden = ninfer;
+    $("params-vision-path-field").hidden = ninfer || kvhipfire;
     $("params-vision-enabled-field").hidden = !ninfer;
     $("params-vision-enabled").checked = opts.visionEnabled === true;
     $("params-draft-path-field").hidden = !strata;
@@ -3432,8 +3443,10 @@
       $("params-kvmem"), $("params-kvmem-count"), $("params-kvmem-hint"),
       opts.engineValues || null, kind,
     );
-    setKvmemTabVisible($("params-dialog"), kvllama || kv || ninfer);
-    $("params-more-caption").textContent = kvllama
+    setKvmemTabVisible($("params-dialog"), kvllama || kv || ninfer || kvhipfire);
+    $("params-more-caption").textContent = kvhipfire
+      ? "hipfire 原生进程参数 · 留空沿用模板"
+      : kvllama
       ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
       : strata
         ? "Strata 原生进程 / 视觉参数 · 留空沿用模板"
@@ -3467,7 +3480,7 @@
     const cacheV = backToOriginal
       ? paramsOriginal.cacheV
       : previousHasContext ? $("params-cache-v").value : "q8_0";
-    const visionPath = String($("params-vision-path").value || "").trim();
+    const visionPath = kind === "kvmem_hipfire" ? "" : String($("params-vision-path").value || "").trim();
     const engineVision = !!(engine.defaults && engine.defaults.vision);
     const visionEnabled = backToOriginal
       ? paramsOriginal.visionEnabled
@@ -3491,7 +3504,10 @@
       engineValues: backToOriginal ? (model.engine_params || null) : (engine.engine_params || null),
     });
     $("params-model-path").placeholder = kind === "kvmem_ninfer"
-      ? "/path/to/model.ninfer" : "/path/to/model.gguf 或模型目录";
+      ? "/path/to/model.ninfer"
+      : kind === "kvmem_hipfire"
+        ? "/path/to/model.mq4-xts（HFQM 文件）"
+        : "/path/to/model.gguf 或模型目录";
     $("params-error").hidden = true;
     $("params-error").textContent = "";
     $("params-progress").hidden = true;
@@ -3560,7 +3576,10 @@
     if (!select.value && select.options.length) select.selectedIndex = 0;
     $("params-model-path").value = model.model_path || "";
     $("params-model-path").placeholder = originalKind === "kvmem_ninfer"
-      ? "/path/to/model.ninfer" : "/path/to/model.gguf 或模型目录";
+      ? "/path/to/model.ninfer"
+      : originalKind === "kvmem_hipfire"
+        ? "/path/to/model.mq4-xts（HFQM 文件）"
+        : "/path/to/model.gguf 或模型目录";
     $("params-vision-path").value = model.vision_path || "";
     $("params-draft-path").value = model.draft_path || "";
     const initialContextText = originalKind === "llama"
@@ -3571,7 +3590,9 @@
     const initialVisionEnabled = model.multimodal === true;
     const initialHasVision = originalKind === "kvmem_ninfer"
       ? initialVisionEnabled
-      : !!String(model.vision_path || "").trim();
+      : originalKind === "kvmem_hipfire"
+        ? false
+        : !!String(model.vision_path || "").trim();
     renderParamsKind(paramsEngineMap[select.value] || paramsEngineMap[slot], {
       contextText: initialContextText,
       cacheK: model.cache_type_k || "q8_0",
@@ -3842,6 +3863,20 @@
       }
       if (Object.keys(advanced).length) body.engine_params = advanced;
     }
+    if (kind === "kvmem_hipfire") {
+      let advanced;
+      try {
+        advanced = Object.assign(
+          {},
+          readKvmemEngine($("params-more"), "kvmem_hipfire", "engine"),
+          readKvmemEngine($("params-kvmem"), "kvmem_hipfire"),
+        );
+      } catch (error) {
+        showParamsError(error.message);
+        return;
+      }
+      if (Object.keys(advanced).length) body.engine_params = advanced;
+    }
     if (kind === "strata") {
       let advanced;
       try {
@@ -3933,6 +3968,7 @@
     const strata = kind === "strata";
     const ninfer = kind === "kvmem_ninfer";
     const kvllama = kind === "kvmem_llama";
+    const kvhipfire = kind === "kvmem_hipfire";
     const kvlike = kv || strata;
     const tuneEligible = kv || ninfer || kvllama;
     $("add-tune-field").hidden = !tuneEligible;
@@ -3961,7 +3997,9 @@
     $("add-engine-caption").textContent = kvllama
       ? "llama-kvmem-server · 上下文留空读取 GGUF"
       : "llama.cpp · 上下文留空读取 GGUF";
-    $("add-more-caption").textContent = kvllama
+    $("add-more-caption").textContent = kvhipfire
+      ? "hipfire 原生进程参数 · 留空沿用模板"
+      : kvllama
       ? "llama-kvmem-server 原生进程参数 · 留空沿用模板"
       : strata
         ? "Strata 原生进程 / 视觉参数 · 留空沿用模板"
@@ -3972,14 +4010,20 @@
             : "llama.cpp 高级采样 / 生成参数 · 留空不注入";
     $("add-model-hint").textContent = ninfer
       ? ".ninfer 文件，必填"
-      : "模型目录或 .gguf 文件，必填（目录自动挑选最大 GGUF 与 mmproj）";
+      : kvhipfire
+        ? "HFQM 模型文件（如 .mq4-xts），必填；视觉 sidecar 自动识别"
+        : "模型目录或 .gguf 文件，必填（目录自动挑选最大 GGUF 与 mmproj）";
     $("add-model").placeholder = ninfer
       ? "/path/to/model.ninfer"
-      : "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf";
-    $("add-vision-field").hidden = ninfer;
+      : kvhipfire
+        ? "/mnt/ai/models/hipfire/Qwen3.8-27B/qwen3.8-27b.mq4-xts"
+        : "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf";
+    $("add-vision-field").hidden = ninfer || kvhipfire;
+    $("add-vision-device").hidden = kvhipfire;
+    $("add-vision-hint").hidden = kvhipfire;
     $("add-draft-field").hidden = !strata;
     if (!strata) $("add-draft").value = "";
-    $("add-model-field").classList.toggle("span-all", ninfer);
+    $("add-model-field").classList.toggle("span-all", ninfer || kvhipfire);
     $("add-vision-enabled-field").hidden = !ninfer;
     const enabledBox = $("add-vision-enabled");
     enabledBox.checked = ninfer ? !!(engine && engine.defaults && engine.defaults.vision) : false;
@@ -3993,17 +4037,19 @@
         ? "填写后写入新配置的 vision.mmproj 与 --vision；视觉组参数只有填写 mmproj 时才生效。主模型、专家与 KV 仍按“更多参数”加载到 GPU/内存。"
         : "只控制视觉编码器（mmproj）；主模型和 KV cache 仍按 n-gpu-layers 与上下文加载到 GPU。";
     syncVisionDevice();
-    setKvmemTabVisible($("add-dialog"), kvllama || kv || ninfer);
+    setKvmemTabVisible($("add-dialog"), kvllama || kv || ninfer || kvhipfire);
     renderKvmemEngine(
       $("add-kvmem"), $("add-kvmem-count"), $("add-kvmem-hint"),
       engine ? engine.engine_params || null : null,
-      kv ? "kvmem_polystrata" : strata ? "strata" : ninfer ? "kvmem_ninfer" : "kvmem_llama",
+      kv ? "kvmem_polystrata" : strata ? "strata" : ninfer ? "kvmem_ninfer" : kvhipfire ? "kvmem_hipfire" : "kvmem_llama",
     );
     renderEngineMore(
       $("add-more"), $("add-more-count"), $("add-more-hint"),
       kind, null, engine ? engine.engine_params || null : null,
     );
-    $("add-defaults").textContent = !engine ? "" : ninfer
+    $("add-defaults").textContent = !engine ? "" : kvhipfire
+      ? "KVMem + hipfire 单模型模式：每份配置服务一个 HFQM 文件；K/V 固定 q8，视觉 sidecar 自动识别，无需 mmproj；max_seq 留空用模型训练上下文上限；KVMem 默认开启（预算 32768、4 槽位），预算/分页等扩展在“kvmem参数”，投机、spill 与 prefill 等自身参数在“更多参数”按需覆盖模板。"
+      : ninfer
       ? "NInfer 单模型模式：每份配置只服务一个 .ninfer 模型，参数继承选定模板；视觉塔内嵌在模型中，可选择 CPU/GPU；上下文、KV 精度等 ninfer-serve 自身参数在“更多参数”按需覆盖模板，KVMem 扩展在“kvmem参数”；repetition_penalty 只能为 1，且没有 repeat_last_n。"
       : kvllama
         ? "KVMem + llama.cpp 单模型模式：每份配置服务一个 GGUF；上下文与 KV 精度在“基本参数”设置；KVMem 预算等扩展在“kvmem参数”，其余 llama-kvmem-server 自身参数在“更多参数”按需覆盖模板；不支持 repeat_last_n；视觉可选 CPU/GPU（默认 CPU）。"
@@ -4306,6 +4352,25 @@
       if (diskPath && !(diskMib > 0)) {
         showAddError("填写 SSD 目录时必须同时把 SSD 额度设为大于 0。");
         return;
+      }
+      if (Object.keys(advanced).length) body.engine_params = advanced;
+    }
+    if (engineInfo.kind === "kvmem_hipfire") {
+      body.vision = null;
+      let engineParams;
+      try {
+        engineParams = Object.assign(
+          {},
+          readKvmemEngine($("add-more"), "kvmem_hipfire", "engine"),
+          readKvmemEngine($("add-kvmem"), "kvmem_hipfire"),
+        );
+      } catch (error) {
+        showAddError(error.message);
+        return;
+      }
+      const advanced = {};
+      for (const [key, value] of Object.entries(engineParams)) {
+        if (value !== null) advanced[key] = value;
       }
       if (Object.keys(advanced).length) body.engine_params = advanced;
     }

@@ -245,7 +245,10 @@ try:
     # -- no proxy configured: switches disappear -------------------------
     mock_config(proxy_configured=False, install_fails=False)
     reenter_manage()
-    assert js("return document.querySelectorAll('input[data-setup-proxy]').length") == 0
+    # loadSetup() re-fetches asynchronously and the stale DOM already has
+    # three cards, so wait for the re-render instead of asserting at once.
+    wait("return document.querySelectorAll('input[data-setup-proxy]').length === 0",
+         message="proxy switches removed")
 
     # -- two-column engine picker in the add dialog ----------------------
     click("#btn-manage")

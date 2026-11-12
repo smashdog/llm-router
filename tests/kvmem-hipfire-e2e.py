@@ -7,10 +7,11 @@ without status fields, SSE streaming) and reaps its fake daemon child on
 SIGTERM. Covers engine creation, adding an HFQM artifact, the trained-context
 --max-seq fallback, KVMem env defaults, engine_params write/clear, validation
 failures, restart-on-switch, daemon teardown and the manage-view schemas.
-Console dialog coverage lands with the params-form task.
+The browser section covers the params/add dialogs and a console-driven add.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -704,5 +705,223 @@ except BaseException:
     stop_router()
     raise
 
-stop_router()
-print(f"kvmem-hipfire e2e: {checks} check groups passed; artifacts in {BASE}")
+# --- browser UI -----------------------------------------------------------
+driver_port = free_port()
+driver = subprocess.Popen(
+    ["/snap/bin/geckodriver", "--port", str(driver_port)],
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+driver_base = f"http://127.0.0.1:{driver_port}"
+for _ in range(100):
+    try:
+        requests.get(driver_base + "/status", timeout=1)
+        break
+    except requests.RequestException:
+        time.sleep(0.1)
+else:
+    stop_router()
+    driver.terminate()
+    raise SystemExit("geckodriver did not start")
+session = requests.post(driver_base + "/session", json={"capabilities": {"alwaysMatch": {
+    "browserName": "firefox",
+    "moz:firefoxOptions": {"args": ["-headless", "--width=1400", "--height=1000"]},
+}}}, timeout=60).json()["value"]["sessionId"]
+
+
+def wd(method: str, path: str, payload=None, timeout: int = 90):
+    response = requests.request(method, f"{driver_base}/session/{session}{path}",
+                                json=payload, timeout=timeout)
+    data = response.json()
+    value = data.get("value")
+    if isinstance(value, dict) and value.get("error"):
+        raise RuntimeError(value)
+    return value
+
+
+def js(script: str):
+    return wd("POST", "/execute/sync", {"script": script, "args": []})
+
+
+def wait_js(script: str, timeout: float = 30, message: str = ""):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            last = js(script)
+            if last:
+                return last
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+        time.sleep(0.2)
+    raise SystemExit(f"wait failed: {message or script}: {last}")
+
+
+def shot(name: str) -> None:
+    data = wd("GET", "/screenshot")
+    (OUT / name).write_bytes(base64.b64decode(data))
+
+
+try:
+    wd("POST", "/url", {"url": url + "/"})
+    wait_js("return document.querySelectorAll('#models .model').length >= 1;", message="model cards")
+    model_json = json.dumps(model_id)
+    js(
+        "const card=[...document.querySelectorAll('#models .model')]"
+        ".find((el)=>el.querySelector('.id')&&el.querySelector('.id').textContent.trim()==="
+        + model_json + ");"
+        "if(!card) return false;"
+        "card.querySelector('[data-action=params]').click(); return true;"
+    )
+    wait_js("return document.querySelector('#params-dialog').open;", message="params dialog")
+    surface = js(
+        "const tab=document.querySelector('#params-kvmem-tab');"
+        "const host=document.querySelector('#params-kvmem');"
+        "return {"
+        "hint: document.querySelector('#params-hint').textContent,"
+        "repeat: document.querySelector('#params-dialog [name=repeat_last_n]').disabled,"
+        "visionHidden: document.querySelector('#params-vision').hidden,"
+        "visionPathHidden: document.querySelector('#params-vision-path-field').hidden,"
+        "engineHidden: document.querySelector('#params-engine').hidden,"
+        "kvmemTabHidden: !tab || tab.hidden,"
+        "kvmemCount: document.querySelector('#params-kvmem-count').textContent,"
+        "kvmemFields: host.querySelectorAll('[data-param-key]').length,"
+        "moreFields: document.querySelector('#params-more').querySelectorAll('[data-param-key]').length,"
+        "budget: host.querySelector('[data-param-key=kvmem_budget]').value,"
+        "enable: host.querySelector('[data-param-key=kvmem_enable]').value,"
+        "sink: host.querySelector('[data-param-key=sink_blocks]').value,"
+        "recent: host.querySelector('[data-param-key=recent_blocks]').value,"
+        "slots: document.querySelector('#params-more [data-param-key=slots]').value,"
+        "spec: document.querySelector('#params-more [data-param-key=spec]').value,"
+        "maxSeq: document.querySelector('#params-more [data-param-key=max_seq]').value,"
+        "};"
+    )
+    assert "KVMem + hipfire" in surface["hint"], surface
+    assert surface["repeat"] is False, surface
+    assert surface["visionHidden"] is True and surface["visionPathHidden"] is True, surface
+    assert surface["engineHidden"] is True, surface
+    assert surface["kvmemTabHidden"] is False, surface
+    assert surface["kvmemCount"] == "5" and surface["kvmemFields"] == 5, surface
+    assert surface["moreFields"] == 9, surface
+    assert surface["budget"] == "16384", surface
+    assert surface["enable"] == "true", surface
+    assert surface["sink"] == "2" and surface["recent"] == "3", surface
+    assert surface["slots"] == "2", surface
+    assert surface["spec"] == "" and surface["maxSeq"] == "", surface
+    shot("params-kvmem-hipfire.png")
+    js("document.querySelector('#params-kvmem-tab').click();")
+    wait_js(
+        "return !document.querySelector('[data-param-panel=kvmem]').hidden;",
+        message="kvmem params tab",
+    )
+    shot("params-kvmem-hipfire-kvmem.png")
+    js("document.querySelector('#params-cancel').click();")
+
+    js("document.querySelector('#btn-add-model').click();")
+    wait_js("return document.querySelector('#add-dialog').open;", message="add dialog")
+    js(
+        "const cat=document.querySelector('[data-add-category=kvmem]');"
+        "if(!cat) return false; cat.click(); return true;"
+    )
+    wait_js(
+        "const radio=document.querySelector('input[name=add-engine][value=kvmem_hipfire]');"
+        "if(!radio) return false; radio.click(); return true;",
+        message="hipfire engine radio",
+    )
+    wait_js(
+        "return document.querySelector('#add-model-hint').textContent.includes('HFQM');",
+        message="hipfire add form",
+    )
+    form = js(
+        "return {"
+        "engine: document.querySelector('input[name=add-engine]:checked').value,"
+        "engineParamsHidden: document.querySelector('#add-engine-params').hidden,"
+        "visionHidden: document.querySelector('#add-vision-field').hidden,"
+        "deviceHidden: document.querySelector('#add-vision-device').hidden,"
+        "visionHintHidden: document.querySelector('#add-vision-hint').hidden,"
+        "kvmemTabHidden: document.querySelector('#add-kvmem-tab').hidden,"
+        "kvmemCount: document.querySelector('#add-kvmem-count').textContent,"
+        "kvmemFields: document.querySelectorAll('#add-kvmem [data-param-key]').length,"
+        "kvmemBlank: [...document.querySelectorAll('#add-kvmem [data-param-key]')]"
+        ".every((el)=>el.value===''),"
+        "budgetHint: (document.querySelector('#add-kvmem [data-param-key=kvmem_budget]')||{}).placeholder||'',"
+        "spec: document.querySelector('#add-more [data-param-key=spec]').value,"
+        "moreFields: document.querySelectorAll('#add-more [data-param-key]').length,"
+        "hint: document.querySelector('#add-model-hint').textContent,"
+        "caption: document.querySelector('#add-more-caption').textContent,"
+        "defaults: document.querySelector('#add-defaults').textContent,"
+        "};"
+    )
+    assert form["engine"] == "kvmem_hipfire", form
+    assert form["engineParamsHidden"] is True, form
+    assert form["visionHidden"] is True, form
+    assert form["deviceHidden"] is True and form["visionHintHidden"] is True, form
+    assert form["kvmemTabHidden"] is False, form
+    assert form["kvmemCount"] == "5" and form["kvmemFields"] == 5, form
+    assert form["kvmemBlank"] is True, form
+    assert form["budgetHint"] == "32768", form
+    assert form["spec"] == "auto", form
+    assert form["moreFields"] == 9, form
+    assert "HFQM" in form["hint"], form
+    assert "hipfire" in form["caption"], form
+    assert "KVMem + hipfire" in form["defaults"], form
+    shot("add-kvmem-hipfire.png")
+
+    # Add the second HFQM file through the console form with one KVMem
+    # option so the UI -> job -> config path is covered end to end.
+    js(
+        "const host=document.querySelector('#add-kvmem');"
+        "host.querySelector('[data-param-key=sink_blocks]').value='2';"
+        "const input=document.querySelector('#add-model');"
+        "input.value=" + json.dumps(str(second_model)) + ";"
+        "input.dispatchEvent(new Event('input',{bubbles:true}));"
+        "document.querySelector('#add-submit').click();"
+    )
+    wait_js(
+        "const s=document.querySelector('#add-submit');"
+        "return s.dataset.done==='1'||s.textContent==='完成';",
+        timeout=120, message="console add finished",
+    )
+    shot("add-kvmem-hipfire-done.png")
+    added = models()["Qwen3.8-27B-2"]
+    assert added["engine"] == "kvmem_hipfire" and added["context_length"] == 131072, added
+    assert added["cache_type_k"] == "q8" and added["multimodal"] is False, added
+    assert added["engine_params"]["sink_blocks"] == 2, added
+    ui_cfg = read_json(config_dir / "kvmem-hipfire-qwen3.8-27b-2.json")
+    assert ui_cfg["env"]["HIPFIRE_KVMEM_SINK_BLOCKS"] == "2", ui_cfg
+    assert "max_seq" not in ui_cfg, ui_cfg
+    wait_js(
+        "return [...document.querySelectorAll('#models .model .id')]"
+        ".some((el)=>el.textContent.trim()==='Qwen3.8-27B-2');",
+        message="second model card",
+    )
+
+    # Switching back restarts the single-model engine with the right artifact.
+    loaded = requests.post(url + "/models/load", json={"model": model_id}, timeout=20)
+    assert loaded.status_code in (200, 202), loaded.text
+    wait_idle()
+    switched = starts()[-1]
+    assert switched["model"] == str(main_model), switched
+    assert switched["max_seq"] == "262144", switched
+    unloaded = requests.post(url + "/models/unload", json={"model": model_id}, timeout=20)
+    assert unloaded.status_code in (200, 202), unloaded.text
+    wait_idle()
+    stopped_status = status()
+    assert stopped_status["engines"]["kvmem_hipfire"]["alive"] is False, stopped_status
+    assert stopped_status["active_model"] is None, stopped_status
+    deadline = time.time() + 10
+    while time.time() < deadline and daemon_pids():
+        time.sleep(0.2)
+    assert not daemon_pids(), "hipfire daemon survived the engine stop"
+    checks += 1
+    print(f"kvmem-hipfire e2e: {checks} check groups passed; shots in {OUT}")
+finally:
+    try:
+        wd("DELETE", "")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        driver.terminate()
+    except OSError:
+        pass
+    finally:
+        stop_router()
