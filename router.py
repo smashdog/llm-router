@@ -428,7 +428,7 @@ TEXT_QUERY_PATHS = {"/v1/chat/completions", "/v1/messages"}
 # llama.cpp-derived engines understand these stream options; asking for them
 # lets the console show live prefill progress and per-token generation speed
 # even when the client did not request them.  Clients ignore the extra fields.
-STREAM_TIMING_ENGINES = {"llama", "strata", "kvmem_polystrata", "kvmem_llama"}
+STREAM_TIMING_ENGINES = {"llama", "strata", "kvmem_polystrata", "kvmem_llama", "kvmem_hipfire"}
 
 # Sampling defaults for a model added from the console: the values the two
 # reference models run with (llama.cpp: LFM3-Omni-2B, KVMem: Ornith 1.5).
@@ -463,6 +463,8 @@ DEFAULT_SAMPLING = {
     # thinking mode per request (e.g. Qwen3.8 Thinking/non-Thinking); writing
     # router defaults would override that, so added models start empty.
     "kvmem_llama": {},
+    # hipfire serves the model's own generation_config; same reasoning.
+    "kvmem_hipfire": {},
     "strata": {
         "temperature": 0.6,
         "top_p": 0.95,
@@ -598,7 +600,7 @@ def _llama_more_specs() -> list[dict[str, Any]]:
 def sampling_schema(engine: str) -> list[dict[str, Any]]:
     """Editable parameters for one engine kind, split into basic and more."""
     engine = str(engine or "").strip().lower()
-    if engine not in ("llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata"):
+    if engine not in ("llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "kvmem_hipfire", "strata"):
         engine = "llama"
     if engine == "kvmem_polystrata":
         more = [
@@ -611,6 +613,11 @@ def sampling_schema(engine: str) -> list[dict[str, Any]]:
                         high=2147483647, step=1, note="0 表示随机"),
         ]
     elif engine == "kvmem_llama":
+        more = [
+            _param_spec("seed", "随机种子", "more", kind="integer", low=0,
+                        high=4294967295, step=1, note="留空由引擎随机"),
+        ]
+    elif engine == "kvmem_hipfire":
         more = [
             _param_spec("seed", "随机种子", "more", kind="integer", low=0,
                         high=4294967295, step=1, note="留空由引擎随机"),
@@ -1117,6 +1124,163 @@ KVMEM_LLAMA_ENGINE_BY_KEY = {spec["key"]: spec for spec in KVMEM_LLAMA_ENGINE_SP
 
 def kvmem_llama_engine_schema() -> list[dict[str, Any]]:
     return [dict(spec) for spec in KVMEM_LLAMA_ENGINE_SPECS]
+
+
+# ---------------------------------------------------------------------------
+# KVMem + hipfire per-model engine options
+#
+# hipfire serve splits its options between CLI flags (--spec, --idle-timeout)
+# and environment variables (KVMem budget, paged arenas, spill, multi-slot).
+# Each spec names its target: "args" writes the per-model JSON args list,
+# "env" writes its env block (the router's product defaults fill the rest at
+# start), "config" writes a top-level key the router turns into a flag.
+
+KVMEM_HIPFIRE_GROUP_LABELS = {
+    "basic": "基础",
+    "spec": "投机",
+    "kvmem": "KVMem",
+    "spill": "Spill",
+    "advanced": "高级",
+}
+
+
+def _hipfire_engine_spec(
+    key: str,
+    label: str,
+    group: str,
+    kind: str = "integer",
+    *,
+    target: str = "env",
+    env: str | None = None,
+    flag: str | None = None,
+    config_key: str | None = None,
+    default: Any = None,
+    low: float | int | None = None,
+    high: float | int | None = None,
+    step: float | int | None = None,
+    choices: list[dict[str, Any]] | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    spec: dict[str, Any] = {
+        "key": key,
+        "label": label,
+        "group": group,
+        "group_label": KVMEM_HIPFIRE_GROUP_LABELS[group],
+        "type": kind,
+        "default": default,
+        "target": target,
+        "owner": "kvmem" if group == "kvmem" else "engine",
+    }
+    if env:
+        spec["env"] = env
+    if flag:
+        spec["flag"] = flag
+        spec["flags"] = [flag]
+    if config_key:
+        spec["config_key"] = config_key
+    if low is not None:
+        spec["min"] = low
+    if high is not None:
+        spec["max"] = high
+    if step is not None:
+        spec["step"] = step
+    if choices:
+        spec["choices"] = choices
+    if note:
+        spec["note"] = note
+    return spec
+
+
+KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
+    # -- basic ---------------------------------------------------------------
+    _hipfire_engine_spec(
+        "max_seq", "上下文 max-seq", "basic", "integer",
+        target="config", config_key="max_seq", flag="--max-seq",
+        low=256, step=1,
+        note="留空用模型训练上下文上限；多槽 serve 必须有值，路由器启动时自动补上限",
+    ),
+    _hipfire_engine_spec(
+        "slots", "并发槽位", "basic", "integer",
+        env="HIPFIRE_SERVE_MULTI_SLOT_SLOTS",
+        default=4, low=1, high=64, step=1,
+    ),
+    _hipfire_engine_spec(
+        "idle_timeout", "空闲卸载（秒）", "basic", "integer",
+        target="args", flag="--idle-timeout",
+        low=0, high=86400, step=1,
+        note="0 表示不自动卸载；留空用引擎默认",
+    ),
+    # -- speculation ----------------------------------------------------------
+    _hipfire_engine_spec(
+        "spec", "投机解码", "spec", "enum",
+        target="args", flag="--spec",
+        default="auto",
+        choices=[
+            {"value": "off", "label": "off · 关闭"},
+            {"value": "auto", "label": "auto · 自动"},
+            {"value": "ngram", "label": "ngram"},
+            {"value": "mtp", "label": "mtp（需模型内嵌 draft）"},
+            {"value": "dflash", "label": "dflash（需 draft 文件）"},
+            {"value": "dspark", "label": "dspark（需 draft 文件）"},
+        ],
+    ),
+    # -- KVMem ----------------------------------------------------------------
+    _hipfire_engine_spec(
+        "kvmem_enable", "启用 KVMem", "kvmem", "boolean",
+        env="HIPFIRE_KVMEM", default=True,
+        note="分页 Q8 KV 与溢出；关闭时 KV 精度仍为 q8",
+    ),
+    _hipfire_engine_spec(
+        "kvmem_budget", "KV 预算（tokens）", "kvmem", "integer",
+        env="HIPFIRE_KVMEM_BUDGET_TOKENS",
+        default=32768, low=128, step=1,
+    ),
+    _hipfire_engine_spec(
+        "paged_pages", "分页 arena 页数", "kvmem", "integer",
+        env="HIPFIRE_SLOTS_PAGED_PAGES",
+        low=1, step=1,
+        note="每页 128 tokens；留空用引擎默认 64×槽位",
+    ),
+    _hipfire_engine_spec(
+        "sink_blocks", "开头保留块", "kvmem", "integer",
+        env="HIPFIRE_KVMEM_SINK_BLOCKS",
+        default=1, low=0, step=1,
+    ),
+    _hipfire_engine_spec(
+        "recent_blocks", "最近保留块", "kvmem", "integer",
+        env="HIPFIRE_KVMEM_RECENT_BLOCKS",
+        default=1, low=0, step=1,
+    ),
+    # -- spill ----------------------------------------------------------------
+    _hipfire_engine_spec(
+        "spill_dir", "Spill 目录", "spill", "string",
+        env="HIPFIRE_SPILL_DIR",
+        note="留空用引擎默认；SSD 溢出页存放位置",
+    ),
+    _hipfire_engine_spec(
+        "spill_bytes", "Spill 额度（字节）", "spill", "integer",
+        env="HIPFIRE_SPILL_BYTES",
+        low=0, step=1073741824,
+        note="留空用引擎默认 64 GiB",
+    ),
+    # -- advanced -------------------------------------------------------------
+    _hipfire_engine_spec(
+        "prefill_chunk", "Prefill 分块行数", "advanced", "integer",
+        env="HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK",
+        default=1024, low=1, step=1,
+        note="tune 候选 1024/2048",
+    ),
+    _hipfire_engine_spec(
+        "devices", "GPU 设备", "advanced", "string",
+        env="HIPFIRE_DEVICES",
+        note="如 0 或 0,1；留空用引擎默认",
+    ),
+]
+KVMEM_HIPFIRE_ENGINE_BY_KEY = {spec["key"]: spec for spec in KVMEM_HIPFIRE_ENGINE_SPECS}
+
+
+def kvmem_hipfire_engine_schema() -> list[dict[str, Any]]:
+    return [dict(spec) for spec in KVMEM_HIPFIRE_ENGINE_SPECS]
 
 
 # ---------------------------------------------------------------------------
@@ -2922,6 +3086,123 @@ def kvmem_llama_apply_engine_values(
     return out
 
 
+def kvmem_hipfire_engine_values(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Read the whitelisted hipfire options currently present in a model's
+    config: CLI args, env block and the router-owned max_seq key."""
+    args = [str(item) for item in (cfg.get("args") or [])]
+    env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
+    out: dict[str, Any] = {}
+    for spec in KVMEM_HIPFIRE_ENGINE_SPECS:
+        key = spec["key"]
+        target = spec.get("target") or "env"
+        if target == "args":
+            raw = _config_arg_value(args, spec["flag"])
+        elif target == "config":
+            value = cfg.get(spec["config_key"])
+            raw = None if value is None else str(value)
+        else:
+            value = env.get(spec["env"])
+            raw = None if value is None else str(value)
+        if raw is None:
+            continue
+        if spec["type"] == "boolean":
+            out[key] = raw.strip().lower() in ("1", "true", "yes", "on")
+        elif spec["type"] == "integer":
+            parsed = parse_int(raw)
+            if parsed is None:
+                continue
+            out[key] = parsed
+        elif spec["type"] == "number":
+            try:
+                out[key] = float(raw)
+            except (TypeError, ValueError):
+                continue
+        else:
+            out[key] = raw
+    return out
+
+
+def normalize_kvmem_hipfire_engine(values: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate hipfire engine options; None explicitly clears a value back
+    to the router/engine default."""
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise BadRequest("engine_params must be an object")
+    out: dict[str, Any] = {}
+    for key, raw in values.items():
+        spec = KVMEM_HIPFIRE_ENGINE_BY_KEY.get(key)
+        if spec is None:
+            raise BadRequest(f"unknown engine parameter {key!r}")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            out[key] = None
+            continue
+        kind = spec["type"]
+        if kind == "boolean":
+            if isinstance(raw, bool):
+                value = raw
+            elif raw in (0, 1):
+                value = bool(raw)
+            else:
+                raise BadRequest(f"{key}: expected true or false")
+        elif kind in ("enum", "string"):
+            if not isinstance(raw, str):
+                raise BadRequest(f"{key}: expected a string")
+            value = raw.strip()
+            if len(value) > 4096:
+                raise BadRequest(f"{key}: too long")
+            choices = spec.get("choices")
+            if choices and value not in [choice["value"] for choice in choices]:
+                allowed = ", ".join(str(choice["value"]) for choice in choices)
+                raise BadRequest(f"{key}: expected one of {allowed}")
+        else:
+            value = _sampling_number(
+                key, raw, spec.get("min", 0), spec.get("max"),
+                integer=(kind == "integer"),
+            )
+        out[key] = value
+    return out
+
+
+def kvmem_hipfire_apply_engine_values(
+    cfg: dict[str, Any], values: dict[str, Any]
+) -> dict[str, Any]:
+    """Write validated options into a model config's args/env/max_seq."""
+    out = json.loads(json.dumps(cfg))
+    args = [str(item) for item in (out.get("args") or [])]
+    env_raw = out.get("env")
+    env = dict(env_raw) if isinstance(env_raw, dict) else {}
+    for key, value in values.items():
+        spec = KVMEM_HIPFIRE_ENGINE_BY_KEY.get(key)
+        if spec is None:
+            continue
+        target = spec.get("target") or "env"
+        if target == "args":
+            if value is None:
+                args = _config_arg_remove(args, spec["flag"])
+            else:
+                args = _config_arg_set(args, spec["flag"], value)
+        elif target == "config":
+            if value is None:
+                out.pop(spec["config_key"], None)
+            else:
+                out[spec["config_key"]] = int(value)
+        else:
+            name = spec["env"]
+            if value is None:
+                env.pop(name, None)
+            elif spec["type"] == "boolean":
+                env[name] = "1" if value else "0"
+            else:
+                env[name] = str(value)
+    out["args"] = args
+    if env:
+        out["env"] = env
+    else:
+        out.pop("env", None)
+    return out
+
+
 def kvmem_llama_fit_tuning(
     args: list[str],
     context: int,
@@ -4141,6 +4422,7 @@ class Model:
                 "kvmem_polystrata": "KVMem + polystrata",
                 "kvmem_ninfer": "KVMem + ninfer",
                 "kvmem_llama": "KVMem + llama.cpp",
+                "kvmem_hipfire": "KVMem + hipfire",
                 "strata": "Strata",
             }.get(self.engine, self.engine),
             # llama.cpp router UI reads model/name/status/architecture/meta/tags.
@@ -4179,7 +4461,7 @@ class Model:
             "model_path": self.model_path,
             "vision_path": self.vision_path,
             "draft_path": self.draft_path,
-            "deletable": self.source in ("preset", "strata", "kvmem_ninfer", "kvmem_llama"),
+            "deletable": self.source in ("preset", "strata", "kvmem_ninfer", "kvmem_llama", "kvmem_hipfire"),
             "loaded": loaded,
             "available": self.available,
             "problem": self.problem,
@@ -4849,6 +5131,32 @@ def kvmem_llama_reference_config(
         config_dir = Path(str(models.get("dir") or ""))
         try:
             candidates = sorted(config_dir.glob("kvmem-llama-*.json"))
+        except OSError:
+            candidates = []
+    for path in candidates:
+        cfg = read_json(path)
+        if isinstance(cfg, dict) and isinstance(cfg.get("args"), list):
+            return path, cfg
+    return None, None
+
+
+def kvmem_hipfire_reference_config(
+    engine_cfg: dict[str, Any],
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """The per-model JSON whose args seed a newly added KVMem + hipfire model."""
+    models = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+    engine_cwd = Path(str(engine_cfg.get("cwd") or "."))
+    raw = str(models.get("template") or "").strip()
+    candidates: list[Path] = []
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = engine_cwd / path
+        candidates.append(path)
+    else:
+        config_dir = Path(str(models.get("dir") or ""))
+        try:
+            candidates = sorted(config_dir.glob("kvmem-hipfire-*.json"))
         except OSError:
             candidates = []
     for path in candidates:
@@ -5530,6 +5838,135 @@ STRATA_FAMILY_MODEL_NAMES = {
 }
 
 
+def hipfire_model_context(path: Path) -> int | None:
+    """Trained context ceiling from an HFQM/MQ artifact's embedded metadata.
+
+    The 32-byte header is magic "HFQM", version/arch/tensor-count u32s, then
+    the metadata and payload offsets (u64 LE). The metadata JSON carries
+    config.text_config.max_position_embeddings — the same value hipfire's
+    admission resolves an omitted max_seq from. Only the header region is
+    read, never the multi-GB weight payload."""
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(32)
+            if len(head) < 32 or head[:4] != b"HFQM":
+                return None
+            meta_off, data_off = struct.unpack("<QQ", head[16:32])
+            if meta_off < 32 or data_off <= meta_off:
+                return None
+            if data_off - meta_off > 64 * 1024 * 1024:
+                return None
+            handle.seek(meta_off)
+            raw = handle.read(data_off - meta_off)
+        obj, _ = json.JSONDecoder().raw_decode(raw.decode("utf-8", "replace"))
+        if not isinstance(obj, dict):
+            return None
+        config = obj.get("config") if isinstance(obj.get("config"), dict) else obj
+        text = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
+        value = text.get("max_position_embeddings")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def discover_kvmem_hipfire_models(engine_cfg: dict[str, Any]) -> list[Model]:
+    """Models of hipfire serve (one process per model, KVMem multi-slot)."""
+    models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+    config_dir = Path(str(models_cfg.get("dir") or ""))
+    engine_cwd = Path(str(engine_cfg.get("cwd") or "."))
+    engine_command = engine_cfg.get("command")
+    engine_binary = str(engine_command[0]) if isinstance(engine_command, list) and engine_command else ""
+    template_raw = str(models_cfg.get("template") or "").strip()
+    template_path = None
+    if template_raw:
+        template = Path(template_raw)
+        if not template.is_absolute():
+            template = engine_cwd / template
+        template_path = os.path.abspath(str(template))
+    candidates = []
+    try:
+        for path in config_dir.glob("kvmem-hipfire-*.json"):
+            try:
+                candidates.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+    except OSError:
+        candidates = []
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    models: list[Model] = []
+    seen: set[str] = set()
+    for _, path in candidates:
+        if template_path and os.path.abspath(str(path)) == template_path:
+            continue
+        cfg = read_json(path)
+        if not isinstance(cfg, dict):
+            continue
+        raw_model = str(cfg.get("model") or cfg.get("artifact") or "").strip()
+        args = cfg.get("args")
+        if not raw_model or not isinstance(args, list):
+            continue
+        model_id = str(cfg.get("model_name") or path.stem.removeprefix("kvmem-hipfire-"))
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        cwd_raw = Path(str(cfg.get("cwd") or engine_cwd))
+        if not cwd_raw.is_absolute():
+            cwd_raw = engine_cwd / cwd_raw
+        exe_raw = str(cfg.get("exe") or engine_binary)
+        exe = Path(exe_raw)
+        if not exe.is_absolute():
+            exe = cwd_raw / exe
+        model_file = Path(raw_model)
+        if not model_file.is_absolute():
+            model_file = cwd_raw / model_file
+        ctx = parse_int(cfg.get("max_seq"))
+        if ctx is None:
+            ctx = parse_int(cfg.get("context_length"))
+        if ctx is None:
+            ctx = hipfire_model_context(model_file)
+        max_out = parse_int(cfg.get("default_max_tokens"))
+        if max_out is not None and max_out <= 0:
+            max_out = None
+        aliases_raw = cfg.get("aliases")
+        if isinstance(aliases_raw, str):
+            aliases = [x.strip() for x in aliases_raw.split(",") if x.strip()]
+        elif isinstance(aliases_raw, list):
+            aliases = [str(x).strip() for x in aliases_raw if str(x).strip()]
+        else:
+            aliases = []
+        problem = None
+        if not exe.is_file() or not os.access(exe, os.X_OK):
+            problem = f"引擎可执行文件不存在或不可执行（{exe}）"
+        elif not model_file.is_file():
+            problem = f"模型文件不存在（{model_file}）"
+        models.append(
+            Model(
+                id=model_id,
+                engine="kvmem_hipfire",
+                # hipfire reports a path-loaded model under the exact path it
+                # was asked for (/health.model and /v1/models), so readiness
+                # and request routing must use the absolute artifact path.
+                engine_model=str(model_file),
+                config_path=str(path),
+                model_path=str(model_file),
+                display_name=str(cfg.get("display_name") or model_id),
+                aliases=aliases,
+                context_length=ctx,
+                cache_type_k="q8",
+                cache_type_v="q8",
+                max_output_tokens=max_out,
+                notes=cfg.get("notes"),
+                quantization=cfg.get("quantization"),
+                source="kvmem_hipfire",
+                available=problem is None,
+                problem=problem,
+            )
+        )
+    return models
+
+
 def strata_default_model_name(cfg: dict[str, Any], stem: str) -> str:
     """Mirror serve/server.py's default_model_name() so readiness matches /v1/models."""
     name = str(cfg.get("model_name") or "").strip()
@@ -5695,6 +6132,8 @@ class Registry:
                     found = discover_ninfer_models(engine_cfg)
                 elif kind == "kvmem_llama_dir":
                     found = discover_kvmem_llama_models(engine_cfg)
+                elif kind == "kvmem_hipfire_dir":
+                    found = discover_kvmem_hipfire_models(engine_cfg)
                 elif kind == "strata_dir":
                     found = discover_strata_models(engine_cfg)
             except Exception:
@@ -5957,10 +6396,25 @@ ENGINE_SLOTS: dict[str, dict[str, Any]] = {
         "probe_timeout_s": 30,
         "log_path": "log/kvmem-llama-engine.log",
     },
+    "kvmem_hipfire": {
+        "category": "kvmem",
+        "name": "hipfire",
+        "label": "KVMem + hipfire",
+        "kind": "kvmem_hipfire",
+        "models_kind": "kvmem_hipfire_dir",
+        "fields": ("binary", "cwd", "models_dir", "template"),
+        "model_key": "template",
+        "host": "127.0.0.1",
+        "port": 18085,
+        "start_timeout_s": 900,
+        "probe_timeout_s": 30,
+        "log_path": "log/kvmem-hipfire-engine.log",
+    },
 }
 # Display order: the management page groups slots by ``category`` and lists
-# them in this order, so the kvmem group shows llama.cpp → polystrata → ninfer.
-ENGINE_SLOT_ORDER = ("llama", "strata", "kvmem_llama", "kvmem_polystrata", "kvmem_ninfer")
+# them in this order, so the kvmem group shows llama.cpp → polystrata → ninfer
+# → hipfire.
+ENGINE_SLOT_ORDER = ("llama", "strata", "kvmem_llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_hipfire")
 
 # Performance tuning is one independent script per KVMem-family engine.  Each
 # script probes this machine, benchmarks several candidates derived from that
@@ -6033,6 +6487,13 @@ def engine_slot_defaults(base_dir: Path, engine_id: str) -> dict[str, str]:
             "models_dir": str(config_dir / "kvmem-llama"),
             "template": str(config_dir / "kvmem-llama" / "kvmem-llama.template.json"),
         }
+    if engine_id == "kvmem_hipfire":
+        return {
+            "binary": provisioned("kvmem-hipfire-server"),
+            "cwd": str(engine_root / "hipfire"),
+            "models_dir": str(config_dir / "kvmem-hipfire"),
+            "template": str(config_dir / "kvmem-hipfire" / "kvmem-hipfire.template.json"),
+        }
     return {}
 
 
@@ -6069,6 +6530,14 @@ def _slot_command(engine_id: str, fields: dict[str, str]) -> list[str]:
             fields["binary"],
             "--host", "{host}",
             "--port", "{port}",
+        ]
+    if engine_id == "kvmem_hipfire":
+        # hipfire serve takes the bind address as a host:port positional; the
+        # manager inserts --model and the per-model options after "serve".
+        return [
+            fields["binary"],
+            "serve",
+            "{host}:{port}",
         ]
     if engine_id == "strata":
         # Strata serves one model per process; the config names its artifact
@@ -6237,6 +6706,8 @@ def validate_engine_paths(
             pending.append(("kvmem_meta", preset))
         elif create and engine_id == "kvmem_llama":
             pending.append(("kvmem_llama_template", preset))
+        elif create and engine_id == "kvmem_hipfire":
+            pending.append(("kvmem_hipfire_template", preset))
         else:
             raise BadRequest(f"{model_key}：文件不存在（{preset}）")
     return fields, pending
@@ -6256,6 +6727,15 @@ def default_kvmem_llama_template() -> dict[str, Any]:
             "--kv-dtype", "q8_0",
         ]
     }
+
+
+def default_kvmem_hipfire_template() -> dict[str, Any]:
+    """Serving defaults for hipfire serve; model paths are per model.
+
+    KVMem residency, multi-slot serving and the Q8 KV pool are enabled by
+    EngineManager's environment defaults; the template only carries the
+    speculation mode, which tune and the params form may override."""
+    return {"args": ["--spec", "auto"]}
 
 
 def materialize_engine_paths(pending: list[tuple[str, Path]]) -> list[str]:
@@ -6280,6 +6760,16 @@ def materialize_engine_paths(pending: list[tuple[str, Path]]) -> list[str]:
                     handle.write("\n")
                 notes.append(f"已创建 KVMem + llama.cpp 模板 {path}")
                 continue
+            if kind == "kvmem_hipfire_template":
+                try:
+                    handle = path.open("x", encoding="utf-8")
+                except FileExistsError:
+                    continue
+                with handle:
+                    json.dump(default_kvmem_hipfire_template(), handle, ensure_ascii=False, indent=2)
+                    handle.write("\n")
+                notes.append(f"已创建 KVMem + hipfire 模板 {path}")
+                continue
             try:
                 handle = path.open("x", encoding="utf-8")
             except FileExistsError:
@@ -6298,13 +6788,14 @@ AUTO_ENGINE_DATA_KINDS = {
     "llama": "llama_preset",
     "kvmem_polystrata": "kvmem_meta",
     "kvmem_llama": "kvmem_llama_template",
+    "kvmem_hipfire": "kvmem_hipfire_template",
 }
 
-# One setup job installs a product, but KVMem ships three independent workers.
+# One setup job installs a product, but KVMem ships four independent workers.
 # Activate every sibling whose binary/template the install produced instead of
 # leaving them for the next startup.
 AUTO_ENGINE_SIBLINGS = {
-    "kvmem": ("kvmem_polystrata", "kvmem_llama", "kvmem_ninfer"),
+    "kvmem": ("kvmem_polystrata", "kvmem_llama", "kvmem_ninfer", "kvmem_hipfire"),
 }
 
 # 2026-11-13: the original "kvmem" (PolyStrata) and "ninfer" slots were renamed
@@ -6464,6 +6955,10 @@ def probe_engine_binary(
         # --version is unsupported; the model-free capability dump identifies
         # the independent llama.cpp + KVMem server.
         command = [binary, "--kvmem-capabilities"]
+    elif engine_id == "kvmem_hipfire":
+        # `hipfire --version` prints "hipfire <semver> (<commit>; <branch>)"
+        # without touching the GPU or the daemon.
+        command = [binary, "--version"]
     else:
         command = [binary, "--version"]
     env = os.environ.copy()
@@ -6522,6 +7017,16 @@ def probe_engine_binary(
         ):
             detail = _probe_tail(output)
             message = "binary：不是可用的 llama-kvmem-server（--kvmem-capabilities 未返回 llamacpp 后端）"
+            if proc.returncode:
+                message += f"（退出码 {proc.returncode}）"
+            if detail:
+                message += f"：{detail}"
+            raise BadRequest(message)
+        return
+    if engine_id == "kvmem_hipfire":
+        if proc.returncode != 0 or not re.search(r"hipfire\s+\d+\.\d+", output, re.I):
+            detail = _probe_tail(output)
+            message = "binary：不是可用的 hipfire CLI（--version 未返回 hipfire 版本）"
             if proc.returncode:
                 message += f"（退出码 {proc.returncode}）"
             if detail:
@@ -7051,6 +7556,8 @@ def scan_engine_models(engine_id: str, cfg: dict[str, Any]) -> list[Model]:
             return discover_ninfer_models(cfg)
         if engine_id == "kvmem_llama":
             return discover_kvmem_llama_models(cfg)
+        if engine_id == "kvmem_hipfire":
+            return discover_kvmem_hipfire_models(cfg)
         if engine_id == "strata":
             return discover_strata_models(cfg)
         return discover_kvmem_models(cfg)
@@ -7257,6 +7764,43 @@ class EngineManager:
         out += [str(token) for token in command[1:]]
         return out
 
+    def _hipfire_command(self, entry: Model, command: list[str]) -> list[str]:
+        model_cfg, artifact, args = self._single_model_config(entry)
+        binary = str(model_cfg.get("exe") or command[0])
+        # The model path, context ceiling and bind address are owned by the
+        # router; --detach would fork the daemon away from the Popen child.
+        for flag in ("--model", "--max-seq", "--host", "--port",
+                     "--api-key", "--api-key-file"):
+            args = _config_arg_remove(args, flag)
+        args = [item for item in args if item != "--detach"]
+        # hipfire echoes the exact --model string back as /health.model and
+        # the /v1/models id, so it must equal entry.engine_model: absolute,
+        # resolved exactly the way discover_kvmem_hipfire_models resolves it.
+        model_path = Path(artifact)
+        if not model_path.is_absolute():
+            engine_cwd = Path(str(self.cfg.get("cwd") or "."))
+            cwd_raw = Path(str(model_cfg.get("cwd") or engine_cwd))
+            if not cwd_raw.is_absolute():
+                cwd_raw = engine_cwd / cwd_raw
+            model_path = cwd_raw / model_path
+        artifact = str(model_path)
+        # Multi-slot serve needs an explicit context (its own fallback is
+        # 8192); without a user value, pass the model's trained ceiling.
+        max_seq = parse_int(model_cfg.get("max_seq"))
+        if max_seq is None:
+            max_seq = parse_int(model_cfg.get("context_length"))
+        if max_seq is None:
+            max_seq = hipfire_model_context(model_path)
+        out = [binary, "serve", "--model", artifact]
+        if max_seq is not None and max_seq > 0:
+            out += ["--max-seq", str(max_seq)]
+        out += args
+        tail = [str(token) for token in command[1:]]
+        if tail and tail[0] == "serve":
+            tail = tail[1:]
+        out += tail
+        return out
+
     def _build_command(self, entry: Model) -> list[str]:
         command = self.cfg.get("command")
         if not isinstance(command, list) or not command:
@@ -7271,6 +7815,8 @@ class EngineManager:
             command = [binary, artifact, *args, *[str(token) for token in command[1:]]]
         elif self.kind == "kvmem_llama":
             command = self._kvmem_llama_command(entry, command)
+        elif self.kind == "kvmem_hipfire":
+            command = self._hipfire_command(entry, command)
         out = []
         for token in command:
             value = str(token)
@@ -7331,10 +7877,19 @@ class EngineManager:
 
     def _environment(self, entry: Model) -> dict[str, str]:
         env = os.environ.copy()
+        if self.kind == "kvmem_hipfire":
+            # Product defaults of the KVMem + hipfire worker: paged Q8 KV
+            # under KVMem, multi-slot serve. engines.kvmem_hipfire.env and
+            # the per-model JSON env below still override each of them.
+            env.setdefault("HIPFIRE_KVMEM", "1")
+            env.setdefault("HIPFIRE_SERVE_MULTI_SLOT", "true")
+            env.setdefault("HIPFIRE_KV_MODE", "q8")
+            env.setdefault("HIPFIRE_KVMEM_BUDGET_TOKENS", "32768")
+            env.setdefault("HIPFIRE_SERVE_MULTI_SLOT_SLOTS", "4")
         extra = self.cfg.get("env")
         if isinstance(extra, dict):
             env.update({str(k): str(v) for k, v in extra.items()})
-        if self.kind in ("kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata") and entry.config_path:
+        if self.kind in ("kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "kvmem_hipfire", "strata") and entry.config_path:
             cfg = read_json(Path(entry.config_path))
             if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict):
                 env.update({str(k): str(v) for k, v in cfg["env"].items()})
@@ -7350,6 +7905,28 @@ class EngineManager:
                     if current:
                         values.append(current)
                     env["LD_LIBRARY_PATH"] = ":".join(values)
+        if self.kind == "kvmem_hipfire":
+            # The provisioned daemon sits beside the CLI under its product
+            # name; hipfire's own lookup only knows "daemon", so point it at
+            # the sibling explicitly (an operator-set value still wins).
+            binary = ""
+            if entry.config_path:
+                model_cfg = read_json(Path(entry.config_path))
+                if isinstance(model_cfg, dict):
+                    binary = str(model_cfg.get("exe") or "")
+            if not binary:
+                cmd = self.cfg.get("command")
+                if isinstance(cmd, list) and cmd:
+                    binary = str(cmd[0])
+            if binary:
+                exe_path = Path(binary)
+                if not exe_path.is_absolute():
+                    exe_path = Path(str(self.cfg.get("cwd") or self.base_dir)) / exe_path
+                daemon = exe_path.parent / "kvmem-hipfire-daemon"
+                if daemon.is_file():
+                    env.setdefault("HIPFIRE_DAEMON_BIN", str(daemon))
+                else:
+                    self.log.warning("hipfire daemon binary missing beside %s", exe_path)
         lib_dirs = self._provisioned_lib_dir(
             (self.cfg.get("command") or [""])[0] if isinstance(self.cfg.get("command"), list) else ""
         )
@@ -7429,7 +8006,7 @@ class EngineManager:
         self.started_at = now()
         self.current_model = (
             entry.engine_model
-            if self.kind in ("kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata")
+            if self.kind in ("kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "kvmem_hipfire", "strata")
             else None
         )
         self._write_state()
@@ -7440,6 +8017,8 @@ class EngineManager:
                 self._wait_ninfer_ready(entry)
             elif self.kind == "kvmem_llama":
                 self._wait_kvmem_llama_ready(entry)
+            elif self.kind == "kvmem_hipfire":
+                self._wait_hipfire_ready(entry)
             elif self.kind == "strata":
                 self._wait_single_model_ready(entry, "Strata", "engines.strata.api_key")
             else:
@@ -7524,6 +8103,66 @@ class EngineManager:
     def _wait_kvmem_llama_ready(self, entry: Model) -> None:
         self._wait_single_model_ready(
             entry, "KVMem + llama.cpp", "engines.kvmem_llama.api_key"
+        )
+
+    def _wait_hipfire_ready(self, entry: Model) -> None:
+        """hipfire serve answers /health 200 only once the engine is Up, and
+        its /v1/models entries carry no status field — readiness is the
+        /health model (the exact path the CLI was asked to load) plus that
+        id appearing in /v1/models."""
+        timeout = float(self.cfg.get("start_timeout_s") or self.timeouts.get("load_timeout_s") or 900)
+        deadline = time.monotonic() + timeout
+        last_note = 0.0
+        last_error = ""
+        while time.monotonic() < deadline:
+            if not self.alive():
+                raise EngineFailure(
+                    f"KVMem + hipfire engine exited during startup; log: {tail_file(self.log_path, 40)}"
+                )
+            try:
+                status, body = self._json_request("GET", "/health", entry=entry, timeout=4)
+                if status == 200 and isinstance(body, dict):
+                    if str(body.get("model") or "") == entry.engine_model:
+                        status2, body2 = self._json_request("GET", "/v1/models", entry=entry, timeout=5)
+                        if status2 == 200 and isinstance(body2, dict):
+                            data = body2.get("data")
+                            data = data if isinstance(data, list) else []
+                            if any(m.get("id") == entry.engine_model for m in data):
+                                return
+                            last_error = "models=" + ", ".join(str(m.get("id")) for m in data[:5])
+                    else:
+                        loading = body.get("loading_model")
+                        last_error = f"health.model={body.get('model')!r}"
+                        if loading:
+                            last_error += f" loading={loading!r}"
+                elif status in (401, 403):
+                    raise EngineFailure(
+                        f"KVMem + hipfire rejected the configured API key (HTTP {status}); "
+                        "check engines.kvmem_hipfire.api_key"
+                    )
+                elif isinstance(body, dict):
+                    err = body.get("error")
+                    if isinstance(err, dict):
+                        last_error = str(err.get("message") or err)
+                    else:
+                        state = str(body.get("status") or "")
+                        loading = body.get("loading_model")
+                        last_error = state + (f" loading={loading}" if loading else "")
+            except requests.RequestException as exc:
+                last_error = str(exc)
+            if time.monotonic() - last_note > 15:
+                last_note = time.monotonic()
+                self.log.info(
+                    "waiting for KVMem + hipfire model %s on %s:%s%s",
+                    entry.id,
+                    self.host,
+                    self.port,
+                    f" ({last_error})" if last_error else "",
+                )
+            time.sleep(1.0)
+        raise EngineFailure(
+            f"KVMem + hipfire model {entry.id} did not become ready within {int(timeout)}s; "
+            f"log: {tail_file(self.log_path, 40)}"
         )
 
     def _wait_single_model_ready(
@@ -7641,7 +8280,7 @@ class EngineManager:
             # An engine that just started reports itself healthy before its models
             # are loaded; always confirm the router's per-model state.
             self._load_llama_model(entry)
-        elif self.kind in ("kvmem_ninfer", "kvmem_llama", "strata"):
+        elif self.kind in ("kvmem_ninfer", "kvmem_llama", "kvmem_hipfire", "strata"):
             # These engines run one artifact per process; switching models
             # means a restart, which the gateway already does when it switches
             # engines.
@@ -7765,7 +8404,7 @@ class EngineManager:
             self.current_entry = None
             self._clear_state()
             return
-        if self.kind in ("kvmem_ninfer", "kvmem_llama", "strata"):
+        if self.kind in ("kvmem_ninfer", "kvmem_llama", "kvmem_hipfire", "strata"):
             # Single-model engines have no unload endpoint; stopping the
             # engine is the unload, and the next request starts it again.
             self.stop()
@@ -7817,11 +8456,13 @@ class EngineManager:
         pgid = self.pgid or pid
         self.log.info("stopping engine %s (pid=%s, pgid=%s)", self.engine_id, pid, pgid)
         if proc.poll() is None:
-            if self.kind in ("kvmem_ninfer", "kvmem_llama", "strata"):
+            if self.kind in ("kvmem_ninfer", "kvmem_llama", "kvmem_hipfire", "strata"):
                 # The first SIGINT only asks NInfer to confirm ("press Ctrl+C
                 # again"), so a plain SIGINT would burn the full stop timeout.
                 # llama-kvmem-server has no unload path either, and Strata
-                # takes SIGTERM as its graceful Ctrl+C. SIGTERM stops all three.
+                # takes SIGTERM as its graceful Ctrl+C. hipfire serve drains
+                # on SIGTERM and reaps its daemon child in Drop — a second
+                # signal would skip that reap. SIGTERM stops all four.
                 kill_group(pgid, signal.SIGTERM)
                 timeout = min(float(self.timeouts.get("stop_timeout_s") or 90), 15.0)
                 try:
@@ -7852,6 +8493,8 @@ class EngineManager:
         # The parent may be gone while a child still holds the port/GPU.
         if group_alive(pgid):
             kill_group(pgid, signal.SIGKILL)
+        if self.kind == "kvmem_hipfire":
+            self._verify_hipfire_daemon_stopped(pgid)
         self._close_log()
         self.proc = None
         self.pgid = None
@@ -7863,6 +8506,56 @@ class EngineManager:
             self.log.error("port %s:%s is still in use after stopping %s", self.host, self.port, self.engine_id)
         else:
             self.log.info("engine %s stopped", self.engine_id)
+
+    def _verify_hipfire_daemon_stopped(self, pgid: int) -> None:
+        """hipfire serve spawns its daemon inside the CLI's process group.
+        A graceful SIGTERM lets the CLI reap it, but a forced kill can leave
+        it holding the GPU. Confirm the whole group is gone; anything that
+        survives gets an exact-PID SIGKILL (never a name/pattern match, and
+        only inside our own group)."""
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if not group_alive(pgid):
+                return
+            time.sleep(0.5)
+        survivors: list[int] = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return
+        for name in entries:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            try:
+                with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as handle:
+                    stat = handle.read()
+            except OSError:
+                continue
+            # comm may contain spaces and parentheses; the fixed fields
+            # start after the last ')': state, ppid, pgrp, ...
+            fields = stat[stat.rfind(")") + 2:].split()
+            if len(fields) < 3:
+                continue
+            try:
+                pgrp = int(fields[2])
+            except ValueError:
+                continue
+            if pgrp == pgid:
+                survivors.append(pid)
+        for pid in survivors:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                self.log.warning("killed surviving hipfire daemon pid %s (pgid %s)", pid, pgid)
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                self.log.error("cannot kill hipfire daemon pid %s: %s", pid, exc)
+        time.sleep(1.0)
+        if group_alive(pgid):
+            self.log.error(
+                "hipfire process group %s still alive after stop; the GPU may remain held", pgid
+            )
 
     def _close_log(self) -> None:
         if self.log_fh is not None:
@@ -8928,6 +9621,7 @@ class Gateway:
             "kvmem_polystrata_dir": "kvmem_polystrata",
             "kvmem_ninfer_dir": "kvmem_ninfer",
             "kvmem_llama_dir": "kvmem_llama",
+            "kvmem_hipfire_dir": "kvmem_hipfire",
             "strata_dir": "strata",
         }.get(str(kind), "")
 
@@ -10398,6 +11092,23 @@ class Gateway:
                     },
                     "default_params": self.default_sampling(engine_id),
                 }
+            elif kind == "kvmem_hipfire_dir":
+                template_path, template = kvmem_hipfire_reference_config(engine_cfg)
+                template_cfg = template if isinstance(template, dict) else {}
+                out[engine_id] = {
+                    "engine": engine_id,
+                    "kind": "kvmem_hipfire",
+                    "label": "KVMem + hipfire",
+                    "models_dir": models_cfg.get("dir"),
+                    "template": str(template_path) if template_path else None,
+                    "engine_params": kvmem_hipfire_engine_values(template_cfg),
+                    "defaults": {
+                        "args": list(template_cfg.get("args") or []),
+                        "kvmem_budget": 32768,
+                        "slots": 4,
+                    },
+                    "default_params": self.default_sampling(engine_id),
+                }
             entry = out.get(engine_id)
             if entry is not None:
                 spec = ENGINE_SLOTS.get(engine_id) or {}
@@ -10424,7 +11135,7 @@ class Gateway:
         except Exception:
             self.log.exception("cannot determine installed engine products")
             installed = {}
-        product_for_slot = {"kvmem_polystrata": "kvmem", "kvmem_llama": "kvmem", "kvmem_ninfer": "kvmem"}
+        product_for_slot = {"kvmem_polystrata": "kvmem", "kvmem_llama": "kvmem", "kvmem_ninfer": "kvmem", "kvmem_hipfire": "kvmem"}
         for slot, entry in engines.items():
             product = product_for_slot.get(slot, slot)
             if product in installed:
@@ -10433,10 +11144,11 @@ class Gateway:
             "engines": engines,
             "param_schema": {
                 kind: sampling_schema(kind)
-                for kind in ("llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "strata")
+                for kind in ("llama", "kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "kvmem_hipfire", "strata")
             },
             "kvmem_engine_schema": kvmem_llama_engine_schema(),
             "kvmem_poly_engine_schema": kvmem_poly_engine_schema(),
+            "kvmem_hipfire_engine_schema": kvmem_hipfire_engine_schema(),
             "ninfer_engine_schema": ninfer_engine_schema(),
             "strata_engine_schema": strata_engine_schema(),
             "smoke_image": str(self.smoke_image_path),
@@ -10925,7 +11637,7 @@ class Gateway:
         if not engine_id or engine_id not in self.config.get("engines", {}):
             raise BadRequest("engine must name a configured engine")
         kind = self._engine_kind(engine_id)
-        if kind not in ("llama_dir", "kvmem_polystrata_dir", "kvmem_ninfer_dir", "kvmem_llama_dir", "strata_dir"):
+        if kind not in ("llama_dir", "kvmem_polystrata_dir", "kvmem_ninfer_dir", "kvmem_llama_dir", "kvmem_hipfire_dir", "strata_dir"):
             raise BadRequest(f"engine {engine_id!r} cannot add models")
         raw_model = payload.get("model")
         if not isinstance(raw_model, str) or not raw_model.strip():
@@ -10989,8 +11701,8 @@ class Gateway:
             needs_validation = (
                 needs_validation or context_changed or cache_changed or vision_device_changed
             )
-        if self._short_kind(kind) == "kvmem_llama":
-            # Context and K/V precision are fixed per config for this engine;
+        if self._short_kind(kind) in ("kvmem_llama", "kvmem_hipfire"):
+            # Context and K/V precision are fixed per config for these engines;
             # changing them means rewriting and re-validating the model.
             needs_validation = needs_validation or context_changed or cache_changed
 
@@ -11057,7 +11769,7 @@ class Gateway:
         if not engine_id or engine_id not in self.config.get("engines", {}):
             raise BadRequest("engine must name a configured engine")
         kind = self._engine_kind(engine_id)
-        if kind not in ("llama_dir", "kvmem_polystrata_dir", "kvmem_ninfer_dir", "kvmem_llama_dir", "strata_dir"):
+        if kind not in ("llama_dir", "kvmem_polystrata_dir", "kvmem_ninfer_dir", "kvmem_llama_dir", "kvmem_hipfire_dir", "strata_dir"):
             raise BadRequest(f"engine {engine_id!r} cannot add models")
         model = payload.get("model")
         if not isinstance(model, str) or not model.strip():
@@ -11113,19 +11825,31 @@ class Gateway:
                 raise BadRequest("NInfer 的视觉塔内嵌在 .ninfer 模型里，不需要 mmproj 路径")
             if context_length is not None or cache_type_k is not None or cache_type_v is not None:
                 raise BadRequest("NInfer 的上下文与 KV 精度通过引擎参数设置")
+        if kind == "kvmem_hipfire_dir":
+            if vision_path:
+                raise BadRequest("KVMem + hipfire 的视觉塔由模型旁 sidecar 自动识别，不需要视觉路径")
+            if cache_type_k is not None or cache_type_v is not None:
+                raise BadRequest("KVMem + hipfire 的 KV 精度固定 q8，不能设置 K/V 精度")
         kvmem_budget = payload.get("kvmem_budget")
         if kvmem_budget is not None:
             if isinstance(kvmem_budget, bool) or not isinstance(kvmem_budget, int):
                 raise BadRequest("kvmem_budget must be an integer")
             if kvmem_budget < 128:
                 raise BadRequest("kvmem_budget must be at least 128")
-            if kind != "kvmem_llama_dir":
-                raise BadRequest("只有 KVMem + llama.cpp 支持 kvmem_budget")
+            if kind not in ("kvmem_llama_dir", "kvmem_hipfire_dir"):
+                raise BadRequest("只有 KVMem + llama.cpp / hipfire 支持 kvmem_budget")
         raw_engine_params = payload.get("engine_params")
         if raw_engine_params is not None and not isinstance(raw_engine_params, dict):
             raise BadRequest("engine_params must be an object")
         if kind == "kvmem_llama_dir":
             engine_values = normalize_kvmem_llama_engine(raw_engine_params)
+            if kvmem_budget is not None:
+                existing = engine_values.get("kvmem_budget")
+                if isinstance(existing, int) and existing != kvmem_budget:
+                    raise BadRequest("kvmem_budget 与 engine_params.kvmem_budget 不一致")
+                engine_values["kvmem_budget"] = kvmem_budget
+        elif kind == "kvmem_hipfire_dir":
+            engine_values = normalize_kvmem_hipfire_engine(raw_engine_params)
             if kvmem_budget is not None:
                 existing = engine_values.get("kvmem_budget")
                 if isinstance(existing, int) and existing != kvmem_budget:
@@ -11165,6 +11889,9 @@ class Gateway:
             )
         if kind == "kvmem_llama_dir":
             steps[2]["label"] = "选择 KV 精度与 KVMem 参数"
+        if kind == "kvmem_hipfire_dir":
+            steps[1]["label"] = "读取 HFQM 元数据"
+            steps[2]["label"] = "应用 KVMem 与引擎参数"
         if kind == "kvmem_polystrata_dir":
             steps[2]["label"] = "选择 KV 精度、MTP 与 KVMem 参数"
         if kind == "strata_dir":
@@ -11856,6 +12583,190 @@ class Gateway:
                 job["status"] = job.get("status") if job.get("status") != "running" else "failed"
                 job["finished_at"] = job.get("finished_at") or iso_now()
 
+    def _model_add_hipfire_worker(
+        self,
+        job: dict[str, Any],
+        engine_id: str,
+        model: Path,
+        smoke: bool,
+    ) -> None:
+        """Add a model to hipfire serve (KVMem multi-slot).
+
+        One artifact per process: each model gets a kvmem-hipfire-*.json with
+        its own HFQM/MQ artifact, KVMem env and serve flags; switching models
+        restarts the engine. A vision tower, when present, is the sidecar
+        hipfire finds beside the artifact — no router vision plumbing.
+        """
+        engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
+        config_file: Path | None = None
+        name: str | None = None
+        try:
+            self._job_step(job, "paths", "running")
+            if model.is_dir():
+                raise BadRequest("请指向具体的 HFQM/MQ 模型文件，而不是目录")
+            if not model.is_file():
+                raise BadRequest(f"模型路径不存在：{model}")
+            try:
+                with open(model, "rb") as handle:
+                    magic = handle.read(4)
+            except OSError as exc:
+                raise BadRequest(f"无法读取模型文件：{exc}") from exc
+            if magic != b"HFQM":
+                raise BadRequest("模型文件不是 HFQM/MQ 格式（缺少 HFQM 头）")
+            self._job_step(job, "paths", "ok", str(model))
+
+            self._job_step(job, "metadata", "running")
+            ceiling = hipfire_model_context(model)
+            requested = job.get("context_length")
+            if requested is not None:
+                if ceiling is not None and int(requested) > ceiling:
+                    raise BadRequest(
+                        f"上下文长度 {int(requested):,} 超过模型训练上限 {ceiling:,}"
+                    )
+                context = int(requested)
+                context_note = f"上下文 {context:,}（用户指定）"
+            elif ceiling is not None:
+                # The router passes the trained ceiling as --max-seq at start.
+                context = None
+                context_note = f"上下文上限 {ceiling:,}（启动时自动传入）"
+            else:
+                context = None
+                context_note = "无法读取上下文上限（启动时由引擎解析）"
+            base_name = self._edit_force_name(job) or job.get("name") or model.stem
+            name = self._edit_force_name(job) or slugify_model_id(base_name)
+            if self.registry.resolve(name) is not None and not self._edit_allow_name(job, name):
+                raise BadRequest(f"模型 ID {name} 已存在")
+            job["name"] = name
+            self._job_step(job, "metadata", "ok", f"HFQM 模型；{context_note}；ID {name}")
+
+            self._job_step(job, "kv", "running")
+            edit_template = self._edit_template_config(job)
+            if edit_template is not None:
+                template = edit_template
+                template_path = Path(str((job.get("edit") or {}).get("old_config_path") or ""))
+            else:
+                template_path, template = kvmem_hipfire_reference_config(engine_cfg)
+            if template is None:
+                template = default_kvmem_hipfire_template()
+            requested_engine = {
+                key: value
+                for key, value in (job.get("engine_params") or {}).items()
+                if value is not None
+            }
+            seed: dict[str, Any] = {
+                "args": [str(item) for item in (template.get("args") or [])]
+            }
+            if isinstance(template.get("env"), dict):
+                seed["env"] = dict(template["env"])
+            # The model path, context and bind address are router-owned.
+            for flag in ("--model", "--max-seq", "--host", "--port",
+                         "--api-key", "--api-key-file"):
+                seed["args"] = _config_arg_remove(seed["args"], flag)
+            seed["args"] = [item for item in seed["args"] if item != "--detach"]
+            seed = kvmem_hipfire_apply_engine_values(seed, requested_engine)
+            if context is not None:
+                seed["max_seq"] = context
+            seed_env = seed.get("env") if isinstance(seed.get("env"), dict) else {}
+            budget = parse_int(seed_env.get("HIPFIRE_KVMEM_BUDGET_TOKENS")) or 32768
+            slots = parse_int(seed_env.get("HIPFIRE_SERVE_MULTI_SLOT_SLOTS")) or 4
+            self._job_step(
+                job, "kv", "ok",
+                f"KV q8（KVMem 分页）；预算 {budget:,} tokens；槽位 {slots}",
+            )
+
+            self._job_step(job, "config", "running")
+            params = job.get("params") or self.default_sampling(engine_id)
+            self.params.replace(name, params, "kvmem_hipfire")
+            models_cfg = engine_cfg.get("models") if isinstance(engine_cfg.get("models"), dict) else {}
+            config_dir = Path(str(models_cfg.get("dir") or ""))
+            config_file = config_dir / f"kvmem-hipfire-{slugify_model_id(name).lower()}.json"
+            if config_file.exists() and not self._edit_reuses_config(job, config_file):
+                raise BadRequest(f"配置已存在：{config_file}")
+            new_cfg = json.loads(json.dumps(template))
+            new_cfg["model_name"] = name
+            new_cfg["model_id"] = name
+            if edit_template is None:
+                new_cfg["display_name"] = model.stem
+                new_cfg["aliases"] = []
+            new_cfg["model"] = str(model)
+            new_cfg.pop("artifact", None)
+            new_cfg["notes"] = (
+                "KVMem + hipfire 单模型；参数"
+                + (f"复制自 {template_path.name}" if template_path else "使用内置默认")
+            )
+            new_cfg["args"] = seed["args"]
+            if seed.get("env"):
+                new_cfg["env"] = seed["env"]
+            else:
+                new_cfg.pop("env", None)
+            if seed.get("max_seq") is not None:
+                new_cfg["max_seq"] = seed["max_seq"]
+            else:
+                new_cfg.pop("max_seq", None)
+            new_cfg.pop("vision", None)
+            new_cfg.pop("mmproj", None)
+            if not new_cfg.get("exe"):
+                command = engine_cfg.get("command")
+                if isinstance(command, list) and command:
+                    new_cfg["exe"] = str(command[0])
+            if not new_cfg.get("cwd"):
+                new_cfg["cwd"] = str(engine_cfg.get("cwd") or "")
+            write_json_atomic(config_file, new_cfg)
+            job["config_path"] = str(config_file)
+            self._job_step(job, "config", "ok", f"已写入 {config_file}")
+
+            self._apply_job_display_name(job, name)
+            self._job_step(job, "start", "running", "正在停止当前引擎…")
+            self.ensure_no_async()
+            with self.cond:
+                engine_alive = bool(self.engine is not None and self.engine.alive())
+            if engine_alive:
+                self.stop_engine()
+            self._edit_detach_old(job)
+            self.registry.reload()
+            entry = self._resolve_job_entry(job, name)
+            self._job_step(job, "start", "running", "正在启动引擎并加载模型…")
+            self.preload(name)
+            self._job_step(
+                job, "start", "ok",
+                f"{entry.engine} 已加载 {entry.id}（引擎模型 {entry.engine_model}）",
+            )
+
+            if smoke:
+                self._job_step(job, "smoke", "running", "发送文本请求…")
+                text, text_tokens = self._smoke_completion(
+                    entry, [{"role": "user", "content": SMOKE_PROMPT}], job
+                )
+                self._job_step(
+                    job, "smoke", "ok",
+                    f"文本正常（prompt {text_tokens} tokens）：{text[:80]}",
+                )
+            else:
+                self._job_step(job, "smoke", "ok", "跳过（未勾选冒烟测试）")
+
+            self._job_finish_ok(job)
+            self.log.info("KVMem + hipfire model add %s (%s) finished", job["id"], name)
+        except Exception as exc:
+            message = exc.message if isinstance(exc, GatewayError) else str(exc)
+            self.log.exception("KVMem + hipfire model add %s failed", job["id"])
+            with self.model_jobs_lock:
+                for step in job.get("steps") or []:
+                    if step.get("status") == "running":
+                        step["status"] = "fail"
+                        if message:
+                            step["detail"] = message[:300]
+                if not any(step.get("status") == "fail" for step in job.get("steps") or []):
+                    for step in job.get("steps") or []:
+                        if step.get("status") == "pending":
+                            step["status"] = "fail"
+                            break
+            self._rollback_model_add(job, "kvmem_hipfire", name, None, config_file)
+            self._job_finish(job, "failed", message)
+        finally:
+            with self.model_jobs_lock:
+                job["status"] = job.get("status") if job.get("status") != "running" else "failed"
+                job["finished_at"] = job.get("finished_at") or iso_now()
+
     def _strata_prepare_draft(self, engine_id: str, draft: Path) -> tuple[Path, bool]:
         """Turn a draft GGUF (or an already-converted runtime dir) into the
         engine's MTP runtime directory.  Returns (dir, reused)."""
@@ -12337,6 +13248,8 @@ class Gateway:
             self._model_add_kvmem_llama_worker(
                 job, engine_id, model, vision, smoke, vision_gpu
             )
+        elif kind == "kvmem_hipfire_dir":
+            self._model_add_hipfire_worker(job, engine_id, model, smoke)
         elif kind == "strata_dir":
             self._model_add_strata_worker(
                 job, engine_id, model, vision, smoke, vision_gpu, draft
@@ -13165,7 +14078,7 @@ class Gateway:
         entry = self.registry.resolve(name)
         if entry is None:
             raise ModelNotFound(f"model {name!r} is not in the registry")
-        if entry.source not in ("preset", "strata", "kvmem_ninfer", "kvmem_llama"):
+        if entry.source not in ("preset", "strata", "kvmem_ninfer", "kvmem_llama", "kvmem_hipfire"):
             raise BadRequest("该模型由目录扫描发现，没有可删除的配置文件")
         removed: list[str] = []
         if entry.source == "preset":
@@ -13250,6 +14163,8 @@ class Gateway:
             return normalize_ninfer_engine(raw)
         if entry.engine == "kvmem_llama":
             return normalize_kvmem_llama_engine(raw)
+        if entry.engine == "kvmem_hipfire":
+            return normalize_kvmem_hipfire_engine(raw)
         if entry.engine == "strata":
             return normalize_strata_engine(raw)
         if entry.engine != "llama":
@@ -13519,6 +14434,15 @@ class Gateway:
                     raise BadRequest("该模型的配置没有 vision 段，无法设置视觉运行位置")
                 config["vision"]["gpu"] = bool(vision_gpu)
             write_json_atomic(config_path, config)
+        elif entry.engine == "kvmem_hipfire":
+            config_path = Path(str(entry.config_path or ""))
+            config = read_json(config_path, {})
+            if not isinstance(config, dict):
+                raise BadRequest("找不到该模型的配置文件")
+            if engine_values is not None:
+                config = kvmem_hipfire_apply_engine_values(config, engine_values)
+            write_json_atomic(config_path, config)
+            result["engine_params"] = kvmem_hipfire_engine_values(config)
         if display_name is not None:
             self.set_model_display_name(entry.id, display_name)
         self.registry.reload()
@@ -13757,6 +14681,16 @@ class Gateway:
             [str(item) for item in args], config if isinstance(config, dict) else None
         )
 
+    def _kvmem_hipfire_engine_values(self, entry: Model) -> dict[str, Any]:
+        """Whitelisted hipfire options from one kvmem-hipfire-*.json."""
+        if entry.engine != "kvmem_hipfire":
+            return {}
+        config_path = Path(str(entry.config_path or ""))
+        config = read_json(config_path, {})
+        if not isinstance(config, dict):
+            return {}
+        return kvmem_hipfire_engine_values(config)
+
     def model_list(self) -> dict[str, Any]:
         with self.cond:
             active = self.active
@@ -13780,6 +14714,8 @@ class Gateway:
                 item["engine_params"] = self._ninfer_engine_values(model)
             elif model.engine == "strata":
                 item["engine_params"] = self._strata_engine_values(model)
+            elif model.engine == "kvmem_hipfire":
+                item["engine_params"] = self._kvmem_hipfire_engine_values(model)
             if status == "failed" and last_error and target is not None and target.id == model.id:
                 item["error"] = last_error
             data.append(item)
@@ -13798,6 +14734,8 @@ class Gateway:
             item["engine_params"] = self._ninfer_engine_values(model)
         elif model.engine == "strata":
             item["engine_params"] = self._strata_engine_values(model)
+        elif model.engine == "kvmem_hipfire":
+            item["engine_params"] = self._kvmem_hipfire_engine_values(model)
         return item
 
     def params_view(self) -> dict[str, Any]:
@@ -13816,6 +14754,8 @@ class Gateway:
                 row["engine_params"] = self._ninfer_engine_values(entry)
             elif entry.engine == "strata":
                 row["engine_params"] = self._strata_engine_values(entry)
+            elif entry.engine == "kvmem_hipfire":
+                row["engine_params"] = self._kvmem_hipfire_engine_values(entry)
             data.append(row)
         return {"object": "list", "data": data}
 
