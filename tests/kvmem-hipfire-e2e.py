@@ -8,6 +8,8 @@ SIGTERM. Covers engine creation, adding an HFQM artifact, the trained-context
 --max-seq fallback, KVMem env defaults, engine_params write/clear, validation
 failures, restart-on-switch, daemon teardown and the manage-view schemas.
 The browser section covers the params/add dialogs and a console-driven add.
+The tune section drives the independent hipfire tune script (spec × prefill
+chunk candidates) and applies the measured engine_params back into the config.
 """
 from __future__ import annotations
 
@@ -35,6 +37,9 @@ OUT.mkdir()
 shutil.copy2(ROOT / "router.py", BASE / "router.py")
 shutil.copy2(ROOT / "engine_setup.py", BASE / "engine_setup.py")
 shutil.copy2(ROOT / "smoke.png", BASE / "smoke.png")
+# The tune worker resolves its script under base_dir; tune_common's REPO_ROOT
+# then points at BASE so the slot lookup reads this throwaway config.json.
+shutil.copytree(ROOT / "tools", BASE / "tools")
 
 
 def free_port() -> int:
@@ -45,16 +50,20 @@ def free_port() -> int:
     return port
 
 
-def write_hfqm(path: Path, context: int) -> None:
+def write_hfqm(path: Path, context: int, mtp_layers: int = 1) -> None:
     """Minimal HFQM artifact: 32-byte header + metadata JSON + fake weights.
 
     Header layout (little endian): magic "HFQM", version u32, arch u32,
     tensor count u32, metadata offset u64, payload offset u64. The router
-    reads config.text_config.max_position_embeddings from the metadata.
+    reads config.text_config.max_position_embeddings from the metadata; the
+    tune script also reads mtp_num_hidden_layers to detect the MTP head.
     """
     meta = json.dumps({
         "architecture": "qwen3_5",
-        "config": {"text_config": {"max_position_embeddings": context}},
+        "config": {"text_config": {
+            "max_position_embeddings": context,
+            "mtp_num_hidden_layers": mtp_layers,
+        }},
     }).encode("utf-8")
     data_off = (32 + len(meta) + 4095) & ~4095
     header = b"HFQM" + struct.pack("<III", 1, 5, 2) + struct.pack("<QQ", 32, data_off)
@@ -912,6 +921,64 @@ try:
     while time.time() < deadline and daemon_pids():
         time.sleep(0.2)
     assert not daemon_pids(), "hipfire daemon survived the engine stop"
+    checks += 1
+
+    # 13. Tune flow: the independent script benchmarks spec × prefill-chunk
+    # candidates against the fake CLI (identical metrics -> the first
+    # candidate wins deterministically), and apply writes engine_params
+    # through the validated args/env path instead of a flat argv overwrite.
+    tune_resp = requests.post(url + "/router/models/tune", json={"model": model_id}, timeout=30)
+    assert tune_resp.status_code == 202, tune_resp.text
+    tune_job = wait_job(tune_resp.json()["id"], timeout=300)
+    assert tune_job["status"] == "ok", tune_job.get("error")
+    assert tune_job["restored"] is True, tune_job
+    suggestions = tune_job["suggestions"]
+    assert suggestions["engine_params"] == {"spec": "auto", "prefill_chunk": 1024}, suggestions
+    assert suggestions["best_candidate"] == "spec-auto-chunk-1024", suggestions
+    assert suggestions["kv"] == "q8" and suggestions["context_length"] == 262144, suggestions
+    assert isinstance(suggestions["params"], list), suggestions
+    cands = tune_job["candidates"]
+    assert len(cands) == 8 and all(item.get("ok") for item in cands), cands
+    expected_ids = {
+        f"spec-{spec}-chunk-{chunk}"
+        for spec in ("auto", "mtp", "ngram", "off") for chunk in (1024, 2048)
+    }
+    assert {item["id"] for item in cands} == expected_ids, cands
+    # The worker preloads the model after the script exits, so the newest
+    # record is the restore launch; the 8 tune launches precede it.
+    tune_starts = starts()[-9:-1]
+    assert all(item["max_seq"] == "262144" for item in tune_starts), tune_starts
+    assert all(item["env"]["HIPFIRE_DAEMON_BIN"] for item in tune_starts), tune_starts
+    assert all(item["env"]["HIPFIRE_KV_MODE"] == "q8" for item in tune_starts), tune_starts
+    assert all(item["env"]["HIPFIRE_SERVE_MULTI_SLOT"] == "true" for item in tune_starts), tune_starts
+    assert {
+        (item["spec"], item["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"])
+        for item in tune_starts
+    } == {(spec, str(chunk)) for spec in ("auto", "mtp", "ngram", "off") for chunk in (1024, 2048)}, tune_starts
+    apply_resp = requests.post(
+        url + "/router/models/tune/apply", json={"job": tune_job["id"]}, timeout=30
+    )
+    assert apply_resp.status_code == 200, apply_resp.text
+    applied = apply_resp.json()
+    assert applied["engine_params"]["spec"] == "auto", applied
+    assert applied["engine_params"]["prefill_chunk"] == 1024, applied
+    tuned_cfg = read_json(Path(models()[model_id]["config_path"]))
+    assert "--spec" in tuned_cfg["args"], tuned_cfg
+    assert tuned_cfg["args"][tuned_cfg["args"].index("--spec") + 1] == "auto", tuned_cfg
+    assert tuned_cfg["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "1024", tuned_cfg
+    wait_idle()
+    relaunched = starts()[-1]
+    assert relaunched["spec"] == "auto", relaunched
+    assert relaunched["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "1024", relaunched
+    assert status()["engines"]["kvmem_hipfire"]["alive"] is True
+    # Stop everything again: nothing may stay resident after the tune test.
+    unloaded = requests.post(url + "/models/unload", json={"model": model_id}, timeout=20)
+    assert unloaded.status_code in (200, 202), unloaded.text
+    wait_idle()
+    deadline = time.time() + 10
+    while time.time() < deadline and daemon_pids():
+        time.sleep(0.2)
+    assert not daemon_pids(), "hipfire daemon survived the post-tune stop"
     checks += 1
     print(f"kvmem-hipfire e2e: {checks} check groups passed; shots in {OUT}")
 finally:

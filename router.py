@@ -6423,6 +6423,7 @@ TUNE_ENGINE_SCRIPTS: dict[str, str] = {
     "kvmem_polystrata": "tools/tune/tune_kvmem_polystrata.py",
     "kvmem_ninfer": "tools/tune/tune_kvmem_ninfer.py",
     "kvmem_llama": "tools/tune/tune_kvmem_llama.py",
+    "kvmem_hipfire": "tools/tune/tune_kvmem_hipfire.py",
 }
 KV_PROBE_CODE = (
     "import serve.server\n"
@@ -11493,6 +11494,35 @@ class Gateway:
         current_kind = self._short_kind(self._engine_kind(entry.engine))
         if current_kind != engine_kind:
             raise BadRequest("模型的引擎已变化，请重新调优")
+        if engine_kind == "kvmem_hipfire":
+            # hipfire options live in args/env/max_seq, not a flat argv:
+            # apply the measured engine_params through the same validated
+            # path as the params form instead of overwriting config["args"].
+            params = suggestions.get("engine_params")
+            if not isinstance(params, dict) or not params:
+                raise BadRequest("调优结果没有可应用的参数")
+            config_path = Path(str(entry.config_path or ""))
+            if not config_path.is_file():
+                raise BadRequest("找不到该模型的配置文件")
+            config = read_json(config_path, {})
+            if not isinstance(config, dict):
+                raise BadRequest("模型配置文件无效")
+            values = normalize_kvmem_hipfire_engine(params)
+            config = kvmem_hipfire_apply_engine_values(config, values)
+            write_json_atomic(config_path, config)
+            self.registry.reload()
+            started, pending, note = self._schedule_engine_restart(entry.engine)
+            with self.model_jobs_lock:
+                job["applied"] = True
+                job["applied_at"] = iso_now()
+            return {
+                "model": entry.id,
+                "engine": entry.engine,
+                "restarting": started,
+                "restart_pending": pending,
+                "note": note,
+                "engine_params": kvmem_hipfire_engine_values(config),
+            }
         args = suggestions.get("args")
         if not isinstance(args, list) or not args:
             raise BadRequest("调优结果没有可应用的参数")

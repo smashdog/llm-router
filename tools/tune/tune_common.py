@@ -799,6 +799,72 @@ def read_ninfer_header(path: str | Path) -> dict[str, Any] | None:
     }
 
 
+def read_hfqm_header(path: str | Path) -> dict[str, Any] | None:
+    """Stream-parse an HFQM/MQ artifact header; never read the weight payload.
+
+    The 32-byte header is magic "HFQM", version/arch/tensor-count u32s, then
+    the metadata and payload offsets (u64 LE). The metadata JSON carries the
+    HF config: text_config.max_position_embeddings is the trained context
+    ceiling and text_config.mtp_num_hidden_layers marks an embedded MTP head
+    (the same fields hipfire's own loader reads)."""
+    target = Path(path)
+    try:
+        size = target.stat().st_size
+        with open(target, "rb") as handle:
+            head = handle.read(32)
+            if len(head) < 32 or head[:4] != b"HFQM":
+                return None
+            meta_off = int.from_bytes(head[16:24], "little")
+            data_off = int.from_bytes(head[24:32], "little")
+            if meta_off < 32 or data_off <= meta_off or data_off > size:
+                return None
+            if data_off - meta_off > 64 * 1024 * 1024:
+                return None
+            handle.seek(meta_off)
+            raw = handle.read(data_off - meta_off)
+    except OSError:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    config = obj.get("config") if isinstance(obj.get("config"), dict) else obj
+    text = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
+
+    def positive_int(value: Any) -> int | None:
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return None
+
+    mtp = (
+        positive_int(text.get("mtp_num_hidden_layers"))
+        or positive_int(text.get("num_nextn_predict_layers"))
+        or 0
+    )
+    arch = obj.get("architecture")
+    if not isinstance(arch, str) or not arch:
+        archs = config.get("architectures")
+        arch = (
+            archs[0]
+            if isinstance(archs, list) and archs and isinstance(archs[0], str)
+            else text.get("model_type")
+        )
+    return {
+        "path": str(target),
+        "size_bytes": size,
+        "size_mib": round(size / (1024 * 1024), 1),
+        "format": "hfqm",
+        "architecture": arch,
+        "model_type": text.get("model_type") or config.get("model_type"),
+        "context_length": positive_int(text.get("max_position_embeddings")),
+        "block_count": positive_int(text.get("num_hidden_layers")),
+        "mtp_layers": mtp,
+        "has_nextn": mtp > 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # config / command construction
 # ---------------------------------------------------------------------------

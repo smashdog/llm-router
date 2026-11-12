@@ -3525,7 +3525,7 @@
       }
     }
     paramsModel = model.id;
-    $("params-tune").hidden = !["kvmem_polystrata", "kvmem_ninfer", "kvmem_llama"].includes(model.engine);
+    $("params-tune").hidden = !["kvmem_polystrata", "kvmem_ninfer", "kvmem_llama", "kvmem_hipfire"].includes(model.engine);
     paramsOriginal = null;
     paramsRenderedKind = null;
     paramsEditJob = null;
@@ -3970,7 +3970,7 @@
     const kvllama = kind === "kvmem_llama";
     const kvhipfire = kind === "kvmem_hipfire";
     const kvlike = kv || strata;
-    const tuneEligible = kv || ninfer || kvllama;
+    const tuneEligible = kv || ninfer || kvllama || kvhipfire;
     $("add-tune-field").hidden = !tuneEligible;
     if (!tuneEligible) $("add-tune").checked = false;
     form.elements.top_k.min = kvlike ? 1 : 0;
@@ -4234,7 +4234,7 @@
       vision_device: (document.querySelector('input[name="add-vision-device"]:checked') || {}).value || "cpu",
       smoke: $("add-smoke").checked,
     };
-    if (engineInfo.kind === "kvmem_polystrata" || engineInfo.kind === "kvmem_ninfer" || engineInfo.kind === "kvmem_llama") {
+    if (engineInfo.kind === "kvmem_polystrata" || engineInfo.kind === "kvmem_ninfer" || engineInfo.kind === "kvmem_llama" || engineInfo.kind === "kvmem_hipfire") {
       body.tune = $("add-tune").checked;
     }
     if (engineInfo.kind === "strata") {
