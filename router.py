@@ -1251,6 +1251,18 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
         env="HIPFIRE_KVMEM_RECENT_BLOCKS",
         default=1, low=0, step=1,
     ),
+    _hipfire_engine_spec(
+        "select_interval", "选择间隔（块）", "kvmem", "integer",
+        env="HIPFIRE_KVMEM_SELECT_INTERVAL",
+        default=4, low=1, high=256, step=1,
+        note="每写入多少块触发一次驻留选择；越大越省但瞬时驻留越多，引擎钳 1–256，留空默认 4",
+    ),
+    _hipfire_engine_spec(
+        "host_bytes", "主机 RAM 容量（字节）", "kvmem", "integer",
+        env="HIPFIRE_KVMEM_HOST_BYTES",
+        default=17179869184, low=1, step=1073741824,
+        note="KVMem 主机 RAM 层容量（磁盘层见 Spill 额度）；留空用引擎默认 16 GiB",
+    ),
     # -- spill ----------------------------------------------------------------
     _hipfire_engine_spec(
         "spill_dir", "Spill 目录", "spill", "string",

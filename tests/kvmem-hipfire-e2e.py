@@ -898,10 +898,16 @@ try:
     keys = {spec["key"] for spec in schema}
     assert {"max_seq", "slots", "idle_timeout", "spec", "kvmem_enable",
             "kvmem_budget", "paged_pages", "sink_blocks", "recent_blocks",
+            "select_interval", "host_bytes",
             "spill_dir", "spill_bytes", "prefill_chunk", "devices",
             "max_batch_tokens", "flash_partials_batch", "vision_mode"} <= keys, keys
     groups = {spec["group"] for spec in schema}
     assert groups == {"basic", "spec", "kvmem", "spill", "advanced"}, groups
+    by_key = {spec["key"]: spec for spec in schema}
+    assert by_key["select_interval"]["env"] == "HIPFIRE_KVMEM_SELECT_INTERVAL", by_key["select_interval"]
+    assert by_key["select_interval"]["default"] == 4, by_key["select_interval"]
+    assert by_key["host_bytes"]["env"] == "HIPFIRE_KVMEM_HOST_BYTES", by_key["host_bytes"]
+    assert by_key["host_bytes"]["default"] == 17179869184, by_key["host_bytes"]
     assert "kvmem_hipfire" in manage["param_schema"], manage["param_schema"].keys()
     assert requests.get(url + "/", timeout=10).status_code == 200
     checks += 1
@@ -1008,7 +1014,7 @@ try:
     assert surface["visionHidden"] is False and surface["visionPathHidden"] is False, surface
     assert surface["engineHidden"] is True, surface
     assert surface["kvmemTabHidden"] is False, surface
-    assert surface["kvmemCount"] == "5" and surface["kvmemFields"] == 5, surface
+    assert surface["kvmemCount"] == "7" and surface["kvmemFields"] == 7, surface
     assert surface["moreFields"] == 12, surface
     assert surface["visionPath"] == str(vision_sidecar), surface
     assert surface["visionDevice"] == "cpu", surface
@@ -1070,7 +1076,7 @@ try:
     assert form["visionHidden"] is False, form
     assert form["deviceHidden"] is False and form["visionHintHidden"] is False, form
     assert form["kvmemTabHidden"] is False, form
-    assert form["kvmemCount"] == "5" and form["kvmemFields"] == 5, form
+    assert form["kvmemCount"] == "7" and form["kvmemFields"] == 7, form
     assert form["kvmemBlank"] is True, form
     assert form["budgetHint"] == "32768", form
     assert form["spec"] == "auto", form
