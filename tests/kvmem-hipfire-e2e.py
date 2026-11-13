@@ -157,7 +157,7 @@ record = {
         "HIPFIRE_KVMEM", "HIPFIRE_SERVE_MULTI_SLOT", "HIPFIRE_KV_MODE",
         "HIPFIRE_KVMEM_BUDGET_TOKENS", "HIPFIRE_SERVE_MULTI_SLOT_SLOTS",
         "HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK", "HIPFIRE_DAEMON_BIN",
-        "HIPFIRE_SPILL_DIR", "HIPFIRE_DEVICES", "HIPFIRE_SERVE_MAX_BATCH_TOKENS",
+        "HIPFIRE_KVMEM_SPILL_DIR", "HIPFIRE_DEVICES", "HIPFIRE_SERVE_MAX_BATCH_TOKENS",
         "HIPFIRE_FLASH_PARTIALS_BATCH",
         "HIPFIRE_VISION_SIDECAR", "HIPFIRE_VISION_MODE", "HIPFIRE_VISION_HOST_MAPPED",
     )},
@@ -631,7 +631,7 @@ try:
     assert updated["env"]["HIPFIRE_KVMEM"] == "1", updated
     assert updated["env"]["HIPFIRE_KVMEM_SINK_BLOCKS"] == "2", updated
     assert updated["env"]["HIPFIRE_KVMEM_RECENT_BLOCKS"] == "3", updated
-    assert updated["env"]["HIPFIRE_SPILL_DIR"] == str(BASE / "spill"), updated
+    assert updated["env"]["HIPFIRE_KVMEM_SPILL_DIR"] == str(BASE / "spill"), updated
     assert updated["env"]["HIPFIRE_DEVICES"] == "0", updated
     last_start = starts()[-1]
     assert last_start["max_seq"] == "65536", last_start
@@ -658,7 +658,7 @@ try:
     cleared_args = [str(value) for value in cleared_cfg["args"]]
     assert "--spec" not in cleared_args and "--idle-timeout" not in cleared_args, cleared_args
     assert "max_seq" not in cleared_cfg, cleared_cfg
-    assert "HIPFIRE_SPILL_DIR" not in cleared_cfg.get("env", {}), cleared_cfg
+    assert "HIPFIRE_KVMEM_SPILL_DIR" not in cleared_cfg.get("env", {}), cleared_cfg
     assert "HIPFIRE_SERVE_MAX_BATCH_TOKENS" not in cleared_cfg.get("env", {}), cleared_cfg
     assert "HIPFIRE_FLASH_PARTIALS_BATCH" not in cleared_cfg.get("env", {}), cleared_cfg
     assert starts()[-1]["max_seq"] == "262144", starts()[-1]

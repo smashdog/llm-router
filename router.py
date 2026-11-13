@@ -1254,12 +1254,12 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
     # -- spill ----------------------------------------------------------------
     _hipfire_engine_spec(
         "spill_dir", "Spill 目录", "spill", "string",
-        env="HIPFIRE_SPILL_DIR",
+        env="HIPFIRE_KVMEM_SPILL_DIR",
         note="留空用引擎默认；SSD 溢出页存放位置",
     ),
     _hipfire_engine_spec(
         "spill_bytes", "Spill 额度（字节）", "spill", "integer",
-        env="HIPFIRE_SPILL_BYTES",
+        env="HIPFIRE_KVMEM_SPILL_BYTES",
         low=0, step=1073741824,
         note="留空用引擎默认 64 GiB",
     ),
