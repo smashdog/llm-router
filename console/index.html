@@ -1009,7 +1009,7 @@
               <select id="params-engine-slot"></select></label>
             <label class="span-all">模型路径 <span class="name">model</span>
               <textarea id="params-model-path" rows="2" spellcheck="false" placeholder="/path/to/model.gguf 或模型目录"></textarea></label>
-            <label class="span-all" id="params-vision-path-field">视觉路径 <span class="name">mmproj · 选填</span>
+            <label class="span-all" id="params-vision-path-field">视觉路径 <span class="name" id="params-vision-path-label">mmproj · 选填</span>
               <textarea id="params-vision-path" rows="2" spellcheck="false" placeholder="留空表示无视觉"></textarea></label>
             <label class="span-all" id="params-draft-path-field" hidden>draft 路径 <span class="name">MTP · 选填</span>
               <textarea id="params-draft-path" rows="2" spellcheck="false" placeholder="留空表示不使用 MTP"></textarea></label>
@@ -1099,7 +1099,7 @@
       <div class="add-fields">
         <label id="add-model-field">模型路径 <span class="name" id="add-model-hint">.gguf 文件，必填</span>
           <textarea id="add-model" rows="3" spellcheck="false" placeholder="/path/to/model.gguf"></textarea></label>
-        <label id="add-vision-field">视觉路径 <span class="name">mmproj .gguf，选填</span>
+        <label id="add-vision-field">视觉路径 <span class="name" id="add-vision-label">mmproj .gguf，选填</span>
           <textarea id="add-vision" rows="3" spellcheck="false" placeholder="/path/to/mmproj.gguf（留空表示无视觉）"></textarea></label>
         <label id="add-draft-field" class="span-all" hidden>draft 路径 <span class="name">MTP .gguf 或已转换运行时目录，选填</span>
           <textarea id="add-draft" rows="3" spellcheck="false" placeholder="/path/to/mtp-...-draft.gguf（留空沿用模板的 --mtp；.gguf 会转换成同名 .rt）"></textarea></label>
@@ -3229,7 +3229,7 @@
   }
 
   function paramsVisionText(kind) {
-    return kind === "kvmem_ninfer" || kind === "kvmem_hipfire" ? "" : String($("params-vision-path").value || "").trim();
+    return kind === "kvmem_ninfer" ? "" : String($("params-vision-path").value || "").trim();
   }
 
   function paramsDraftText(kind) {
@@ -3308,10 +3308,11 @@
     const strata = kind === "strata";
     const kv = kind === "kvmem_polystrata";
     const kvllama = kind === "kvmem_llama";
+    const kvhipfire = kind === "kvmem_hipfire";
     $("params-vision-caption").textContent = ninfer
       ? "内嵌视觉塔 · 修改后重新验证"
-      : strata || kvllama
-        ? "mmproj · 修改后重新验证"
+      : strata || kvllama || kvhipfire
+        ? (kvhipfire ? "HFQ sidecar · 修改后重新验证" : "mmproj · 修改后重新验证")
         : "mmproj · 修改后自动重启引擎生效";
     $("params-vision-hint").textContent = ninfer
       ? "写入 ninfer-*.json 的 args：GPU 使用 --vision --vision-residency，CPU 使用 --vision-cpu；视觉塔内嵌在 .ninfer 中，主模型仍按引擎参数加载。"
@@ -3321,7 +3322,9 @@
           ? "写入模型配置的 vision.gpu；CPU 与 GPU 使用同一份 mmproj。"
           : kvllama
             ? "写入模型配置的 vision.gpu；llama-kvmem-server 按 --mmproj-offload / --no-mmproj-offload 切换，CPU 与 GPU 共用同一份 mmproj；主模型仍按 --device 与 GPU 层数加载。"
-            : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off，主模型仍按 n-gpu-layers 加载。";
+            : kvhipfire
+              ? "写入模型配置的 vision.sidecar / vision.gpu；CPU 为 HostMapped（大矩阵驻内存零拷贝，显存峰值约 330 MiB），GPU 为 Streamed/resident（“更多参数”的视觉驻留模式）；每次请求只支持一张 base64 图片；清空路径即关闭视觉。"
+              : "llama.cpp 默认把视觉编码器放在 GPU；选择 CPU 会写入 mmproj-offload = off，主模型仍按 n-gpu-layers 加载。";
   }
 
   function snapshotParamInputs(host) {
@@ -3367,7 +3370,7 @@
 
   function setParamsKindHint(kind, preset) {
     $("params-hint").textContent = kind === "kvmem_hipfire"
-      ? "KVMem + hipfire：模型路径必须是 HFQM 文件；K/V 固定 q8，视觉 sidecar 自动识别；max_seq 在“更多参数”设置，留空用模型训练上下文上限；改引擎或路径会重新验证，失败自动恢复旧配置。"
+      ? "KVMem + hipfire：模型路径必须是 HFQM 文件；K/V 固定 q8；视觉填写 HFQ sidecar 路径后启用（每次请求仅一张 base64 图片），留空为纯文本；max_seq 在“更多参数”设置，留空用模型训练上下文上限；改引擎或路径会重新验证，失败自动恢复旧配置。"
       : kind === "kvmem_ninfer"
       ? "NInfer：repetition_penalty 只能为 1（提交时清空），不支持 repeat_last_n；模型路径必须是 .ninfer，视觉塔内嵌在模型里；改引擎或路径会重新验证，失败自动恢复旧配置。"
       : kind === "kvmem_llama"
@@ -3419,7 +3422,11 @@
           ? "llama.cpp · 目录扫描模型，首次修改会补建 models.ini 预设"
           : "llama.cpp · 保存后自动重启引擎生效";
     }
-    $("params-vision-path-field").hidden = ninfer || kvhipfire;
+    $("params-vision-path-field").hidden = ninfer;
+    $("params-vision-path-label").textContent = kvhipfire ? "HFQ sidecar · 选填" : "mmproj · 选填";
+    $("params-vision-path").placeholder = kvhipfire
+      ? "/path/to/model-vision.hfq（留空表示无视觉）"
+      : "留空表示无视觉";
     $("params-vision-enabled-field").hidden = !ninfer;
     $("params-vision-enabled").checked = opts.visionEnabled === true;
     $("params-draft-path-field").hidden = !strata;
@@ -3480,7 +3487,7 @@
     const cacheV = backToOriginal
       ? paramsOriginal.cacheV
       : previousHasContext ? $("params-cache-v").value : "q8_0";
-    const visionPath = kind === "kvmem_hipfire" ? "" : String($("params-vision-path").value || "").trim();
+    const visionPath = String($("params-vision-path").value || "").trim();
     const engineVision = !!(engine.defaults && engine.defaults.vision);
     const visionEnabled = backToOriginal
       ? paramsOriginal.visionEnabled
@@ -3590,9 +3597,7 @@
     const initialVisionEnabled = model.multimodal === true;
     const initialHasVision = originalKind === "kvmem_ninfer"
       ? initialVisionEnabled
-      : originalKind === "kvmem_hipfire"
-        ? false
-        : !!String(model.vision_path || "").trim();
+      : !!String(model.vision_path || "").trim();
     renderParamsKind(paramsEngineMap[select.value] || paramsEngineMap[slot], {
       contextText: initialContextText,
       cacheK: model.cache_type_k || "q8_0",
@@ -4011,19 +4016,24 @@
     $("add-model-hint").textContent = ninfer
       ? ".ninfer 文件，必填"
       : kvhipfire
-        ? "HFQM 模型文件（如 .mq4-xts），必填；视觉 sidecar 自动识别"
+        ? "HFQM 模型文件（如 .mq4-xts），必填；视觉在下方填写 HFQ sidecar 路径"
         : "模型目录或 .gguf 文件，必填（目录自动挑选最大 GGUF 与 mmproj）";
     $("add-model").placeholder = ninfer
       ? "/path/to/model.ninfer"
       : kvhipfire
         ? "/mnt/ai/models/hipfire/Qwen3.8-27B/qwen3.8-27b.mq4-xts"
         : "/mnt/ai/models/Qwen3.8-27B-UD 或 /path/to/model.gguf";
-    $("add-vision-field").hidden = ninfer || kvhipfire;
-    $("add-vision-device").hidden = kvhipfire;
-    $("add-vision-hint").hidden = kvhipfire;
+    $("add-vision-field").hidden = ninfer;
+    $("add-vision-label").textContent = kvhipfire ? "HFQ sidecar（-vision.hfq / .vl），选填" : "mmproj .gguf，选填";
+    $("add-vision").placeholder = kvhipfire
+      ? "/mnt/ai/models/hipfire/Qwen3.8-27B/qwen3.8-27b-vision.hfq（留空表示无视觉）"
+      : "/path/to/mmproj.gguf（留空表示无视觉）";
+    if (kvhipfire && /\.gguf$/i.test($("add-vision").value.trim())) $("add-vision").value = "";
+    $("add-vision-device").hidden = false;
+    $("add-vision-hint").hidden = false;
     $("add-draft-field").hidden = !strata;
     if (!strata) $("add-draft").value = "";
-    $("add-model-field").classList.toggle("span-all", ninfer || kvhipfire);
+    $("add-model-field").classList.toggle("span-all", ninfer);
     $("add-vision-enabled-field").hidden = !ninfer;
     const enabledBox = $("add-vision-enabled");
     enabledBox.checked = ninfer ? !!(engine && engine.defaults && engine.defaults.vision) : false;
@@ -4035,7 +4045,9 @@
       ? "视觉塔内嵌在 .ninfer 模型中，无需 mmproj。GPU 使用 --vision --vision-residency resident（模板为 overlay 时保留 overlay），CPU 使用 --vision-cpu。"
       : strata
         ? "填写后写入新配置的 vision.mmproj 与 --vision；视觉组参数只有填写 mmproj 时才生效。主模型、专家与 KV 仍按“更多参数”加载到 GPU/内存。"
-        : "只控制视觉编码器（mmproj）；主模型和 KV cache 仍按 n-gpu-layers 与上下文加载到 GPU。";
+        : kvhipfire
+          ? "填写 HFQ 视觉包路径（-vision.hfq / .vl，不接受 mmproj GGUF）后启用视觉；留空为纯文本并关闭引擎的 sidecar 自动发现。CPU 为 HostMapped（大矩阵驻内存零拷贝），GPU 为 Streamed/resident；每次请求只支持一张 base64 图片。"
+          : "只控制视觉编码器（mmproj）；主模型和 KV cache 仍按 n-gpu-layers 与上下文加载到 GPU。";
     syncVisionDevice();
     setKvmemTabVisible($("add-dialog"), kvllama || kv || ninfer || kvhipfire);
     renderKvmemEngine(
@@ -4048,7 +4060,7 @@
       kind, null, engine ? engine.engine_params || null : null,
     );
     $("add-defaults").textContent = !engine ? "" : kvhipfire
-      ? "KVMem + hipfire 单模型模式：每份配置服务一个 HFQM 文件；K/V 固定 q8，视觉 sidecar 自动识别，无需 mmproj；max_seq 留空用模型训练上下文上限；KVMem 默认开启（预算 32768、4 槽位），预算/分页等扩展在“kvmem参数”，投机、spill 与 prefill 等自身参数在“更多参数”按需覆盖模板。"
+      ? "KVMem + hipfire 单模型模式：每份配置服务一个 HFQM 文件；K/V 固定 q8；视觉填写 HFQ sidecar 路径后启用（可选 CPU/GPU，默认 CPU，仅单张 base64 图片），留空为纯文本；max_seq 留空用模型训练上下文上限；KVMem 默认开启（预算 32768、4 槽位），预算/分页等扩展在“kvmem参数”，投机、spill 与 prefill 等自身参数在“更多参数”按需覆盖模板。"
       : ninfer
       ? "NInfer 单模型模式：每份配置只服务一个 .ninfer 模型，参数继承选定模板；视觉塔内嵌在模型中，可选择 CPU/GPU；上下文、KV 精度等 ninfer-serve 自身参数在“更多参数”按需覆盖模板，KVMem 扩展在“kvmem参数”；repetition_penalty 只能为 1，且没有 repeat_last_n。"
       : kvllama
@@ -4356,7 +4368,6 @@
       if (Object.keys(advanced).length) body.engine_params = advanced;
     }
     if (engineInfo.kind === "kvmem_hipfire") {
-      body.vision = null;
       let engineParams;
       try {
         engineParams = Object.assign(

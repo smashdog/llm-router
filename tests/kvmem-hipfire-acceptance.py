@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Real-artifact acceptance for the KVMem + hipfire engine.
+"""Real-artifact acceptance for the KVMem + hipfire engine (text + vision).
 
 Run against the production router after the ROCm install produced
 bin/kvmem-hipfire-server and bin/kvmem-hipfire-daemon.  Checks the engine
-probe, registers the real HFQM model, loads it, runs one non-streaming and
-one streaming chat, then unloads and stops the engine, verifying the daemon
-exits and nothing stays resident.  Old engines must already be stopped and
-are not restored.
+probe, registers the real HFQM model with its HFQ vision sidecar (CPU
+host-mapped), loads it, runs text and image chats (non-streaming + streaming,
+verifying the image inflates prompt tokens), refuses multi-image/remote-URL
+requests, then unloads and stops the engine, verifying the daemon exits and
+nothing stays resident.  Old engines must already be stopped and are not
+restored.
 """
+import base64
 import json
 import os
 from pathlib import Path
@@ -20,10 +23,19 @@ import requests
 BASE = Path(__file__).resolve().parents[1]
 URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
 MODEL = Path("/mnt/ai/models/hipfire/Qwen3.8-27B/qwen3.8-27b.mq4-xts")
+VISION = Path("/mnt/ai/models/hipfire/Qwen3.8-27B/qwen3.8-27b-vision.hfq")
 NAME = "qwen3.8-27b-hipfire"
 ENGINE = "kvmem_hipfire"
 SERVER_BIN = BASE / "bin" / "kvmem-hipfire-server"
 DAEMON_BIN = BASE / "bin" / "kvmem-hipfire-daemon"
+IMAGE = BASE / "smoke.png"
+IMAGE_B64 = base64.b64encode(IMAGE.read_bytes()).decode("ascii") if IMAGE.is_file() else ""
+IMAGE_URL = f"data:image/png;base64,{IMAGE_B64}"
+TEXT_MESSAGES = [{"role": "user", "content": "用一句话介绍你自己。"}]
+IMAGE_MESSAGES = [{"role": "user", "content": [
+    {"type": "text", "text": "用一句话描述这张图片。"},
+    {"type": "image_url", "image_url": {"url": IMAGE_URL}},
+]}]
 
 KEY = ""
 keys_file = BASE / "api-keys.json"
@@ -90,10 +102,16 @@ def engine_pids():
     return pids
 
 
-def chat(stream):
+def completion(messages, stream):
+    """One chat through the router; returns (content, prompt_tokens).
+
+    prompt_tokens comes from the non-streaming usage block (authoritative for
+    the image-vs-text growth check); a streaming reply also captures usage when
+    the engine emits it, but the growth assertion uses the non-streaming count.
+    """
     body = {
         "model": NAME,
-        "messages": [{"role": "user", "content": "用一句话介绍你自己。"}],
+        "messages": messages,
         "max_tokens": 96,
         "temperature": 0.0,
         "stream": stream,
@@ -108,9 +126,10 @@ def chat(stream):
         assert content.strip(), data
         usage = data.get("usage") or {}
         assert int(usage.get("completion_tokens") or 0) > 0, data
-        return content
+        return content, int(usage.get("prompt_tokens") or 0)
     pieces = []
     done = False
+    prompt_tokens = 0
     with requests.post(
         URL + "/v1/chat/completions", json=body, headers=AUTH,
         stream=True, timeout=(30, 300),
@@ -131,10 +150,13 @@ def chat(stream):
                 delta = choices[0].get("delta") or {}
                 if delta.get("content"):
                     pieces.append(str(delta["content"]))
+            usage = obj.get("usage")
+            if isinstance(usage, dict) and usage.get("prompt_tokens"):
+                prompt_tokens = int(usage["prompt_tokens"])
     content = "".join(pieces)
     assert content.strip(), "streaming chat produced no content"
     print(f"  stream: {len(pieces)} chunks, [DONE]={done}")
-    return content
+    return content, prompt_tokens
 
 
 def main():
@@ -142,6 +164,8 @@ def main():
     assert SERVER_BIN.is_file(), f"missing {SERVER_BIN}; run the ROCm install first"
     assert DAEMON_BIN.is_file(), f"missing {DAEMON_BIN}; run the ROCm install first"
     assert MODEL.is_file(), f"missing acceptance model {MODEL}"
+    assert VISION.is_file(), f"missing HFQ vision sidecar {VISION}"
+    assert IMAGE.is_file() and IMAGE_B64, f"missing acceptance image {IMAGE}"
 
     # 1. The router runs the current code and the hipfire slot is configured.
     view = engine_view()
@@ -178,14 +202,15 @@ def main():
         resp = api("POST", "/router/models/delete", {"model": NAME})
         assert resp.status_code == 200, resp.text
     resp = api("POST", "/router/models/add", {
-        "engine": ENGINE, "model": str(MODEL), "name": NAME, "smoke": False,
+        "engine": ENGINE, "model": str(MODEL), "name": NAME,
+        "vision": str(VISION), "vision_device": "cpu", "smoke": False,
     })
     assert resp.status_code == 202, resp.text
     job = resp.json()
     deadline = time.time() + 300
     while True:
         view_job = api("GET", f"/router/models/job?id={job['id']}").json()
-        if view_job.get("status") in ("ok", "error"):
+        if view_job.get("status") != "running":
             break
         assert time.time() < deadline, f"add job stuck: {view_job}"
         time.sleep(2)
@@ -194,8 +219,12 @@ def main():
     assert resp.status_code == 200, resp.text
     listed = next((m for m in resp.json().get("data", []) if m.get("id") == NAME), None)
     assert listed and listed.get("engine") == ENGINE, listed
+    assert listed.get("multimodal") is True, listed
+    assert listed.get("vision_max_images") == 1, listed
+    assert listed.get("vision_gpu") is False, listed
+    assert listed.get("vision_path") == str(VISION), listed
     checks += 1
-    print(f"ok: model {NAME} registered")
+    print(f"ok: model {NAME} registered with CPU vision sidecar")
 
     # 4. Load the model on the real engine.
     resp = api("POST", "/models/load", {"model": NAME})
@@ -213,16 +242,45 @@ def main():
     checks += 1
     print("ok: model loaded, engine alive")
 
-    # 5. One non-streaming and one streaming chat through the router.
-    plain = chat(stream=False)
-    print(f"  chat: {plain[:80]!r}")
-    streamed = chat(stream=True)
-    print(f"  stream: {streamed[:80]!r}")
-    # Greedy (temp 0) decoding: the streamed text must match the non-streamed
-    # reply byte-for-byte, proving the SSE path delivers correct UTF-8.
-    assert streamed == plain, (streamed, plain)
+    # 5. Text and image chats, each non-streaming + streaming. Greedy (temp 0)
+    # decoding makes the streamed reply match the non-streamed one byte-for-byte
+    # (proving the SSE path delivers correct UTF-8), and the image must inflate
+    # prompt tokens versus the text-only turn (proving the vision tower ran).
+    plain_text, text_tokens = completion(TEXT_MESSAGES, stream=False)
+    print(f"  text: {plain_text[:80]!r} (prompt {text_tokens} tokens)")
+    streamed_text, _ = completion(TEXT_MESSAGES, stream=True)
+    assert streamed_text == plain_text, (streamed_text, plain_text)
+    plain_img, img_tokens = completion(IMAGE_MESSAGES, stream=False)
+    print(f"  image: {plain_img[:80]!r} (prompt {img_tokens} tokens)")
+    streamed_img, _ = completion(IMAGE_MESSAGES, stream=True)
+    assert streamed_img == plain_img, (streamed_img, plain_img)
+    assert img_tokens > text_tokens, (img_tokens, text_tokens)
     checks += 1
-    print("ok: non-streaming + streaming chat")
+    print(f"ok: text + image chat (stream == plain; image prompt {text_tokens} -> {img_tokens})")
+
+    # 5b. Single-image contract: multiple images and remote URLs are refused
+    # with a clear 400 (the engine only loads one base64 data URI per request).
+    multi = requests.post(URL + "/v1/chat/completions", json={
+        "model": NAME,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "描述这两张图片。"},
+            {"type": "image_url", "image_url": {"url": IMAGE_URL}},
+            {"type": "image_url", "image_url": {"url": IMAGE_URL}},
+        ]}],
+        "max_tokens": 32,
+    }, headers=AUTH, timeout=60)
+    assert multi.status_code == 400 and "只支持一张图片" in multi.text, multi.text
+    remote = requests.post(URL + "/v1/chat/completions", json={
+        "model": NAME,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "描述这张图片。"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+        ]}],
+        "max_tokens": 32,
+    }, headers=AUTH, timeout=60)
+    assert remote.status_code == 400 and "base64 内嵌图片" in remote.text, remote.text
+    checks += 1
+    print("ok: multi-image and remote-URL requests refused (single base64 image only)")
 
     # 6. Unload, stop, and verify nothing stays resident.
     resp = api("POST", "/models/unload", {"model": NAME})

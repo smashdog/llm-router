@@ -143,6 +143,56 @@ def main() -> int:
     budget = parse_int(env.get("HIPFIRE_KVMEM_BUDGET_TOKENS")) or 32768
     slots = parse_int(env.get("HIPFIRE_SERVE_MULTI_SLOT_SLOTS")) or 4
 
+    # Vision placement mirrors router._environment so the benchmark carries
+    # the same tower VRAM as production: an explicit sidecar wires the tower
+    # (CPU = host-mapped weights in RAM, GPU = streamed/resident in VRAM);
+    # without one the gate is forced off so hipfire's sibling-file
+    # auto-discovery cannot load a tower behind the benchmark's back.
+    vision_cfg = config.get("vision") if isinstance(config.get("vision"), dict) else {}
+    sidecar_raw = str(vision_cfg.get("sidecar") or "").strip()
+    vision_info: dict | None = None
+    if sidecar_raw:
+        sidecar_path = Path(sidecar_raw)
+        if not sidecar_path.is_absolute():
+            sidecar_path = Path(cwd) / sidecar_path
+        if not sidecar_path.is_file():
+            return finish("failed", f"视觉 sidecar 不存在：{sidecar_path}")
+        vision_gpu = bool(vision_cfg.get("gpu", False))
+        env["HIPFIRE_VISION_SIDECAR"] = str(sidecar_path)
+        env["HIPFIRE_VISION_HOST_MAPPED"] = "0" if vision_gpu else "1"
+        mode = str(env.get("HIPFIRE_VISION_MODE") or "auto").strip().lower()
+        if not vision_gpu or mode not in ("auto", "resident", "on"):
+            # resident is a GPU-only placement; CPU pins host-mapped auto.
+            mode = "auto"
+        env["HIPFIRE_VISION_MODE"] = mode
+        if not vision_gpu:
+            placement, overhead_mib = "HostMapped（内存零拷贝）", 330
+        elif mode == "resident":
+            placement, overhead_mib = "resident（完整驻显存）", 1280
+        else:
+            placement, overhead_mib = "Streamed（按块流式）", 470
+        sidecar_info = common.read_hfqm_header(sidecar_path) or {}
+        vision_info = {
+            "sidecar": str(sidecar_path),
+            "sidecar_mib": sidecar_info.get("size_mib"),
+            "gpu": vision_gpu,
+            "mode": mode,
+            "placement": placement,
+            "vram_overhead_mib": overhead_mib,
+        }
+        result["vision"] = vision_info
+        result["notes"].append(
+            f"视觉 sidecar 计入显存：{placement}，推理峰值约 +{overhead_mib} MiB"
+            f"（包体 {sidecar_info.get('size_mib', '?')} MiB"
+            + ("，驻内存不占显存" if not vision_gpu else "")
+            + "）；候选基准带着视觉塔一起加载。"
+        )
+    else:
+        env["HIPFIRE_VISION_MODE"] = "off"
+        env["HIPFIRE_VISION_SIDECAR"] = ""
+        env.pop("HIPFIRE_VISION_HOST_MAPPED", None)
+        result["notes"].append("未配置视觉路径：HIPFIRE_VISION_MODE=off，纯文本基准，无视觉显存开销。")
+
     mtp_layers = int(info.get("mtp_layers") or 0)
     spec_modes = ["auto"] + (["mtp"] if mtp_layers > 0 else []) + ["ngram", "off"]
     # Scratch rows = prefill_chunk × slots; 128/256 keep a 27B MQ4 model

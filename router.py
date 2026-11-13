@@ -1287,6 +1287,16 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
         env="HIPFIRE_DEVICES",
         note="如 0 或 0,1；留空用引擎默认",
     ),
+    _hipfire_engine_spec(
+        "vision_mode", "视觉驻留模式", "advanced", "enum",
+        env="HIPFIRE_VISION_MODE",
+        default="auto",
+        choices=[
+            {"value": "auto", "label": "auto · Streamed（按块流式）"},
+            {"value": "resident", "label": "resident · 完整驻显存"},
+        ],
+        note="仅配置了视觉路径且设备为 GPU 时生效；CPU 设备固定 HostMapped（大矩阵驻内存零拷贝），此值按 auto 处理",
+    ),
 ]
 KVMEM_HIPFIRE_ENGINE_BY_KEY = {spec["key"]: spec for spec in KVMEM_HIPFIRE_ENGINE_SPECS}
 
@@ -4462,6 +4472,10 @@ class Model:
             "cache_type_v": self.cache_type_v,
             "multimodal": self.multimodal,
             "vision_gpu": self.vision_gpu,
+            # hipfire's daemon converts exactly one data-URI image per request.
+            "vision_max_images": (
+                1 if self.multimodal and self.engine == "kvmem_hipfire" else None
+            ),
             "video": self.video,
             "audio": self.audio,
             "reasoning": self.reasoning,
@@ -5687,6 +5701,40 @@ def image_only_user_turn(payload: dict[str, Any]) -> bool:
     return has_image and not has_text
 
 
+def hipfire_image_parts(payload: dict[str, Any]) -> tuple[int, str | None]:
+    """Count image parts and enforce hipfire's single-base64-image contract.
+
+    The daemon converts exactly one OpenAI ``image_url`` data URI into its
+    ``image_base64`` load parameter; multiple images and remote URLs are
+    refused engine-side, so the router rejects them early with a clear 400.
+    Returns (image_count, error_message_or_None).
+    """
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return 0, None
+    count = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            count += 1
+            url = part.get("image_url")
+            if isinstance(url, dict):
+                url = url.get("url")
+            if not isinstance(url, str) or not url.strip().lower().startswith("data:image/"):
+                return count, (
+                    "KVMem + hipfire 只接受 base64 内嵌图片（data:image/…），不支持远程图片 URL"
+                )
+    if count > 1:
+        return count, "KVMem + hipfire 每次请求只支持一张图片"
+    return count, None
+
+
 def kvmem_text_query_required(entry: Model, engines_cfg: dict[str, Any]) -> bool:
     """Mirror serve.kvmem.enabled(): polystrata retrieval needs a text query.
 
@@ -5948,11 +5996,20 @@ def discover_kvmem_hipfire_models(engine_cfg: dict[str, Any]) -> list[Model]:
             aliases = [str(x).strip() for x in aliases_raw if str(x).strip()]
         else:
             aliases = []
+        vision_cfg = cfg.get("vision") if isinstance(cfg.get("vision"), dict) else {}
+        sidecar_raw = str(vision_cfg.get("sidecar") or "").strip()
+        sidecar = Path(sidecar_raw) if sidecar_raw else None
+        if sidecar is not None and not sidecar.is_absolute():
+            sidecar = cwd_raw / sidecar
+        gpu_flag = vision_cfg.get("gpu")
+        vision_gpu = gpu_flag if isinstance(gpu_flag, bool) else False
         problem = None
         if not exe.is_file() or not os.access(exe, os.X_OK):
             problem = f"引擎可执行文件不存在或不可执行（{exe}）"
         elif not model_file.is_file():
             problem = f"模型文件不存在（{model_file}）"
+        elif sidecar is not None and not sidecar.is_file():
+            problem = f"视觉 sidecar 不存在（{sidecar}）"
         models.append(
             Model(
                 id=model_id,
@@ -5963,12 +6020,15 @@ def discover_kvmem_hipfire_models(engine_cfg: dict[str, Any]) -> list[Model]:
                 engine_model=str(model_file),
                 config_path=str(path),
                 model_path=str(model_file),
+                vision_path=str(sidecar) if sidecar is not None else None,
                 display_name=str(cfg.get("display_name") or model_id),
                 aliases=aliases,
                 context_length=ctx,
                 cache_type_k="q8",
                 cache_type_v="q8",
                 max_output_tokens=max_out,
+                multimodal=sidecar is not None and sidecar.is_file(),
+                vision_gpu=vision_gpu,
                 notes=cfg.get("notes"),
                 quantization=cfg.get("quantization"),
                 source="kvmem_hipfire",
@@ -7938,10 +7998,13 @@ class EngineManager:
             # name; hipfire's own lookup only knows "daemon", so point it at
             # the sibling explicitly (an operator-set value still wins).
             binary = ""
+            vision_cfg: dict[str, Any] = {}
             if entry.config_path:
                 model_cfg = read_json(Path(entry.config_path))
                 if isinstance(model_cfg, dict):
                     binary = str(model_cfg.get("exe") or "")
+                    if isinstance(model_cfg.get("vision"), dict):
+                        vision_cfg = model_cfg["vision"]
             if not binary:
                 cmd = self.cfg.get("command")
                 if isinstance(cmd, list) and cmd:
@@ -7955,6 +8018,31 @@ class EngineManager:
                     env.setdefault("HIPFIRE_DAEMON_BIN", str(daemon))
                 else:
                     self.log.warning("hipfire daemon binary missing beside %s", exe_path)
+            # Vision is opt-in per model config, like the other engines. An
+            # explicit sidecar wires the tower; without one, force the engine
+            # gate off so hipfire's sibling-file auto-discovery cannot load a
+            # tower behind the router's back.
+            sidecar = str(vision_cfg.get("sidecar") or "").strip()
+            if sidecar:
+                sidecar_path = Path(sidecar)
+                if not sidecar_path.is_absolute():
+                    sidecar_path = Path(str(self.cfg.get("cwd") or self.base_dir)) / sidecar_path
+                env["HIPFIRE_VISION_SIDECAR"] = str(sidecar_path)
+                vision_gpu = bool(vision_cfg.get("gpu", False))
+                # CPU = HostMapped: the large tower matrices stay in pinned
+                # host RAM and the GPU reads them zero-copy (~330 MiB VRAM
+                # peak). GPU = device weights, streamed per block (auto) or
+                # fully resident; resident is a GPU-only placement and would
+                # override the host-mapped CPU contract, so CPU pins auto.
+                env["HIPFIRE_VISION_HOST_MAPPED"] = "0" if vision_gpu else "1"
+                mode = str(env.get("HIPFIRE_VISION_MODE") or "auto").strip().lower()
+                if not vision_gpu or mode not in ("auto", "resident", "on"):
+                    mode = "auto"
+                env["HIPFIRE_VISION_MODE"] = mode
+            else:
+                env["HIPFIRE_VISION_MODE"] = "off"
+                env["HIPFIRE_VISION_SIDECAR"] = ""
+                env.pop("HIPFIRE_VISION_HOST_MAPPED", None)
         lib_dirs = self._provisioned_lib_dir(
             (self.cfg.get("command") or [""])[0] if isinstance(self.cfg.get("command"), list) else ""
         )
@@ -11883,8 +11971,6 @@ class Gateway:
             if context_length is not None or cache_type_k is not None or cache_type_v is not None:
                 raise BadRequest("NInfer 的上下文与 KV 精度通过引擎参数设置")
         if kind == "kvmem_hipfire_dir":
-            if vision_path:
-                raise BadRequest("KVMem + hipfire 的视觉塔由模型旁 sidecar 自动识别，不需要视觉路径")
             if cache_type_k is not None or cache_type_v is not None:
                 raise BadRequest("KVMem + hipfire 的 KV 精度固定 q8，不能设置 K/V 精度")
         kvmem_budget = payload.get("kvmem_budget")
@@ -12645,14 +12731,18 @@ class Gateway:
         job: dict[str, Any],
         engine_id: str,
         model: Path,
+        vision: Path | None,
         smoke: bool,
+        vision_gpu: bool = False,
     ) -> None:
         """Add a model to hipfire serve (KVMem multi-slot).
 
         One artifact per process: each model gets a kvmem-hipfire-*.json with
         its own HFQM/MQ artifact, KVMem env and serve flags; switching models
-        restarts the engine. A vision tower, when present, is the sidecar
-        hipfire finds beside the artifact — no router vision plumbing.
+        restarts the engine. Vision is opt-in like the other engines: an
+        explicit HFQ sidecar path enables the tower (CPU = host-mapped weights
+        in RAM, GPU = streamed/resident in VRAM); without a path the launch env
+        forces hipfire's sibling-file auto-discovery off.
         """
         engine_cfg = self.config.get("engines", {}).get(engine_id) or {}
         config_file: Path | None = None
@@ -12670,7 +12760,26 @@ class Gateway:
                 raise BadRequest(f"无法读取模型文件：{exc}") from exc
             if magic != b"HFQM":
                 raise BadRequest("模型文件不是 HFQM/MQ 格式（缺少 HFQM 头）")
-            self._job_step(job, "paths", "ok", str(model))
+            if vision is not None:
+                if not vision.is_file():
+                    raise BadRequest(f"视觉路径不存在：{vision}")
+                if vision.suffix.lower() not in (".hfq", ".vl"):
+                    raise BadRequest(
+                        "视觉路径不是 HFQ 视觉包（.hfq / .vl）；hipfire 不接受 mmproj GGUF"
+                    )
+                try:
+                    with open(vision, "rb") as handle:
+                        vision_magic = handle.read(4)
+                except OSError as exc:
+                    raise BadRequest(f"无法读取视觉文件：{exc}") from exc
+                if vision_magic != b"HFQM":
+                    raise BadRequest("视觉文件不是 HFQM 格式（缺少 HFQM 头）")
+                # The daemon runs with the engine cwd, so pin an absolute path.
+                vision = vision.resolve()
+            self._job_step(
+                job, "paths", "ok",
+                str(model) + (f"；视觉 {vision.name}" if vision is not None else "；无视觉"),
+            )
 
             self._job_step(job, "metadata", "running")
             ceiling = hipfire_model_context(model)
@@ -12760,7 +12869,14 @@ class Gateway:
                 new_cfg["max_seq"] = seed["max_seq"]
             else:
                 new_cfg.pop("max_seq", None)
-            new_cfg.pop("vision", None)
+            if vision is not None:
+                new_cfg["vision"] = {
+                    "sidecar": str(vision),
+                    "model": str(model),
+                    "gpu": bool(vision_gpu),
+                }
+            else:
+                new_cfg.pop("vision", None)
             new_cfg.pop("mmproj", None)
             if not new_cfg.get("exe"):
                 command = engine_cfg.get("command")
@@ -12770,7 +12886,14 @@ class Gateway:
                 new_cfg["cwd"] = str(engine_cfg.get("cwd") or "")
             write_json_atomic(config_file, new_cfg)
             job["config_path"] = str(config_file)
-            self._job_step(job, "config", "ok", f"已写入 {config_file}")
+            self._job_step(
+                job, "config", "ok",
+                f"已写入 {config_file}"
+                + (
+                    f"；视觉走 {'GPU' if vision_gpu else 'CPU'}"
+                    if vision is not None else "；无视觉"
+                ),
+            )
 
             self._apply_job_display_name(job, name)
             self._job_step(job, "start", "running", "正在停止当前引擎…")
@@ -12798,8 +12921,12 @@ class Gateway:
                     job, "smoke", "ok",
                     f"文本正常（prompt {text_tokens} tokens）：{text[:80]}",
                 )
+                if vision is not None:
+                    self._vision_smoke(entry, job, text_tokens)
             else:
                 self._job_step(job, "smoke", "ok", "跳过（未勾选冒烟测试）")
+                if vision is not None:
+                    self._job_step(job, "vision_smoke", "ok", "跳过（未勾选冒烟测试）")
 
             self._job_finish_ok(job)
             self.log.info("KVMem + hipfire model add %s (%s) finished", job["id"], name)
@@ -13306,7 +13433,9 @@ class Gateway:
                 job, engine_id, model, vision, smoke, vision_gpu
             )
         elif kind == "kvmem_hipfire_dir":
-            self._model_add_hipfire_worker(job, engine_id, model, smoke)
+            self._model_add_hipfire_worker(
+                job, engine_id, model, vision, smoke, vision_gpu
+            )
         elif kind == "strata_dir":
             self._model_add_strata_worker(
                 job, engine_id, model, vision, smoke, vision_gpu, draft
@@ -14302,7 +14431,7 @@ class Gateway:
             preset_path = Path(str(entry.config_path or ""))
             if entry.source != "preset" or not preset_path.is_file():
                 raise BadRequest("该模型由目录扫描发现，没有可编辑的 models.ini 预设段")
-        elif entry.engine in ("kvmem_polystrata", "kvmem_llama", "strata"):
+        elif entry.engine in ("kvmem_polystrata", "kvmem_llama", "kvmem_hipfire", "strata"):
             config_path = Path(str(entry.config_path or ""))
             if not config_path.is_file():
                 raise BadRequest("找不到该模型的配置文件")
@@ -14496,6 +14625,10 @@ class Gateway:
             config = read_json(config_path, {})
             if not isinstance(config, dict):
                 raise BadRequest("找不到该模型的配置文件")
+            if changed_vision:
+                if not isinstance(config.get("vision"), dict):
+                    raise BadRequest("该模型的配置没有 vision 段，无法设置视觉运行位置")
+                config["vision"]["gpu"] = bool(vision_gpu)
             if engine_values is not None:
                 config = kvmem_hipfire_apply_engine_values(config, engine_values)
             write_json_atomic(config_path, config)
@@ -15639,46 +15772,58 @@ class Handler(BaseHTTPRequestHandler):
                 payload["model"] = model_name
                 payload_changed = True
         entry = self.gateway.acquire(model_name)
-        if (
-            isinstance(payload, dict)
-            and path.rstrip("/") in TEXT_QUERY_PATHS
-            and image_only_user_turn(payload)
-            and kvmem_text_query_required(entry, self.gateway.config.get("engines", {}))
-        ):
-            # KVMem retrieval rejects image-only turns; append a default
-            # instruction so the engine still gets a text query span.
-            payload["messages"][-1]["content"].append(
-                {"type": "text", "text": IMAGE_ONLY_QUERY_TEXT}
-            )
-            payload_changed = True
-        if (
-            isinstance(payload, dict)
-            and path.rstrip("/") in SAMPLING_GENERATION_PATHS
-            and self.gateway.params.apply(entry.engine, entry.id, payload)
-        ):
-            payload_changed = True
-        if (
-            isinstance(payload, dict)
-            and payload.get("stream") is True
-            and path.rstrip("/") in STATS_PATHS
-            and entry.engine in STREAM_TIMING_ENGINES
-        ):
-            # Live console statistics: progress during prompt processing and
-            # timing on every streamed token.  Respect an explicit client
-            # choice, otherwise ask the engine for both.
-            for key in ("return_progress", "timings_per_token"):
-                if payload.get(key) is None:
-                    payload[key] = True
-                    payload_changed = True
-        trace = (
-            ProxyTrace(self.gateway, entry, started)
-            if isinstance(payload, dict) and path.rstrip("/") in STATS_PATHS
-            else None
-        )
         session = requests.Session()
         session.trust_env = False
         resp = None
         try:
+            if (
+                entry.engine == "kvmem_hipfire"
+                and isinstance(payload, dict)
+                and path.rstrip("/") in TEXT_QUERY_PATHS
+            ):
+                image_count, image_error = hipfire_image_parts(payload)
+                if image_error:
+                    raise BadRequest(image_error)
+                if image_count and not entry.multimodal:
+                    raise BadRequest(
+                        "该模型未配置视觉路径，无法处理图片；请在模型参数中填写 HFQ 视觉 sidecar"
+                    )
+            if (
+                isinstance(payload, dict)
+                and path.rstrip("/") in TEXT_QUERY_PATHS
+                and image_only_user_turn(payload)
+                and kvmem_text_query_required(entry, self.gateway.config.get("engines", {}))
+            ):
+                # KVMem retrieval rejects image-only turns; append a default
+                # instruction so the engine still gets a text query span.
+                payload["messages"][-1]["content"].append(
+                    {"type": "text", "text": IMAGE_ONLY_QUERY_TEXT}
+                )
+                payload_changed = True
+            if (
+                isinstance(payload, dict)
+                and path.rstrip("/") in SAMPLING_GENERATION_PATHS
+                and self.gateway.params.apply(entry.engine, entry.id, payload)
+            ):
+                payload_changed = True
+            if (
+                isinstance(payload, dict)
+                and payload.get("stream") is True
+                and path.rstrip("/") in STATS_PATHS
+                and entry.engine in STREAM_TIMING_ENGINES
+            ):
+                # Live console statistics: progress during prompt processing and
+                # timing on every streamed token.  Respect an explicit client
+                # choice, otherwise ask the engine for both.
+                for key in ("return_progress", "timings_per_token"):
+                    if payload.get(key) is None:
+                        payload[key] = True
+                        payload_changed = True
+            trace = (
+                ProxyTrace(self.gateway, entry, started)
+                if isinstance(payload, dict) and path.rstrip("/") in STATS_PATHS
+                else None
+            )
             upstream_headers = self._upstream_headers(entry, body, payload, ctype)
             if isinstance(payload, dict) and (
                 payload_changed or payload.get("model") != entry.engine_model

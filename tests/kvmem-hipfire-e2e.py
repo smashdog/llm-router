@@ -7,6 +7,9 @@ without status fields, SSE streaming) and reaps its fake daemon child on
 SIGTERM. Covers engine creation, adding an HFQM artifact, the trained-context
 --max-seq fallback, KVMem env defaults, engine_params write/clear, validation
 failures, restart-on-switch, daemon teardown and the manage-view schemas.
+Vision is opt-in via an explicit HFQ sidecar: the test covers the host-mapped
+CPU / streamed-resident GPU placements, the single-base64-image proxy contract,
+image smoke token growth, device/mode edits and clearing the path back to off.
 The browser section covers the params/add dialogs and a console-driven add.
 The tune section drives the independent hipfire tune script (spec × prefill
 chunk candidates) and applies the measured engine_params back into the config.
@@ -156,6 +159,7 @@ record = {
         "HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK", "HIPFIRE_DAEMON_BIN",
         "HIPFIRE_SPILL_DIR", "HIPFIRE_DEVICES", "HIPFIRE_SERVE_MAX_BATCH_TOKENS",
         "HIPFIRE_FLASH_PARTIALS_BATCH",
+        "HIPFIRE_VISION_SIDECAR", "HIPFIRE_VISION_MODE", "HIPFIRE_VISION_HOST_MAPPED",
     )},
 }
 with open(os.path.join(os.getcwd(), "starts.jsonl"), "a", encoding="utf-8") as fh:
@@ -211,6 +215,22 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             payload = {}
         if self.path.rstrip("/") == "/v1/chat/completions":
+            # Image-aware usage: an encoded image inflates the prompt token
+            # count so the router's vision smoke can verify token growth.
+            images = 0
+            for message in payload.get("messages") or []:
+                content = message.get("content") if isinstance(message, dict) else None
+                if isinstance(content, list):
+                    images += sum(
+                        1 for part in content
+                        if isinstance(part, dict) and part.get("type") == "image_url"
+                    )
+            prompt_tokens = 268 if images else 12
+            with open(os.path.join(os.getcwd(), "requests.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "stream": bool(payload.get("stream")), "images": images,
+                    "prompt_tokens": prompt_tokens,
+                }) + "\\n")
             if payload.get("stream"):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -231,8 +251,8 @@ class Handler(BaseHTTPRequestHandler):
                     "id": "chatcmpl-fake", "object": "chat.completion.chunk",
                     "model": model,
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                    "usage": {"prompt_tokens": 12, "completion_tokens": 2,
-                              "total_tokens": 14},
+                    "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 2,
+                              "total_tokens": prompt_tokens + 2},
                 }
                 self.wfile.write(("data: " + json.dumps(done) + "\\n\\n").encode())
                 self.wfile.write(b"data: [DONE]\\n\\n")
@@ -247,8 +267,8 @@ class Handler(BaseHTTPRequestHandler):
                     "message": {"role": "assistant", "content": "pong"},
                     "finish_reason": "stop",
                 }],
-                "usage": {"prompt_tokens": 12, "completion_tokens": 2,
-                          "total_tokens": 14},
+                "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 2,
+                          "total_tokens": prompt_tokens + 2},
             })
         else:
             self.send_json(404, {"error": {"message": "not found"}})
@@ -306,6 +326,11 @@ second_model = models_root / "Qwen3.8-27B-2.mq4-xts"
 write_hfqm(second_model, 131072)
 bad_model = models_root / "not-hfqm.bin"
 bad_model.write_bytes(b"NOPE" + b"\x00" * 64)
+# HFQ vision sidecar (same HFQM container) and a .hfq with a broken header.
+vision_sidecar = models_root / "Qwen3.8-27B-vision.hfq"
+write_hfqm(vision_sidecar, 262144)
+bad_vision_file = models_root / "not-hfqm-vision.hfq"
+bad_vision_file.write_bytes(b"NOPE" + b"\x00" * 64)
 
 # --- gateway --------------------------------------------------------------
 port = free_port()
@@ -437,6 +462,41 @@ def daemon_pids() -> list[int]:
     return [int(token) for token in found.split() if token.isdigit()]
 
 
+def chat_requests() -> list[dict]:
+    path = engine_dir / "requests.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def edit_job(**payload) -> dict:
+    """A path/engine edit re-validates through a model job (mode validate)."""
+    response = requests.post(url + "/router/models/edit", json=payload, timeout=30)
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body.get("mode") == "validate", body
+    return wait_job(body["job"]["id"])
+
+
+def save_params(model: str, **payload) -> dict:
+    response = requests.post(
+        url + "/router/params", json={"model": model, "params": {}, **payload}, timeout=20
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+SMOKE_IMAGE_B64 = base64.b64encode((BASE / "smoke.png").read_bytes()).decode("ascii")
+IMAGE_DATA_URL = f"data:image/png;base64,{SMOKE_IMAGE_B64}"
+
+
+def image_messages(*urls: str) -> list[dict]:
+    content: list[dict] = [{"type": "text", "text": "描述这张图片。"}]
+    for url in urls:
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    return [{"role": "user", "content": content}]
+
+
 checks = 0
 wait_api()
 try:
@@ -488,6 +548,8 @@ try:
     assert item["cache_type_k"] == "q8" and item["cache_type_v"] == "q8", item
     assert item["engine_params"]["kvmem_budget"] == 32768, item
     assert item["engine_params"]["spec"] == "auto", item
+    assert item["multimodal"] is False, item
+    assert item.get("vision_max_images") is None, item
     checks += 1
 
     model_cfg_path = config_dir / "kvmem-hipfire-qwen3.8-27b.json"
@@ -500,6 +562,7 @@ try:
     assert args[args.index("--spec") + 1] == "auto", args
     assert model_cfg["env"]["HIPFIRE_KVMEM_BUDGET_TOKENS"] == "32768", model_cfg
     assert "max_seq" not in model_cfg, model_cfg
+    assert "vision" not in model_cfg, model_cfg
     checks += 1
 
     # 3. The start command: absolute --model, ceiling --max-seq, host:port
@@ -520,6 +583,11 @@ try:
     assert env["HIPFIRE_FLASH_PARTIALS_BATCH"] == "4", env
     assert env["HIPFIRE_SERVE_MAX_BATCH_TOKENS"] is None, env
     assert env["HIPFIRE_DAEMON_BIN"] == str(fake_daemon_binary), env
+    # No vision path: the launch env forces hipfire's sibling-file
+    # auto-discovery off so a tower cannot load behind the router's back.
+    assert env["HIPFIRE_VISION_MODE"] == "off", env
+    assert env["HIPFIRE_VISION_SIDECAR"] == "", env
+    assert env["HIPFIRE_VISION_HOST_MAPPED"] is None, env
     assert status()["active_model"] == model_id, status()
     assert daemon_pids(), "fake daemon child was not spawned"
     checks += 1
@@ -627,6 +695,12 @@ try:
         pieces.append(delta.get("content") or "")
     assert "".join(pieces) == "pong", text[:400]
     assert saw_done, text[:400]
+    # A text-only hipfire model refuses images at the proxy (no vision path).
+    no_vision = requests.post(url + "/v1/chat/completions", json={
+        "model": model_id, "messages": image_messages(IMAGE_DATA_URL),
+    }, timeout=30)
+    assert no_vision.status_code == 400, no_vision.text
+    assert "未配置视觉路径" in no_vision.text, no_vision.text
     checks += 1
 
     # 6. Validation failures must not write a config or register a model.
@@ -636,11 +710,24 @@ try:
         "name": "bad-cache", "cache_type_k": "f16", "smoke": False,
     }, timeout=15)
     assert bad_cache.status_code == 400 and "q8" in bad_cache.text, bad_cache.text
-    bad_vision = requests.post(url + "/router/models/add", json={
-        "engine": "kvmem_hipfire", "model": str(main_model),
-        "name": "bad-vision", "vision": str(main_model), "smoke": False,
-    }, timeout=15)
-    assert bad_vision.status_code == 400 and "sidecar" in bad_vision.text, bad_vision.text
+    bad_vision = add_model(
+        engine="kvmem_hipfire", model=str(main_model),
+        name="bad-vision", vision=str(main_model), smoke=False,
+    )
+    assert bad_vision["status"] == "failed", bad_vision
+    assert "HFQ 视觉包" in bad_vision["error"], bad_vision
+    bad_vision_magic = add_model(
+        engine="kvmem_hipfire", model=str(main_model),
+        name="bad-vision-magic", vision=str(bad_vision_file), smoke=False,
+    )
+    assert bad_vision_magic["status"] == "failed", bad_vision_magic
+    assert "HFQM" in bad_vision_magic["error"], bad_vision_magic
+    bad_vision_missing = add_model(
+        engine="kvmem_hipfire", model=str(main_model),
+        name="bad-vision-missing", vision=str(models_root / "absent-vision.hfq"), smoke=False,
+    )
+    assert bad_vision_missing["status"] == "failed", bad_vision_missing
+    assert "视觉路径不存在" in bad_vision_missing["error"], bad_vision_missing
     bad_context = add_model(
         engine="kvmem_hipfire", model=str(main_model),
         name="ctx-too-big", context_length=999999, smoke=False,
@@ -664,8 +751,96 @@ try:
     assert unknown.status_code == 400 and "unknown engine parameter" in unknown.text, unknown.text
     after = set(models())
     assert before == after, (before, after)
-    for slug in ("bad-cache", "bad-vision", "ctx-too-big", "bad-magic", "bad-dir", "unknown-param"):
+    for slug in ("bad-cache", "bad-vision", "bad-vision-magic", "bad-vision-missing",
+                 "ctx-too-big", "bad-magic", "bad-dir", "unknown-param"):
         assert not list(config_dir.glob(f"kvmem-hipfire-{slug}.json")), slug
+    checks += 1
+
+    # 6b. Vision: an explicit HFQ sidecar wires the tower. Editing the path
+    # re-validates through a job; CPU = host-mapped weights (HOST_MAPPED=1),
+    # the image smoke verifies prompt-token growth, and the advertise list
+    # marks the model multimodal with a single-image ceiling.
+    vjob = edit_job(
+        edit_model=model_id, engine="kvmem_hipfire", model=str(main_model),
+        vision=str(vision_sidecar), vision_device="cpu", smoke=True,
+    )
+    assert vjob["status"] == "ok", vjob
+    vsteps = {step["key"]: step for step in vjob["steps"]}
+    assert vsteps["paths"]["status"] == "ok" and "视觉" in vsteps["paths"]["detail"], vsteps
+    assert vsteps["config"]["status"] == "ok" and "视觉走 CPU" in vsteps["config"]["detail"], vsteps
+    assert vsteps["vision_smoke"]["status"] == "ok", vsteps
+    assert "图片正常" in vsteps["vision_smoke"]["detail"], vsteps
+    vitem = models()[model_id]
+    assert vitem["multimodal"] is True, vitem
+    assert vitem["vision_max_images"] == 1, vitem
+    assert vitem["vision_gpu"] is False, vitem
+    assert vitem["vision_path"] == str(vision_sidecar), vitem
+    vcfg = read_json(model_cfg_path)
+    assert vcfg["vision"] == {
+        "sidecar": str(vision_sidecar), "model": str(main_model), "gpu": False,
+    }, vcfg
+    vstart = starts()[-1]
+    assert vstart["env"]["HIPFIRE_VISION_SIDECAR"] == str(vision_sidecar), vstart
+    assert vstart["env"]["HIPFIRE_VISION_HOST_MAPPED"] == "1", vstart
+    assert vstart["env"]["HIPFIRE_VISION_MODE"] == "auto", vstart
+    checks += 1
+
+    # Image chat reaches the engine (non-stream + stream); prompt tokens grow.
+    plain_img = requests.post(url + "/v1/chat/completions", json={
+        "model": model_id, "messages": image_messages(IMAGE_DATA_URL),
+    }, timeout=60)
+    assert plain_img.status_code == 200, plain_img.text
+    img_body = plain_img.json()
+    assert img_body["usage"]["prompt_tokens"] > 12, img_body
+    assert chat_requests()[-1]["images"] == 1, chat_requests()[-1]
+    stream_img = requests.post(url + "/v1/chat/completions", json={
+        "model": model_id, "messages": image_messages(IMAGE_DATA_URL), "stream": True,
+    }, timeout=60, stream=True)
+    assert stream_img.status_code == 200, stream_img.text
+    assert stream_img.content  # drain the SSE body
+    last_req = chat_requests()[-1]
+    assert last_req["images"] == 1 and last_req["stream"] is True, last_req
+    # Single-image contract: multiple images and remote URLs are refused.
+    multi = requests.post(url + "/v1/chat/completions", json={
+        "model": model_id, "messages": image_messages(IMAGE_DATA_URL, IMAGE_DATA_URL),
+    }, timeout=30)
+    assert multi.status_code == 400 and "只支持一张图片" in multi.text, multi.text
+    remote = requests.post(url + "/v1/chat/completions", json={
+        "model": model_id, "messages": image_messages("https://example.com/a.png"),
+    }, timeout=30)
+    assert remote.status_code == 400 and "base64 内嵌图片" in remote.text, remote.text
+    checks += 1
+
+    # Device edit CPU -> GPU flips HOST_MAPPED off (device weights).
+    gpu_save = save_params(model_id, vision_device="gpu")
+    assert gpu_save["vision_gpu"] is True, gpu_save
+    wait_idle()
+    assert read_json(model_cfg_path)["vision"]["gpu"] is True
+    gstart = starts()[-1]
+    assert gstart["env"]["HIPFIRE_VISION_HOST_MAPPED"] == "0", gstart
+    assert gstart["env"]["HIPFIRE_VISION_MODE"] == "auto", gstart
+    assert models()[model_id]["vision_gpu"] is True
+    # vision_mode resident is a GPU-only placement.
+    save_params(model_id, engine_params={"vision_mode": "resident"})
+    wait_idle()
+    assert read_json(model_cfg_path)["env"]["HIPFIRE_VISION_MODE"] == "resident"
+    rstart = starts()[-1]
+    assert rstart["env"]["HIPFIRE_VISION_MODE"] == "resident", rstart
+    assert rstart["env"]["HIPFIRE_VISION_HOST_MAPPED"] == "0", rstart
+    # Back to CPU while resident is stored: the launch clamps to host-mapped
+    # auto (resident would override the CPU zero-copy contract).
+    save_params(model_id, vision_device="cpu")
+    wait_idle()
+    cstart = starts()[-1]
+    assert cstart["env"]["HIPFIRE_VISION_HOST_MAPPED"] == "1", cstart
+    assert cstart["env"]["HIPFIRE_VISION_MODE"] == "auto", cstart
+    assert read_json(model_cfg_path)["env"]["HIPFIRE_VISION_MODE"] == "resident"
+    # Clear vision_mode back to the default for a clean CPU + auto state.
+    save_params(model_id, engine_params={"vision_mode": None})
+    wait_idle()
+    assert "HIPFIRE_VISION_MODE" not in read_json(model_cfg_path).get("env", {})
+    assert starts()[-1]["env"]["HIPFIRE_VISION_MODE"] == "auto"
+    assert models()[model_id]["vision_gpu"] is False
     checks += 1
 
     # 7. A second model, restart-on-switch, explicit context, delete.
@@ -684,10 +859,15 @@ try:
     switched = starts()[-1]
     assert switched["model"] == str(second_model), switched
     assert switched["max_seq"] == "32768", switched
+    # The second model has no vision path: its launch forces the gate off.
+    assert switched["env"]["HIPFIRE_VISION_MODE"] == "off", switched
     loaded = requests.post(url + "/models/load", json={"model": model_id}, timeout=20)
     assert loaded.status_code in (200, 202), loaded.text
     wait_idle()
     assert starts()[-1]["model"] == str(main_model), starts()[-1]
+    # Switching back restores the vision model's host-mapped CPU placement.
+    assert starts()[-1]["env"]["HIPFIRE_VISION_MODE"] == "auto", starts()[-1]
+    assert starts()[-1]["env"]["HIPFIRE_VISION_HOST_MAPPED"] == "1", starts()[-1]
     deleted = requests.post(url + "/router/models/delete", json={"model": second_id}, timeout=30)
     assert deleted.status_code == 200, deleted.text
     assert second_id not in models()
@@ -718,7 +898,7 @@ try:
     assert {"max_seq", "slots", "idle_timeout", "spec", "kvmem_enable",
             "kvmem_budget", "paged_pages", "sink_blocks", "recent_blocks",
             "spill_dir", "spill_bytes", "prefill_chunk", "devices",
-            "max_batch_tokens", "flash_partials_batch"} <= keys, keys
+            "max_batch_tokens", "flash_partials_batch", "vision_mode"} <= keys, keys
     groups = {spec["group"] for spec in schema}
     assert groups == {"basic", "spec", "kvmem", "spill", "advanced"}, groups
     assert "kvmem_hipfire" in manage["param_schema"], manage["param_schema"].keys()
@@ -816,15 +996,23 @@ try:
         "slots: document.querySelector('#params-more [data-param-key=slots]').value,"
         "spec: document.querySelector('#params-more [data-param-key=spec]').value,"
         "maxSeq: document.querySelector('#params-more [data-param-key=max_seq]').value,"
+        "visionPath: document.querySelector('#params-vision-path').value,"
+        "visionDevice: (document.querySelector('input[name=params-vision-device]:checked')||{}).value,"
+        "visionLabel: document.querySelector('#params-vision-path-label').textContent,"
+        "visionHint: document.querySelector('#params-vision-hint').textContent,"
         "};"
     )
     assert "KVMem + hipfire" in surface["hint"], surface
     assert surface["repeat"] is False, surface
-    assert surface["visionHidden"] is True and surface["visionPathHidden"] is True, surface
+    assert surface["visionHidden"] is False and surface["visionPathHidden"] is False, surface
     assert surface["engineHidden"] is True, surface
     assert surface["kvmemTabHidden"] is False, surface
     assert surface["kvmemCount"] == "5" and surface["kvmemFields"] == 5, surface
-    assert surface["moreFields"] == 11, surface
+    assert surface["moreFields"] == 12, surface
+    assert surface["visionPath"] == str(vision_sidecar), surface
+    assert surface["visionDevice"] == "cpu", surface
+    assert "HFQ sidecar" in surface["visionLabel"], surface
+    assert "HostMapped" in surface["visionHint"], surface
     assert surface["budget"] == "16384", surface
     assert surface["enable"] == "true", surface
     assert surface["sink"] == "2" and surface["recent"] == "3", surface
@@ -872,18 +1060,22 @@ try:
         "hint: document.querySelector('#add-model-hint').textContent,"
         "caption: document.querySelector('#add-more-caption').textContent,"
         "defaults: document.querySelector('#add-defaults').textContent,"
+        "visionLabel: document.querySelector('#add-vision-label').textContent,"
+        "visionHint: document.querySelector('#add-vision-hint').textContent,"
         "};"
     )
     assert form["engine"] == "kvmem_hipfire", form
     assert form["engineParamsHidden"] is True, form
-    assert form["visionHidden"] is True, form
-    assert form["deviceHidden"] is True and form["visionHintHidden"] is True, form
+    assert form["visionHidden"] is False, form
+    assert form["deviceHidden"] is False and form["visionHintHidden"] is False, form
     assert form["kvmemTabHidden"] is False, form
     assert form["kvmemCount"] == "5" and form["kvmemFields"] == 5, form
     assert form["kvmemBlank"] is True, form
     assert form["budgetHint"] == "32768", form
     assert form["spec"] == "auto", form
-    assert form["moreFields"] == 11, form
+    assert form["moreFields"] == 12, form
+    assert "HFQ sidecar" in form["visionLabel"], form
+    assert "HostMapped" in form["visionHint"] and "一张" in form["visionHint"], form
     assert "HFQM" in form["hint"], form
     assert "hipfire" in form["caption"], form
     assert "KVMem + hipfire" in form["defaults"], form
@@ -938,17 +1130,22 @@ try:
     checks += 1
 
     # 13. Tune flow: the independent script benchmarks spec × prefill-chunk
-    # candidates against the fake CLI (identical metrics -> the first
-    # candidate wins deterministically), and apply writes engine_params
-    # through the validated args/env path instead of a flat argv overwrite.
+    # candidates against the fake CLI, and apply writes the winning
+    # engine_params through the validated args/env path instead of a flat
+    # argv overwrite. The fake answers instantly, so decode/prefill tps are
+    # wall-clock jitter and the winner is not fixed; the assertions derive
+    # from whichever candidate won rather than a hardcoded one.
     tune_resp = requests.post(url + "/router/models/tune", json={"model": model_id}, timeout=30)
     assert tune_resp.status_code == 202, tune_resp.text
     tune_job = wait_job(tune_resp.json()["id"], timeout=300)
     assert tune_job["status"] == "ok", tune_job.get("error")
     assert tune_job["restored"] is True, tune_job
     suggestions = tune_job["suggestions"]
-    assert suggestions["engine_params"] == {"spec": "auto", "prefill_chunk": 128}, suggestions
-    assert suggestions["best_candidate"] == "spec-auto-chunk-128", suggestions
+    exp_spec = suggestions["engine_params"]["spec"]
+    exp_chunk = suggestions["engine_params"]["prefill_chunk"]
+    assert exp_spec in ("auto", "mtp", "ngram", "off"), suggestions
+    assert exp_chunk in (128, 256), suggestions
+    assert suggestions["best_candidate"] == f"spec-{exp_spec}-chunk-{exp_chunk}", suggestions
     assert suggestions["kv"] == "q8" and suggestions["context_length"] == 262144, suggestions
     assert isinstance(suggestions["params"], list), suggestions
     cands = tune_job["candidates"]
@@ -965,6 +1162,12 @@ try:
     assert all(item["env"]["HIPFIRE_DAEMON_BIN"] for item in tune_starts), tune_starts
     assert all(item["env"]["HIPFIRE_KV_MODE"] == "q8" for item in tune_starts), tune_starts
     assert all(item["env"]["HIPFIRE_SERVE_MULTI_SLOT"] == "true" for item in tune_starts), tune_starts
+    # The benchmark carries the model's vision tower (CPU host-mapped) so the
+    # measured VRAM matches production; the note records the placement.
+    assert any("HostMapped" in note for note in tune_job.get("notes", [])), tune_job.get("notes")
+    assert all(item["env"]["HIPFIRE_VISION_SIDECAR"] == str(vision_sidecar) for item in tune_starts), tune_starts
+    assert all(item["env"]["HIPFIRE_VISION_HOST_MAPPED"] == "1" for item in tune_starts), tune_starts
+    assert all(item["env"]["HIPFIRE_VISION_MODE"] == "auto" for item in tune_starts), tune_starts
     assert {
         (item["spec"], item["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"])
         for item in tune_starts
@@ -974,16 +1177,16 @@ try:
     )
     assert apply_resp.status_code == 200, apply_resp.text
     applied = apply_resp.json()
-    assert applied["engine_params"]["spec"] == "auto", applied
-    assert applied["engine_params"]["prefill_chunk"] == 128, applied
+    assert applied["engine_params"]["spec"] == exp_spec, applied
+    assert applied["engine_params"]["prefill_chunk"] == exp_chunk, applied
     tuned_cfg = read_json(Path(models()[model_id]["config_path"]))
     assert "--spec" in tuned_cfg["args"], tuned_cfg
-    assert tuned_cfg["args"][tuned_cfg["args"].index("--spec") + 1] == "auto", tuned_cfg
-    assert tuned_cfg["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "128", tuned_cfg
+    assert tuned_cfg["args"][tuned_cfg["args"].index("--spec") + 1] == exp_spec, tuned_cfg
+    assert tuned_cfg["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == str(exp_chunk), tuned_cfg
     wait_idle()
     relaunched = starts()[-1]
-    assert relaunched["spec"] == "auto", relaunched
-    assert relaunched["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == "128", relaunched
+    assert relaunched["spec"] == exp_spec, relaunched
+    assert relaunched["env"]["HIPFIRE_SERVE_MULTI_SLOT_PREFILL_CHUNK"] == str(exp_chunk), relaunched
     assert status()["engines"]["kvmem_hipfire"]["alive"] is True
     # Stop everything again: nothing may stay resident after the tune test.
     unloaded = requests.post(url + "/models/unload", json={"model": model_id}, timeout=20)
@@ -993,6 +1196,28 @@ try:
     while time.time() < deadline and daemon_pids():
         time.sleep(0.2)
     assert not daemon_pids(), "hipfire daemon survived the post-tune stop"
+    checks += 1
+
+    # 14. Clearing the vision path turns the tower off again (MODE=off) and
+    # the model advertises text-only; nothing stays resident afterwards.
+    cjob = edit_job(
+        edit_model=model_id, engine="kvmem_hipfire", model=str(main_model),
+        vision=None, smoke=False,
+    )
+    assert cjob["status"] == "ok", cjob
+    assert "vision" not in read_json(model_cfg_path), read_json(model_cfg_path)
+    citem = models()[model_id]
+    assert citem["multimodal"] is False and citem.get("vision_max_images") is None, citem
+    cstart = starts()[-1]
+    assert cstart["env"]["HIPFIRE_VISION_MODE"] == "off", cstart
+    assert cstart["env"]["HIPFIRE_VISION_SIDECAR"] == "", cstart
+    unloaded = requests.post(url + "/models/unload", json={"model": model_id}, timeout=20)
+    assert unloaded.status_code in (200, 202), unloaded.text
+    wait_idle()
+    deadline = time.time() + 10
+    while time.time() < deadline and daemon_pids():
+        time.sleep(0.2)
+    assert not daemon_pids(), "hipfire daemon survived the vision-clear stop"
     checks += 1
     print(f"kvmem-hipfire e2e: {checks} check groups passed; shots in {OUT}")
 finally:
