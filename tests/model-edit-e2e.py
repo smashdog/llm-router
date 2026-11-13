@@ -447,6 +447,7 @@ setup_bin.mkdir()
 for name in (
     "llama-server", "llama-mtmd-cli", "strata", "strata-vision",
     "kvmem-llama-server", "kvmem-strata-poly", "kvmem-ninfer-serve",
+    "kvmem-hipfire-server", "kvmem-hipfire-daemon",
 ):
     for candidate in (name, f"{name}-cuda", f"{name}-rocm"):
         path = setup_bin / candidate
