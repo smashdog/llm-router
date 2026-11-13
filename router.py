@@ -7840,12 +7840,14 @@ class EngineManager:
     def _hipfire_command(self, entry: Model, command: list[str]) -> list[str]:
         model_cfg, artifact, args = self._single_model_config(entry)
         binary = str(model_cfg.get("exe") or command[0])
-        # The model path, context ceiling and bind address are owned by the
-        # router; --detach would fork the daemon away from the Popen child.
+        # The model path, context ceiling, bind address and the embedded chat
+        # UI (--ui, served at /ui on the same listener) are owned by the router;
+        # --detach would fork the daemon away from the Popen child, and --open
+        # would try to launch a browser on the server host.
         for flag in ("--model", "--max-seq", "--host", "--port",
                      "--api-key", "--api-key-file"):
             args = _config_arg_remove(args, flag)
-        args = [item for item in args if item != "--detach"]
+        args = [item for item in args if item not in ("--detach", "--ui", "--open")]
         # hipfire echoes the exact --model string back as /health.model and
         # the /v1/models id, so it must equal entry.engine_model: absolute,
         # resolved exactly the way discover_kvmem_hipfire_models resolves it.
@@ -7864,7 +7866,7 @@ class EngineManager:
             max_seq = parse_int(model_cfg.get("context_length"))
         if max_seq is None:
             max_seq = hipfire_model_context(model_path)
-        out = [binary, "serve", "--model", artifact]
+        out = [binary, "serve", "--ui", "--model", artifact]
         if max_seq is not None and max_seq > 0:
             out += ["--max-seq", str(max_seq)]
         out += args

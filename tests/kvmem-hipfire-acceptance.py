@@ -242,6 +242,16 @@ def main():
     checks += 1
     print("ok: model loaded, engine alive")
 
+    # 4b. The router launches hipfire serve with --ui, so the engine's native
+    # chat UI must be reachable at /ui on the serve listener once loaded.
+    engine_port = engine_view().get("port")
+    ui_resp = requests.get(f"http://127.0.0.1:{engine_port}/ui", timeout=15)
+    assert ui_resp.status_code == 200, (ui_resp.status_code, ui_resp.text[:200])
+    ui_body = ui_resp.text.lower()
+    assert "<html" in ui_body or "<!doctype html" in ui_body, ui_resp.text[:200]
+    checks += 1
+    print(f"ok: native chat UI served at :{engine_port}/ui")
+
     # 5. Text and image chats, each non-streaming + streaming. Greedy (temp 0)
     # decoding makes the streamed reply match the non-streamed one byte-for-byte
     # (proving the SSE path delivers correct UTF-8), and the image must inflate

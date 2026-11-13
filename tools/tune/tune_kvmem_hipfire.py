@@ -205,7 +205,7 @@ def main() -> int:
     # set per candidate below.
     base = common.args_remove(
         original_args, "--model", "--max-seq", "--host", "--port",
-        "--api-key", "--api-key-file", "--detach", "--spec",
+        "--api-key", "--api-key-file", "--detach", "--ui", "--open", "--spec",
     )
     candidates: list[dict] = []
     for spec in spec_modes:
@@ -231,7 +231,7 @@ def main() -> int:
     def launch(candidate: dict, port: int, case_dir: Path):
         case_dir.mkdir(parents=True, exist_ok=True)
         cmd = [
-            str(exe_path), "serve", "--model", str(model_path),
+            str(exe_path), "serve", "--ui", "--model", str(model_path),
             "--max-seq", str(context), *candidate["args"],
             f"127.0.0.1:{port}",
         ]

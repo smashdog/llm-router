@@ -573,6 +573,7 @@ try:
     assert first["spec"] == "auto", first
     assert first["bind"] == f"127.0.0.1:{status()['engines']['kvmem_hipfire']['port']}", first
     assert first["argv"][0] == "serve", first
+    assert "--ui" in first["argv"], first
     env = first["env"]
     assert env["HIPFIRE_KVMEM"] == "1", env
     assert env["HIPFIRE_SERVE_MULTI_SLOT"] == "true", env
