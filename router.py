@@ -1404,6 +1404,19 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
         default=1024, low=1, step=128,
         note="layerwise 窗口容量 = 常驻预算 B + 生成预留 R（ninfer device_tokens 语义）；import 准入用它衡量 prompt 尾部 + 输出。仅 layerwise + prefix_pin 达到压力路径时生效；留空=1024",
     ),
+
+    _hipfire_engine_spec(
+        "prefix_coverage", "前缀覆盖快照", "prefix", "boolean",
+        env="HIPFIRE_KVMEM_PREFIX_COVERAGE",
+        default=False,
+        note="PREFIX_PIN 的 decode 侧覆盖快照：在每个页对齐 frontier（按 interval）捕获 DeltaNet checkpoint，终点才能冻结含生成段的前缀。关闭=不捕获（默认）",
+    ),
+    _hipfire_engine_spec(
+        "prefix_coverage_interval", "覆盖快照间隔（tokens）", "prefix", "integer",
+        env="HIPFIRE_KVMEM_PREFIX_COVERAGE_INTERVAL",
+        default=1024, low=128, step=128,
+        note="覆盖快照的页对齐间隔；越小端点复用机会越多、checkpoint 池占用越高。留空=1024",
+    ),
     # -- spill ----------------------------------------------------------------
     _hipfire_engine_spec(
         "spill_dir", "Spill 目录", "spill", "string",
