@@ -1435,6 +1435,19 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
         default=0, low=0, step=128,
         note="spread 策略下保留计划的最小间距（retention）。留空=0",
     ),
+
+    _hipfire_engine_spec(
+        "checkpoint_count", "checkpoint 保留条数", "prefix", "integer",
+        env="HIPFIRE_KVMEM_CHECKPOINT_COUNT",
+        default=4, low=1, step=1,
+        note="spread 策略下 PrefixCatalog 的保留上限（core retain 计划）。留空=4",
+    ),
+    _hipfire_engine_spec(
+        "checkpoint_mib", "checkpoint 保留额度（MiB）", "prefix", "integer",
+        env="HIPFIRE_KVMEM_CHECKPOINT_MIB",
+        default=512, low=1, step=64,
+        note="spread 策略下 PrefixCatalog 的字节保留上限（host payload）。留空=512",
+    ),
     # -- spill ----------------------------------------------------------------
     _hipfire_engine_spec(
         "spill_dir", "Spill 目录", "spill", "string",
