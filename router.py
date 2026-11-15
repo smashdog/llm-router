@@ -1417,6 +1417,24 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
         default=1024, low=128, step=128,
         note="覆盖快照的页对齐间隔；越小端点复用机会越多、checkpoint 池占用越高。留空=1024",
     ),
+
+    _hipfire_engine_spec(
+        "checkpoint_policy", "checkpoint 策略", "prefix", "string",
+        env="HIPFIRE_KVMEM_CHECKPOINT_POLICY",
+        note="legacy（默认，每个 prefill 边界冻结）| spread（按 capture plan 间隔冻结）",
+    ),
+    _hipfire_engine_spec(
+        "checkpoint_interval", "checkpoint 间隔（tokens）", "prefix", "integer",
+        env="HIPFIRE_KVMEM_CHECKPOINT_INTERVAL",
+        default=4096, low=128, step=128,
+        note="spread 策略的周期冻结间隔（页对齐）。留空=4096",
+    ),
+    _hipfire_engine_spec(
+        "checkpoint_min_gap", "checkpoint 最小间隔（tokens）", "prefix", "integer",
+        env="HIPFIRE_KVMEM_CHECKPOINT_MIN_GAP",
+        default=0, low=0, step=128,
+        note="spread 策略下保留计划的最小间距（retention）。留空=0",
+    ),
     # -- spill ----------------------------------------------------------------
     _hipfire_engine_spec(
         "spill_dir", "Spill 目录", "spill", "string",
