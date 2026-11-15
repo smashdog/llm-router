@@ -1141,6 +1141,7 @@ KVMEM_HIPFIRE_GROUP_LABELS = {
     "kvmem": "KVMem",
     "policy": "策略",
     "strategy": "召回策略",
+    "prefix": "前缀共享",
     "spill": "Spill",
     "advanced": "高级",
 }
@@ -1233,7 +1234,25 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
     _hipfire_engine_spec(
         "kvmem_enable", "启用 KVMem", "kvmem", "boolean",
         env="HIPFIRE_KVMEM", default=True,
-        note="分页 Q8 KV 与溢出；关闭时 KV 精度仍为 q8",
+        note="分页 KV 与溢出（P4.4 起支持多精度，见 kv_mode）；关闭时走原生连续 KV",
+    ),
+    _hipfire_engine_spec(
+        "kv_mode", "KV 精度", "kvmem", "enum",
+        target="args", flag="--kv-mode",
+        default="q8",
+        choices=[
+            {"value": "q8", "label": "q8 · Q8_0（默认，位级基线）"},
+            {"value": "f16", "label": "f16 · 半精度 flat"},
+            {"value": "bf16", "label": "bf16 · BF16 flat"},
+            {"value": "fwht4", "label": "fwht4 · FWHT 旋转 4-bit"},
+            {"value": "fwht3", "label": "fwht3 · FWHT 旋转 3-bit"},
+            {"value": "fwht2", "label": "fwht2 · FWHT 旋转 2-bit"},
+            {"value": "fp8", "label": "fp8 · E4M3（gfx1201）"},
+            {"value": "asym3", "label": "asym3 · Givens 3-bit（已弃用，建议 fwht3）"},
+            {"value": "asym4", "label": "asym4 · Givens 4-bit（已弃用）"},
+            {"value": "asym2", "label": "asym2 · Givens 2-bit（已弃用）"},
+        ],
+        note="KVMem 多精度 KV（P4.4，ninfer 对齐）：q8 默认位级不变；f16/bf16/fwht*/asym* 经 per-tier layout identity + 驻留掩码接入，超预算 spill/restore 字节 opaque、mean-K F32 无关精度。fp8 仅 gfx1201；asym3/fwht3 需 head_dim 256。各精度 head_dim/硬件约束引擎 fail-closed",
     ),
     _hipfire_engine_spec(
         "kvmem_budget", "KV 预算（tokens）", "kvmem", "integer",
