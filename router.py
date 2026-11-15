@@ -1139,6 +1139,8 @@ KVMEM_HIPFIRE_GROUP_LABELS = {
     "basic": "基础",
     "spec": "投机",
     "kvmem": "KVMem",
+    "policy": "策略",
+    "strategy": "召回策略",
     "spill": "Spill",
     "advanced": "高级",
 }
@@ -1160,6 +1162,7 @@ def _hipfire_engine_spec(
     step: float | int | None = None,
     choices: list[dict[str, Any]] | None = None,
     note: str | None = None,
+    exclusive_min: bool = False,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "key": key,
@@ -1169,7 +1172,7 @@ def _hipfire_engine_spec(
         "type": kind,
         "default": default,
         "target": target,
-        "owner": "kvmem" if group == "kvmem" else "engine",
+        "owner": "kvmem" if group in ("kvmem", "policy", "strategy") else "engine",
     }
     if env:
         spec["env"] = env
@@ -1184,6 +1187,8 @@ def _hipfire_engine_spec(
         spec["max"] = high
     if step is not None:
         spec["step"] = step
+    if exclusive_min:
+        spec["exclusive_min"] = True
     if choices:
         spec["choices"] = choices
     if note:
@@ -1262,6 +1267,117 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
         env="HIPFIRE_KVMEM_HOST_BYTES",
         default=17179869184, low=1, step=1073741824,
         note="KVMem 主机 RAM 层容量（磁盘层见 Spill 额度）；留空用引擎默认 16 GiB",
+    ),
+    # -- policy (opt-in residency selection; defaults reproduce历史行为) -------
+    _hipfire_engine_spec(
+        "select_method", "驻留选择策略", "policy", "enum",
+        env="HIPFIRE_KVMEM_SELECT_METHOD",
+        default="retrieval",
+        choices=[
+            {"value": "retrieval", "label": "retrieval · mean-K 查询打分（默认）"},
+            {"value": "recency", "label": "recency · 仅 sink+recent+新近"},
+        ],
+        note="retrieval 用 tapped mean-K 查询给驻留页打分；recency 不喂学习信号，pick_topk 保留 sink+recent 后按新近填充。h2o 需注意力热度 tap（后续补丁），当前引擎拒绝。留空=retrieval",
+    ),
+    _hipfire_engine_spec(
+        "lrfu", "历史加权 LRFU", "policy", "boolean",
+        env="HIPFIRE_KVMEM_LRFU",
+        default=False,
+        note="开启后核心 selection_score 用衰减重 hitter 历史替代原始检索分；须 select_method=retrieval（核心约束）。留空=关闭",
+    ),
+    _hipfire_engine_spec(
+        "lrfu_lambda", "LRFU 衰减 λ", "policy", "number",
+        env="HIPFIRE_KVMEM_LRFU_LAMBDA",
+        default=0.5, low=0.0, high=1.0, step=0.01,
+        note="LRFU 衰减系数 [0,1]，越大越重近因；留空=0.5（仅 lrfu 开启时生效）",
+    ),
+    _hipfire_engine_spec(
+        "lrfu_top", "LRFU 命中比例", "policy", "number",
+        env="HIPFIRE_KVMEM_LRFU_TOP",
+        default=0.9, low=0.0, high=1.0, step=0.01, exclusive_min=True,
+        note="LRFU 命中比例 (0,1]；留空=0.9（仅 lrfu 开启时生效）",
+    ),
+    _hipfire_engine_spec(
+        "gpu_high_watermark", "GPU 高水位", "policy", "number",
+        env="HIPFIRE_KVMEM_GPU_HIGH_WATERMARK",
+        default=0.95, low=0.0, high=1.0, step=0.01, exclusive_min=True,
+        note="驻留页/预算 的高水位 (0,1]，超过即触发 spill。留空=关闭水位（用预算阈值）；设任一水位即启用迟滞带，另一未设用默认（高 0.95/低 0.85）",
+    ),
+    _hipfire_engine_spec(
+        "gpu_low_watermark", "GPU 低水位", "policy", "number",
+        env="HIPFIRE_KVMEM_GPU_LOW_WATERMARK",
+        default=0.85, low=0.0, high=1.0, step=0.01, exclusive_min=True,
+        note="spill 后保留页/预算 的低水位 (0,1]，须 ≤ 高水位；把核心选择预算收窄到保留目标。留空=0.85（仅水位启用时）",
+    ),
+    _hipfire_engine_spec(
+        "query_span", "Query 跨度", "policy", "integer",
+        env="HIPFIRE_KVMEM_QUERY_SPAN",
+        default=1, low=1, high=512, step=1,
+        note="检索打分的近期 Q 行数 [1,512]。1=单行 mean-K 余弦（默认，位级不变）；>1 用每槽主机 Q 环累积近期 Q 行，按 page-softmax 逐行 softmax 质量给驻留页打分（FP16 舍入，scale 1/√d）。仅 select_method=retrieval 生效；显存零增长（主机环）。留空=1",
+    ),
+    # -- strategy (opt-in per-layer recall; default Legacy byte-neutral) -------
+    _hipfire_engine_spec(
+        "recall_strategy", "召回策略", "strategy", "enum",
+        env="HIPFIRE_KVMEM_RECALL_STRATEGY",
+        default="legacy",
+        choices=[
+            {"value": "legacy", "label": "legacy · 全局工作集（默认，位级不变）"},
+            {"value": "layerwise", "label": "layerwise · 逐层准入+压力召回"},
+        ],
+        note="layerwise 启用逐层 composite-slot 子系统：write-through 密封归档 + 每层当前 Q GPU 打分 + pressure 质量/曝光精炼 keep-set（ninfer 接入模式）。与全局策略旋钮互斥：select_method≠retrieval / lrfu / 水位 / query_span>1 在 layerwise 下显式报错（fail-closed，无静默回退）。留空=legacy",
+    ),
+    _hipfire_engine_spec(
+        "layerwise_mtp_history", "MTP 头历史策略", "strategy", "enum",
+        env="HIPFIRE_KVMEM_LAYERWISE_MTP_HISTORY",
+        default="first-layer",
+        choices=[
+            {"value": "first-layer", "label": "first-layer · 首层恢复视图（默认）"},
+            {"value": "upstream-global", "label": "upstream-global · 全局 Mean-K 探针"},
+        ],
+        note="layerwise+原生 MTP 的头历史选择策略。first-layer（ninfer 自动默认）复用 trunk 首层恢复视图绑定 head aux；upstream-global 用全局 Mean-K 归约探针（prefill-seed 复用 Q tap、carrier 复用捕获 Q，纯 host 选择，无 KV 突变/回滚）。仅 layerwise+MTP 生效；legacy/AR-only 不读（位级不变）。留空=first-layer",
+    ),
+    _hipfire_engine_spec(
+        "layerwise_activation_ram", "投影 Q RAM 额度（MiB）", "strategy", "integer",
+        env="HIPFIRE_KVMEM_LAYERWISE_ACTIVATION_RAM_MIB",
+        default=64, low=0, step=1,
+        note="layerwise 每层投影 Q 历史带（QueryProjectionTape）的 RAM 账户；峰值超出走磁盘层。仅 layerwise 创建账户，legacy 不读。留空=64（ninfer 种子）",
+    ),
+    _hipfire_engine_spec(
+        "layerwise_activation_disk", "投影 Q 磁盘额度（MiB）", "strategy", "integer",
+        env="HIPFIRE_KVMEM_LAYERWISE_ACTIVATION_DISK_MIB",
+        default=32, low=0, step=1,
+        note="layerwise 投影 Q 带超出 RAM 账户时的磁盘层额度（SpillFile，复用 Spill 目录）。0=禁磁盘层（超限 fail-closed）。仅 layerwise 生效，留空=32",
+    ),
+    _hipfire_engine_spec(
+        "layerwise_staging", "投影 Q 中转额度（MiB）", "strategy", "integer",
+        env="HIPFIRE_KVMEM_LAYERWISE_STAGING_MIB",
+        default=8, low=0, step=1,
+        note="layerwise 投影 Q D2H 读回的 pinned 中转预算（PinnedHostBuffer，append/read_rows）。仅 layerwise 生效，留空=8",
+    ),
+    _hipfire_engine_spec(
+        "layerwise_metadata", "元数据额度（MiB）", "strategy", "integer",
+        env="HIPFIRE_KVMEM_LAYERWISE_METADATA_MIB",
+        default=1024, low=0, step=1,
+        note="layerwise source/feedback 版本计数器 + 冻结索引信封（metadata_bytes 派生）。仅 layerwise 生效，留空=1024",
+    ),
+    _hipfire_engine_spec(
+        "layerwise_activation_metadata", "带描述符额度（MiB）", "strategy", "integer",
+        env="HIPFIRE_KVMEM_LAYERWISE_ACTIVATION_METADATA_MIB",
+        default=96, low=0, step=1,
+        note="layerwise tape 描述符/chunk-table 的有限准入账户（HostKvStorage+Reservation）。仅 layerwise 生效，留空=96",
+    ),
+    # -- prefix PIN (P4.3 KVMem-native cross-session sharing; default off) -----
+    _hipfire_engine_spec(
+        "prefix_pin", "前缀共享 PIN", "prefix", "boolean",
+        env="HIPFIRE_KVMEM_PREFIX_PIN",
+        default=False,
+        note="KVMem-native 跨会话前缀共享：prefill 页对齐边界冻结 immutable canonical 归档（host fork + DeltaNet checkpoint），共享密封 GPU 页 PIN 驻留（cache refs，选择跳过），新会话经全量 token provenance 校验后复用（跳过前缀 prefill）。radix 保持关闭；legacy/layerwise 均覆盖；生成行不共享；VL 跳过。关闭=位级不变（默认）",
+    ),
+    _hipfire_engine_spec(
+        "prefix_pin_bytes", "前缀快照额度（字节）", "prefix", "integer",
+        env="HIPFIRE_KVMEM_PREFIX_PIN_BYTES",
+        default=536870912, low=1, step=1073741824,
+        note="PREFIX_PIN 的 DeltaNet checkpoint 池上限（仅快照，无 radix 页）。留空=512 MiB；仅 prefix_pin 开启时生效",
     ),
     # -- spill ----------------------------------------------------------------
     _hipfire_engine_spec(
@@ -3193,6 +3309,7 @@ def normalize_kvmem_hipfire_engine(values: dict[str, Any] | None) -> dict[str, A
             value = _sampling_number(
                 key, raw, spec.get("min", 0), spec.get("max"),
                 integer=(kind == "integer"),
+                low_exclusive=bool(spec.get("exclusive_min")),
             )
         out[key] = value
     return out
