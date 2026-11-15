@@ -1398,6 +1398,12 @@ KVMEM_HIPFIRE_ENGINE_SPECS: list[dict[str, Any]] = [
         default=536870912, low=1, step=1073741824,
         note="PREFIX_PIN 的 DeltaNet checkpoint 池上限（仅快照，无 radix 页）。留空=512 MiB；仅 prefix_pin 开启时生效",
     ),
+    _hipfire_engine_spec(
+        "gen_reserve", "生成预留 R（tokens）", "prefix", "integer",
+        env="HIPFIRE_KVMEM_GEN_RESERVE",
+        default=1024, low=1, step=128,
+        note="layerwise 窗口容量 = 常驻预算 B + 生成预留 R（ninfer device_tokens 语义）；import 准入用它衡量 prompt 尾部 + 输出。仅 layerwise + prefix_pin 达到压力路径时生效；留空=1024",
+    ),
     # -- spill ----------------------------------------------------------------
     _hipfire_engine_spec(
         "spill_dir", "Spill 目录", "spill", "string",
